@@ -1329,6 +1329,29 @@ test('execution budget blocks when no progress or activation slot remains', asyn
   assert.equal(exhausted.snapshot().activationBudget.used, 1)
 })
 
+test('a persisted budget block resumes the same plan after plugin reload when progress remains', async () => {
+  const f = await fixture({ maxActivations: 3 })
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    const task = stored.plans[0].tasks[0]
+    task.status = 'blocked'
+    delete task.recovered
+    task.issue = { code: 'EXECUTION_BUDGET_EXHAUSTED', retryable: false, message: '旧版本达到模型预算' }
+    task.error = task.issue.message
+    delete task.continuation
+    task.supervision.lastProgressAt = task.supervision.startedAt + 1
+    task.supervision.metrics = { requests: 80, inputTokens: 1000, outputTokens: 40000, contextTokens: 1000 }
+    await writeFile(file, JSON.stringify(stored))
+  })
+  const result = await f.execute('delegation_run')
+  await waitFor(() => f.calls.length === 2 && f.snapshot().tasks[0].status === 'running')
+  assert.equal(result.plan.status, 'running')
+  assert.equal(f.snapshot().tasks[0].continuation.used, 1)
+  assert.equal(f.snapshot().tasks[0].attempts, 1)
+  assert.equal(f.snapshot().activationBudget.used, 2)
+})
+
 test('a report already in the real result pipeline gets a bounded confirmation window at the deadline', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
   const entered = Promise.withResolvers(), release = Promise.withResolvers()

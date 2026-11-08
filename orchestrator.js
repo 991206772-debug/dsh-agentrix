@@ -607,6 +607,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     remember(plan, 'task.budget_continuation', task.feedback, task, { continuation: clone(task.continuation) })
     return true
   }
+  function recoverBudgetBlocked(plan) {
+    return plan.tasks.filter(task => task.status === 'blocked' && task.issue?.code === 'EXECUTION_BUDGET_EXHAUSTED')
+      .filter(task => queueBudgetContinuation(plan, task, { issue: task.issue }))
+  }
   async function settle(plan, task, handle, result, error) {
     if (handle.settling) return
     handle.settling = true
@@ -1355,7 +1359,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     remember(plan, 'plan.created', '计划已建立，共 ' + plan.tasks.length + ' 个子任务')
     plans.set(parent.id, plan); await save(); return { plan: snapshot().find(plan => plan.sessionId === parent.id) }
   })
-  routeTool('delegation_run', '按依赖和全局并发上限执行当前计划。无依赖任务自动派单；前置任务须主控验收后才继续。若返回 dispatchWait，说明正在等待其他会话释放名额或写入冲突结束，等待即可，不要反复调用。失败不自动重试；历史无原因取消且仍有执行额度时沿用原计划恢复。', {}, [], async (_args, exec) => {
+  routeTool('delegation_run', '按依赖和全局并发上限执行当前计划。无依赖任务自动派单；前置任务须主控验收后才继续。若返回 dispatchWait，说明正在等待其他会话释放名额或写入冲突结束，等待即可，不要反复调用。失败不自动重试；历史无原因取消或旧预算阻塞且仍有执行额度时沿用原计划恢复。', {}, [], async (_args, exec) => {
     const { plan, parent } = ownPlan(exec)
     if (plan.cancelled) {
       const recoverable = recoverableTasks(plan, true)
@@ -1363,6 +1367,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       queuePlanRecovery(plan, recoverable, '上一轮计划被无原因取消；沿用原任务继续，先核对已有产物和失败原因，再完成本次任务。')
       await save()
     }
+    const budgetRecovered = recoverBudgetBlocked(plan)
+    if (budgetRecovered.length) await save()
     if (plan.tasks.some(task => task.recovered)) throw new Error('请先用 delegation_control stop 清理恢复前的子任务，再继续执行')
     if (activationBudget(plan, getConfig().maxActivations).remaining <= 0 && plan.tasks.some(task => task.status === 'queued')) {
       const message = pauseAtActivationLimit(plan); await save(); throw new Error(message)
