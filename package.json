@@ -28,7 +28,7 @@
   "description": "DSH Agentrix: native multi-agent planning, role-based execution and review, and evidence-based acceptance.",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node --check index.js && node --check orchestrator.js && node --check completion.js && node --check task-records.js && node --check client.js"
+    "check": "node --check index.js && node --check orchestrator.js && node --check supervision.js && node --check completion.js && node --check task-records.js && node --check client.js"
   },
   "exports": {
     ".": "./index.js",
@@ -40,6 +40,7 @@
   "files": [
     "index.js",
     "orchestrator.js",
+    "supervision.js",
     "completion.js",
     "task-records.js",
     "client.js",

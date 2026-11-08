@@ -25,7 +25,7 @@ export async function host() {
     tools: {
       guard(fn) { guard = fn; return () => {} },
       get: name => definitions.get(name) ?? (name === 'subagent' ? {} : undefined),
-      schemas: () => [{ name: 'subagent' }, ...[...definitions.keys()].map(name => ({ name }))],
+      schemas: () => ['subagent', 'read', 'grep', 'glob', 'pwsh'].map(name => ({ name })).concat([...definitions.keys()].map(name => ({ name }))),
       register(definition) { definitions.set(definition.name, definition); return () => definitions.delete(definition.name) },
     },
     get(name) { return { sessions, agents: { list: () => [], get: id => id === 'root' ? agent : undefined }, webServer: ctx.webServer,

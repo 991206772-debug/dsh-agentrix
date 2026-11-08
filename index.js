@@ -42,7 +42,7 @@ const DISCIPLINE = [
   '- 所有执行者固定使用用户配置的 worker 模型，独立审查固定使用 reviewer 模型（未指定审查模型时明确跟随主控）。执行模型未选则暂停，不静默继承；不根据模型名称或价格猜测强弱。执行者报告缺上下文或能力不足时，主控补方案或重新拆分，不让它反复猜测或自动升级模型。',
   '- 自动派单只用 delegation_plan/run；直接调用 subagent、subagent_fork、spawn_teammate 会绕过执行/审查角色的模型配置，因此主控不可走这些入口。',
   '- 调用 delegation_run 后独立任务按全局并发上限自动派单；依赖任务必须等前置任务验收。若状态返回 dispatchWait，表示正在等待其他会话释放名额或写入冲突结束，等待即可，不要反复调用 delegation_run，也不要绕过闸门直接修改。',
-  '- 插件在正式报告返回后通知主控，再调用 delegation_status 核对进度；等待现有任务，不轮询模型或新开代理。需要纠偏用 delegation_control；失败先查原因，不无依据重试。',
+  '- 插件在重复失败、阶段停滞、预算预警或正式报告返回时通知原主控。收到 delegation-supervision 后立即读取 delegation_status，核对证据和阶段结论，用 delegation_control(action:steer) 向原子代理给出具体纠正；无法继续则说明原因取消。监督每任务最多两次，不能靠重复 run、重载或新建代理刷新预算。等待用事件，不轮询模型，不代做执行者实现。',
   '- 主控可依据状态里的 route / reasons 判断是否应 direct、delegate 或 delegate_parallel；路由依据必须在任务卡中落地，不能只凭感觉开子 Agent。',
   '- 计划显示“已派发 / 上限 / 剩余”预算；达到上限或失败熔断后不要重复调用 delegation_run，先处理原因或新建计划。',
   '- 模型配置失效时，说明哪个模型不可用，提示用户在“DSH Agentrix”重新选择并保存；配置未更新前暂停派单，不重试，也不猜测磁盘或权限问题。',
@@ -926,6 +926,7 @@ export function apply(ctx) {
       storageError: orchestration.storageError,
       archiveWarning: orchestration.archiveWarningFor(selectedId),
       limits: orchestrationOptions(current),
+      supervisionPolicy: orchestration.supervisionPolicy,
       // No execution here, so this is the global view only — a status probe, not
       // the gate's own decision.
       canDelegate: (() => {

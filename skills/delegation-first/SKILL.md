@@ -18,7 +18,7 @@ description: "主 Agent 自动判断任务难度、拆分任务、选择子模�
 2. 调用 `delegation_plan` 提交结构化任务卡。字段和示例见 `references/task-card.md`。
 3. 主控使用对话框选择的高模型做规划与最终验收，先确定复杂需求的方案、接口与验收标准，再拆给执行者。`complexity: routine/complex` 和 `complexityReason` 只说明复杂度与审查需要。所有执行者固定使用 `models.worker`；独立审查固定使用 `models.reviewer`。执行模型未选则暂停，不继承主控；审查模型未选则明确跟随主控，并在审查启动时固定快照。主控自动派单只走 `delegation_plan/run`，不可走原生派单绕过角色配置。
 4. 调用 `delegation_run`。插件先检查执行模型；复杂任务还提前检查必需的审查模型，再按依赖、写入范围、并发与启动预算派单。默认每计划最多启动 8 次（首次、返工、独立审查都计入，可配置 1~32）；预算耗尽不反复 run。模型配置失效时说明执行或审查哪个角色有问题，提示重新选择并保存；不会偷偷换模型。任务尚未启动时不消耗执行次数，保存后可继续原计划。
-5. 执行者通过 `delegation_report` 提交报告，工具确认后自动结束，由插件通知原主控；不用 `send_message` 交成果，提交后不能继续修改。`NEEDS_CONTEXT/BLOCKED` 暂停派单，先处理原因；`DONE_WITH_CONCERNS` 要主控说明疑点如何处理。用 `delegation_status` 核对状态，不不断轮询或重复派单。
+5. 执行者在调查、实现或验证阶段用 `delegation_checkpoint` 记录结论、下一步和成功工具 callId；阶段记录待主控核实，不代表完成，也不延长时限。执行者通过 `delegation_report` 提交报告，工具确认后自动结束，由插件通知原主控；不用 `send_message` 交成果，提交后不能继续修改。`NEEDS_CONTEXT/BLOCKED` 暂停派单，先处理原因；`DONE_WITH_CONCERNS` 要主控说明疑点如何处理。用 `delegation_status` 核对状态，不不断轮询或重复派单。
 6. 对 `review` 状态任务调用 `delegation_verify`，主控亲自执行任务卡中的文件读取与命令。严格模式下也允许。
 7. 新建 complex 任务自动安排一个独立只读审查者，同时检查需求和质量，审查通过后主控才可验收。普通任务由主控实际核验，可按风险用 `delegation_audit` 请求独立审查。两种审查均用 reviewer 模型并计入同一并发与启动预算；失败后用 `delegation_audit({taskId,message})` 明确重试审查，不重跑实现。
    阅读实际结果，用 `delegation_review` 逐条引用证据验收；返工引用已有 `issueIds` 或提交 `issues`（criterion/severity/finding/真实验证 callId）。minor 不触发返工，复查只检查原问题和修复引入的回归。routine 返工后用 `resolutions` 引用新验证证据确认问题解决。测试通过不能替代视觉还原或实际场景证据。
@@ -27,6 +27,7 @@ description: "主 Agent 自动判断任务难度、拆分任务、选择子模�
 ## 责任边界
 
 - 计划执行中主控不重复改写子任务产物；主控可以读上下文、监督与评审。
+- 执行期间插件观察工具错误、阶段成果、模型调用与 Token 预算。重复错误、长时间没有有效阶段成果或接近截止时间时，会通知原主控；主控读取证据后用 `delegation_control(action:'steer')` 纠偏原子代理。每次执行最多自动纠偏两次；纠偏次数、阶段记录和预算不会因查询、重载或重复派单清零。
 - 子任务启动时固定模型；设置修改影响之后启动的任务。实际请求在发送前核对，错配会被阻止并暂停计划；不得自动换模型或新建 Agent 掩盖问题。
 - 执行者遇到未定设计、缺资料或能力不足，必须报告 NEEDS_CONTEXT/BLOCKED 交回主控。主控补方案或重新拆分，不让执行者猜测或自动升级模型。高低模型由用户选择，不根据名称猜性能或价格。
 - 有前置依赖的任务等前置任务验收后再启动。同一路径在待评审时仍被保留，避免验收期间又被改写。
@@ -35,5 +36,6 @@ description: "主 Agent 自动判断任务难度、拆分任务、选择子模�
 - 只报原任务内会影响正确性和达标的问题，达到标准后停止返工。
 - `stop` 只表示取消，必须提供原因；正常返回自动释放，不能用取消冒充完成。恢复的旧执行可用 `delegation_control({taskId,action:'stop',reason:'取消重载前未结束的旧执行'})` 清理，再明确决定重试。取消不覆盖已有报告、验证证据或真实失败原因。
 - 聊天、验收页和导出均读取 `plan.completion`。模型提前说完成不能改变状态；后续明确重试会使当前回执失效，历史回执保留。
+- 任务卡验证参数必须符合当前 DSH schema；原生 `read` 使用 `file_path`。派发前会预检必填字段，预检失败不会启动子 Agent。
 
 详细主控流程见 `references/orchestrator.md`；执行者报告格式见 `references/worker.md`。

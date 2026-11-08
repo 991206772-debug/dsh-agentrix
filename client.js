@@ -526,6 +526,32 @@ window.__ModuleLoader__.load({
     })
 
     const CONFIG_TABS = ['policy', 'limits', 'models', 'diagnostics']
+    Object.assign(zh, {
+      'supervision.title': '过程监督', 'supervision.waiting': '等待主控纠偏', 'supervision.count': '待主控纠偏 {count} 项',
+      'supervision.elapsed': '已执行 {minutes} 分钟', 'supervision.corrections': '主控纠偏 {used}/{limit}',
+      'supervision.budget': '模型调用 {requests}/{requestLimit} · 输出 {output}/{outputLimit} Token',
+      'supervision.context': '最近请求上下文 {tokens} Token', 'supervision.stage': '阶段结论（执行者提交，待核实）',
+      'supervision.nextStep': '执行者下一步', 'supervision.corrected': '最近主控纠正',
+      'supervision.next': '已通知原主控核对证据并纠正原子代理，已有产物和上下文保留。',
+      'supervision.investigation': '调查', 'supervision.implementation': '实现', 'supervision.verification': '验证',
+      'supervision.activity.model': '模型正在生成', 'supervision.activity.waiting_model_response': '等待模型响应',
+      'supervision.activity.waiting_model': '等待下一步模型请求', 'supervision.activity.waiting_tool': '模型响应已返回，准备执行工具',
+      'supervision.activity.tool': '工具正在执行', 'supervision.reporting': '正在提交报告',
+      'supervision.wrapUp': '已提醒收尾：提交已有结果及未完成项',
+    })
+    Object.assign(en, {
+      'supervision.title': 'Execution supervision', 'supervision.waiting': 'Awaiting coordinator correction', 'supervision.count': '{count} awaiting correction',
+      'supervision.elapsed': '{minutes} minutes elapsed', 'supervision.corrections': 'Coordinator corrections {used}/{limit}',
+      'supervision.budget': 'Model calls {requests}/{requestLimit} · Output {output}/{outputLimit} tokens',
+      'supervision.context': 'Latest request context: {tokens} tokens', 'supervision.stage': 'Stage report (worker supplied, unverified)',
+      'supervision.nextStep': 'Worker next step', 'supervision.corrected': 'Latest coordinator correction',
+      'supervision.next': 'The original coordinator has been notified to inspect evidence and correct the original worker. Existing work and context are retained.',
+      'supervision.investigation': 'Investigation', 'supervision.implementation': 'Implementation', 'supervision.verification': 'Verification',
+      'supervision.activity.model': 'Model generating', 'supervision.activity.waiting_model_response': 'Waiting for model response',
+      'supervision.activity.waiting_model': 'Waiting for the next model request', 'supervision.activity.waiting_tool': 'Response received; preparing tools',
+      'supervision.activity.tool': 'Tool running', 'supervision.reporting': 'Submitting report',
+      'supervision.wrapUp': 'Wrap-up requested: report existing results and unfinished work',
+    })
     const CONFIG_NUMBERS = ['threshold', 'maxParallel', 'maxAttempts', 'maxActivations', 'taskTimeoutMinutes']
     // Compatibility only; current hosts provide the authoritative defaults and ranges.
     const LEGACY_RANGES = { threshold: { min: 0, max: 20 }, maxParallel: { min: 1, max: 4 }, maxAttempts: { min: 1, max: 3 }, maxActivations: { min: 1, max: 32 }, taskTimeoutMinutes: { min: 1, max: 60 } }
@@ -896,7 +922,8 @@ window.__ModuleLoader__.load({
         .concat([{ count: tasks.filter(task => ['starting', 'running'].includes(task.audit?.status)).length, key: 'auditCount' },
           { count: tasks.filter(task => task.audit?.status === 'queued').length, key: 'auditQueuedCount' }])
         .filter(item => item.count > 0).map(item => fill(t('chat.' + item.key), { count: item.count }))
-      const summary = [baseSummary, ...counts].join(' · ')
+      const supervised = tasks.flatMap(task => [task, ...(task.audit ? [task.audit] : [])]).filter(task => ['starting', 'running'].includes(task.status) && task.supervision?.pending)
+      const summary = [baseSummary, ...counts, ...(supervised.length ? [fill(t('supervision.count'), { count: supervised.length })] : [])].join(' · ')
       const canOpen = typeof openView === 'function'
       const hint = canOpen ? t('view.details') : t('chat.navigationUnavailable')
       const label = `${summary} · ${hint}`
@@ -916,7 +943,11 @@ window.__ModuleLoader__.load({
       const stopped = plan.status === 'cancelled' || plan.cancelled || unfinished.length > 0 && unfinished.every(task => task.status === 'cancelled')
       const affected = (plan.tasks ?? []).map(task => ['failed', 'blocked'].includes(task.audit?.status) ? { ...task.audit, title: task.audit.title || task.title } : task).filter(task => stopped
         ? task.status !== 'accepted' : ['failed', 'blocked', 'cancelled'].includes(task.status))
-      if (!affected.length && !['failed', 'blocked'].includes(plan.status)) return null
+      if (!affected.length && !['failed', 'blocked'].includes(plan.status)) {
+        const pending = (plan.tasks ?? []).flatMap(task => [task, ...(task.audit ? [task.audit] : [])])
+          .filter(task => ['starting', 'running'].includes(task.status) && task.supervision?.pending)
+        return pending.length ? { kind: 'supervision', primary: pending[0], tasks: pending, affected: pending.length } : null
+      }
       const primary = affected.find(task => task.status === 'failed')
         ?? affected.find(task => task.issue?.message) ?? affected.find(task => task.recovered) ?? affected[0]
       return { kind: stopped ? 'stopped' : primary?.status === 'failed' ? 'failed' : 'blocked',
@@ -928,6 +959,8 @@ window.__ModuleLoader__.load({
 .ddf-chat-notice[data-kind="stopped"] { border-left-color:var(--dsw-alias-border-l2,#c9cdd4); }
 .ddf-chat-notice-heading { color:var(--dsw-alias-state-error-primary,#f54a45); }
 .ddf-chat-notice[data-kind="stopped"] .ddf-chat-notice-heading { color:var(--dsw-alias-label-secondary,#646a73); }
+.ddf-chat-notice[data-kind="supervision"] { border-left-color:var(--dsw-alias-state-warning-primary,#b7791f); }
+.ddf-chat-notice[data-kind="supervision"] .ddf-chat-notice-heading { color:var(--dsw-alias-state-warning-primary,#b7791f); }
 .ddf-chat-notice p { margin:5px 0; white-space:pre-wrap; }
 .ddf-chat-notice-hint { color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-chat-notice-action { display:inline-block; max-width:100%; margin:4px 0 0; padding:0; border:0; background:transparent; color:var(--dsw-alias-brand-primary,#4f6ef7); font:inherit; text-align:left; overflow-wrap:anywhere; cursor:pointer; }
@@ -976,15 +1009,15 @@ window.__ModuleLoader__.load({
       const problem = chatProblem(plan)
       if (!problem) return null
       const task = problem.primary, tasks = plan.tasks ?? []
-      const recorded = task?.stop?.reason || task?.issue?.message || task?.error
+      const recorded = problem.kind === 'supervision' ? task.supervision.pending.reason : task?.stop?.reason || task?.issue?.message || task?.error
       const reason = typeof recorded === 'string' && recorded.trim() && !/^(error|子任务停止原因：error)$/i.test(recorded.trim())
         ? recorded.trim().split('\n')[0].slice(0, 400)
         : t(task?.recovered ? 'chat.recoveredReason' : 'chat.unknownReason')
-      const next = problem.kind === 'stopped' ? t('chat.stoppedNext')
+      const next = problem.kind === 'supervision' ? t('supervision.next') : problem.kind === 'stopped' ? t('chat.stoppedNext')
         : task?.issue?.action || t(task?.recovered ? 'view.recoveredNext' : 'view.failedNext')
       const done = tasks.filter(task => task.status === 'accepted').length
-      const heading = fill(t(problem.kind === 'stopped' ? 'chat.acceptedSummary' : 'chat.planSummary'), {
-        status: problem.kind === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${problem.kind}`), done, total: tasks.length })
+      const heading = fill(t(problem.kind === 'stopped' || problem.kind === 'supervision' ? 'chat.acceptedSummary' : 'chat.planSummary'), {
+        status: problem.kind === 'supervision' ? t('supervision.waiting') : problem.kind === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${problem.kind}`), done, total: tasks.length })
       const canOpen = typeof openView === 'function'
       return h('section', { className: 'ddf-chat-notice', 'data-kind': problem.kind,
         role: problem.kind === 'stopped' ? 'status' : 'alert', 'aria-label': heading },
@@ -1331,6 +1364,25 @@ window.__ModuleLoader__.load({
     }
 
     /** Full acceptance evidence stays available in the collapsed task record. */
+    function SupervisionDetails({ t, task }) {
+      const state = task?.supervision
+      if (!state) return null
+      const live = ['starting', 'running'].includes(task.status)
+      const minutes = Math.max(0, Math.floor(((task.finishedAt ?? Date.now()) - state.startedAt) / 60000))
+      const line = (...children) => h('p', { className: 'ddf-board-task-line' }, ...children)
+      const activity = live && task.execution ? t('supervision.reporting') : live && state.activity ? t('supervision.activity.' + state.activity.kind) : ''
+      return h('div', { className: 'ddf-supervision', role: 'group', 'aria-label': t('supervision.title') },
+        line(fill(t('supervision.elapsed'), { minutes }), activity ? ' · ' + activity + (state.activity?.tool ? ' · ' + state.activity.tool : '') : '',
+          ' · ' + fill(t('supervision.corrections'), { used: state.used, limit: state.limit })),
+        state.metrics && state.limits ? line(fill(t('supervision.budget'), { requests: state.metrics.requests, requestLimit: state.limits.requests,
+          output: state.metrics.outputTokens, outputLimit: state.limits.outputTokens }), state.metrics.contextTokens ? ' · ' + fill(t('supervision.context'), { tokens: state.metrics.contextTokens }) : '') : null,
+        state.pending ? line(h('strong', null, t(live ? 'supervision.waiting' : 'supervision.title') + '：'), state.pending.reason) : null,
+        state.wrapUpRequestedAt ? line(t('supervision.wrapUp')) : null,
+        state.checkpoint ? line(h('strong', null, t('supervision.stage') + ' · ' + t('supervision.' + state.checkpoint.phase) + '：'), state.checkpoint.summary,
+          ' · ' + t('supervision.nextStep') + '：' + state.checkpoint.nextStep) : null,
+        state.lastCorrection ? line(h('strong', null, t('supervision.corrected') + '：'), state.lastCorrection.message) : null)
+    }
+
     function TaskDetails({ t, task, compact = false }) {
       const route = task.modelRoute
       const selected = route?.resolved ?? route?.requested
@@ -1349,6 +1401,7 @@ window.__ModuleLoader__.load({
           h('p', { className: 'ddf-hint' }, t('plans.modelSource') + '：' + (route
             ? t(route.source === 'configured' ? 'plans.modelSourceConfigured' : 'plans.modelSourceInherited') : t('plans.modelUnknown'))),
           mismatch ? h('p', { className: 'ddf-error' }, task.error || t('plans.modelMismatch')) : null,
+          h(SupervisionDetails, { t, task }),
           task.execution ? h('p', { className: 'ddf-hint' }, t('execution.' + task.execution.status) + '：' + task.execution.summary) : null,
           task.stop ? h('div', null,
             h('p', null, t('completion.reason') + '：' + task.stop.reason),
@@ -1612,6 +1665,7 @@ window.__ModuleLoader__.load({
               affected ? h('span', { className: 'ddf-board-task-tag' }, t('view.boardAffected')) : null)),
           h('span', { className: 'ddf-board-task-status' }, t('status.' + status))),
         h('p', { className: 'ddf-board-task-line' }, h('strong', null, t('view.boardActivity') + '：'), activity),
+        h(SupervisionDetails, { t, task: ['starting', 'running'].includes(task.audit?.status) ? task.audit : task }),
         reason ? h('p', { className: 'ddf-board-task-line', 'data-kind': status === 'cancelled' || affected ? undefined : 'error' }, h('strong', null, t('view.boardReason') + '：'), reason) : null,
         next ? h('p', { className: 'ddf-board-task-line', 'data-kind': 'next' }, h('strong', null, t('view.boardNext') + '：'), next) : null,
         task.audit ? h('p', { className: 'ddf-board-task-line' }, h('strong', null, t('audit.title') + '：'),

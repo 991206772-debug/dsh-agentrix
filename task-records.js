@@ -51,6 +51,17 @@ export function taskSummary(plan) {
       '', '### 声明的交付物', '', list(task.outputs),
       '', '### 可修改路径', '', list(task.writes),
       '', '### 验收标准', '', list(task.criteria))
+    if (task.supervision) {
+      const state = task.supervision, metrics = state.metrics, limits = state.limits
+      lines.push('', '### 过程监督', '', `- 主控纠偏：${state.used}/${state.limit}`,
+        '- 本次截止时间：' + time(state.deadlineAt),
+        ...(metrics && limits ? [`- 模型调用：${metrics.requests}/${limits.requests}；输出 Token：${metrics.outputTokens}/${limits.outputTokens}；最近上下文 Token：${metrics.contextTokens}`] : []),
+        ...(state.pending ? ['- 需要主控处理：' + state.pending.reason] : []),
+        ...(state.lastCorrection ? ['- 最近主控纠正：' + state.lastCorrection.message] : []),
+        ...(state.wrapUpRequestedAt ? ['- 已提醒原子代理收尾：' + time(state.wrapUpRequestedAt)] : []),
+        ...(state.checkpoint ? ['- 阶段结论（执行者提交，待核实）：' + state.checkpoint.summary,
+          '- 执行者下一步：' + state.checkpoint.nextStep, '- 阶段工具证据：' + state.checkpoint.evidence.join('、')] : []))
+    }
     if (task.error) lines.push('', '### 阻塞或失败原因', '', task.error)
     if (task.stop) lines.push('', '### 取消记录', '', '- 原因：' + task.stop.reason,
       '- 取消来源：' + ({ coordinator: '主控', host: '用户或宿主' }[task.stop.source] || task.stop.source),

@@ -1007,6 +1007,33 @@ test('the latest assistant action shows multi-task progress and updates to final
   } finally { action.close(); f.close() }
 })
 
+test('running supervision is visible in chat and task details with evidence, elapsed time and separate budgets', async () => {
+  const task = { id: 'a', title: '修复工具参数', status: 'running', criteria: [], checks: [],
+    supervision: { used: 1, limit: 2, startedAt: Date.now() - 720000, deadlineAt: Date.now() + 600000,
+      pending: { code: 'REPEATED_TOOL_ERROR', reason: 'input 必须传对象，连续三次参数错误。' },
+      activity: { kind: 'model' }, metrics: { requests: 12, outputTokens: 1200, contextTokens: 24000 },
+      limits: { requests: 80, outputTokens: 40000 },
+      checkpoint: { phase: 'investigation', summary: '已确认真实参数 schema。', nextStep: '按已确认接口实现。', verified: false },
+      lastCorrection: { message: '先使用正确的对象参数。' } } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true, sessions: [],
+    plans: [{ protocolVersion: 2, sessionId: 'session-current', goal: '验证过程监督', status: 'running', tasks: [task] }] }) }) })
+  const view = f.mountView('session-current'), action = f.mountAction('session-current'), notice = f.mountNotice('session-current')
+  try {
+    await view.flush(); await action.flush(); await notice.flush()
+    assert.match(view.text(), /已执行.*12.*分钟/)
+    assert.match(view.text(), /模型正在生成/)
+    assert.match(view.text(), /模型调用.*12\/80/)
+    assert.match(view.text(), /1200\/40000/)
+    assert.match(view.text(), /执行者提交，待核实/)
+    assert.match(view.text(), /按已确认接口实现/)
+    assert.match(view.text(), /先使用正确的对象参数/)
+    assert.match(action.text(), /待主控纠偏.*1/)
+    assert.match(notice.text(), /input 必须传对象/)
+    assert.ok(notice.nodes('section').some(node => node.props['data-kind'] === 'supervision'))
+    assert.doesNotMatch(notice.text(), /执行失败|已完成/)
+  } finally { view.close(); action.close(); notice.close(); f.close() }
+})
+
 test('the chat action owns its compact styles without mounting a settings or acceptance page', async () => {
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true,
     json: async () => ({ ok: true, sessionId: 'session-current', plans: [],

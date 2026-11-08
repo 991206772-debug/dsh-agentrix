@@ -11,6 +11,7 @@
 | `delegation_plan` | 提交目标、任务卡、依赖、修改路径、任务复杂度、标准和验证步骤 |
 | `delegation_run` | 开始调度，无依赖任务自动派出 |
 | `delegation_status` | 查询当前计划和任务结果 |
+| `delegation_checkpoint` | 执行者记录调查、实现或验证阶段的结论、下一步和成功工具证据；不代表完成或验收 |
 | `delegation_control` | `steer` 纠偏、`stop` 取消且必须提供原因、`retry` 有依据地重试；正常返回无需 stop |
 | `delegation_verify` | 用 DSH 工具管线执行指定验证，返回实际证据编号 |
 | `delegation_report` | 当前执行者或审查者提交身份绑定的完整报告，工具确认后自动结束，主控不能代报 |
@@ -41,14 +42,14 @@
     "complexityReason": "按已有实现补充确定的失败测试，无需重新设计",
     "criteria": ["覆盖密码错误和账号锁定", "测试全部通过"],
     "checks": [
-      {"tool": "read", "arguments": {"path": "tests/login.test.js"}},
+      {"tool": "read", "arguments": {"file_path": "tests/login.test.js"}},
       {"tool": "pwsh", "arguments": {"description": "Run login failure tests", "command": "node --test tests/login.test.js"}}
     ]
   }]
 }
 ```
 
-验证步骤支持 `read`、`grep`、`glob`、`pwsh`、`bash`，参数遵守当前 DSH 工具定义。只读任务的 `writes` 用空数组。不能用后台 shell 任务作为已通过的验证。
+验证步骤支持 `read`、`grep`、`glob`、`pwsh`、`bash`，参数遵守当前 DSH 工具定义；例如原生 `read` 使用 `file_path`，不能把旧示例中的 `path` 当成当前参数。计划派发前会读取当前工具 schema，缺少必填字段时不会启动子 Agent。只读任务的 `writes` 用空数组。不能用后台 shell 任务作为已通过的验证。
 
 任务返回后，主 Agent 对每个验证步骤调用：
 
@@ -80,6 +81,14 @@ delegation_verify({taskId: 'login-tests', checkIndex: 1})
 最后一次实际验收成功后，插件生成 `plan.completion` 并结束主控回合，不另加完成工具或要求模型写总结。回执包含结果、验收数量、交付物、真实证据及未完成原因，聊天、验收页和 Markdown 共用。全部验收才显示“已完成”；测试有结果但未验收仍是未完成。全部剩余任务取消显示“已停止”，部分通过其余取消显示“部分完成，其余已停止”。明确重试会使当前回执失效，历史回执保留。
 
 宿主可能先显示模型文字再触发结束检查，无法保证撤回已经显示的错误句子。完成标签与最终交付结论以程序回执为准，不匹配模型措辞判断成功。
+
+### 执行中监督、预算和时限
+
+执行者运行期间，插件记录最近工具、成功证据、阶段记录、模型调用次数、输出 Token、最近请求上下文和截止时间。调查、实现或验证阶段取得可引用的成功结果后，执行者调用 delegation_checkpoint，提交阶段、结论、下一步和成功工具 callId。阶段记录只表示执行者当前结论，主控仍需核实。
+
+相同工具错误连续出现、长时间没有文件修改或验证结果、上下文接近上限、模型调用或输出接近预算时，插件会唤醒原主控。主控读取 delegation_status 后，使用 delegation_control 的 steer 向原子代理纠偏；不重复启动，不把补流程次数当作监督次数。每次执行最多自动纠偏两次，达到上限后保留证据并阻塞任务。
+
+默认监督预算为每次执行最多 80 次模型调用、40000 输出 Token、单次最多 8192 输出 Token；累计 60 次调用或 32000 输出 Token 会先提醒，单次上下文达到 100000 Token 会提醒缩小范围。单任务总时限仍是硬上限，默认 15 分钟；接近截止时间会先要求原子代理收尾并提交已有结果，报告正在实际结果管线确认时会保留一个短暂确认窗口，超过后才释放并记为超时。读取活动本身不会无限延长总时限。
 
 ## 状态与资源限制
 
