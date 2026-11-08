@@ -523,6 +523,25 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       remember(plan, 'task.blocked', queued.error, queued)
     }
   }
+  function recoverableTasks(plan, includeLegacyCancelled = false) {
+    const resumableCancellation = !Object.hasOwn(plan, 'cancelledBy') || plan.cancelledBy === 'implicit'
+    return plan.tasks.filter(task => {
+      const failed = ['failed', 'blocked'].includes(task.status)
+      const legacyCancelled = includeLegacyCancelled && task.status === 'cancelled'
+        && resumableCancellation && task.stop?.reason === '主控明确取消整个计划'
+      return (failed || legacyCancelled) && !task.recovered && task.attempts < getConfig().maxAttempts
+    })
+  }
+  function queuePlanRecovery(plan, tasks, message) {
+    invalidateCompletion(plan)
+    plan.cancelled = false; plan.cancelledBy = null; plan.wakeSuppressed = false; plan.autoDispatch = true; plan.dispatchWait = null
+    for (const task of tasks) {
+      task.feedback = message
+      task.status = 'queued'; task.error = null; task.issue = null; delete task.stop
+      remember(plan, 'task.auto_recovery_queued', message, task)
+    }
+    remember(plan, 'plan.auto_recovery', `沿用原计划自动恢复 ${tasks.length} 个任务`)
+  }
   function pauseAtActivationLimit(plan) {
     const budget = activationBudget(plan, getConfig().maxActivations)
     const message = `计划派发预算已用尽（${budget.used}/${budget.limit} 次）；为避免失败后无限开启子 Agent，请建立新计划或先处理已有任务`
@@ -850,7 +869,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const reason = aborted ? '宿主中断当前执行，尚未完成验收' : '主控执行失败：' + messageOf(event.data.reason.error)
       parentPlan.wakeSuppressed = true; parentPlan.autoDispatch = false
       invalidateCompletion(parentPlan)
-      if (aborted) parentPlan.cancelled = true
+      if (aborted) { parentPlan.cancelled = true; parentPlan.cancelledBy = 'host' }
       for (const task of targetsOf(parentPlan)) if (task.status !== 'accepted' && task.status !== 'completed' && (aborted || ['queued', ...LIVE].includes(task.status))) {
         if (aborted) task.stop = { reason, source: 'host', at: Date.now(), previousStatus: task.status }
         else {
@@ -1303,13 +1322,18 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       ...(routing ? { routing: clone(routing), routingWarnings: routeWarnings(routing, validated.tasks) } : {}),
       activationBudget: { limit: getConfig().maxActivations, used: 0 },
       ...(typeof sessionTitle === 'string' ? { sessionTitle } : {}), ...(cwd ? { cwd } : {}), sessionId: parent.id,
-      createdAt: Date.now(), updatedAt: Date.now(), autoDispatch: false, cancelled: false, dispatchWait: null }
+      createdAt: Date.now(), updatedAt: Date.now(), autoDispatch: false, cancelled: false, cancelledBy: null, dispatchWait: null }
     remember(plan, 'plan.created', '计划已建立，共 ' + plan.tasks.length + ' 个子任务')
     plans.set(parent.id, plan); await save(); return { plan: snapshot().find(plan => plan.sessionId === parent.id) }
   })
-  routeTool('delegation_run', '按依赖和全局并发上限执行当前计划。无依赖任务自动派单；前置任务须主控验收后才继续。若返回 dispatchWait，说明正在等待其他会话释放名额或写入冲突结束，等待即可，不要反复调用。失败不自动重试。', {}, [], async (_args, exec) => {
+  routeTool('delegation_run', '按依赖和全局并发上限执行当前计划。无依赖任务自动派单；前置任务须主控验收后才继续。若返回 dispatchWait，说明正在等待其他会话释放名额或写入冲突结束，等待即可，不要反复调用。失败不自动重试；历史无原因取消且仍有执行额度时沿用原计划恢复。', {}, [], async (_args, exec) => {
     const { plan, parent } = ownPlan(exec)
-    if (plan.cancelled) throw new Error('计划已取消，请创建新计划')
+    if (plan.cancelled) {
+      const recoverable = recoverableTasks(plan, true)
+      if (!recoverable.length) throw new Error('计划已取消，请提高 maxAttempts 后明确 retry，或创建新计划')
+      queuePlanRecovery(plan, recoverable, '上一轮计划被无原因取消；沿用原任务继续，先核对已有产物和失败原因，再完成本次任务。')
+      await save()
+    }
     if (plan.tasks.some(task => task.recovered)) throw new Error('请先用 delegation_control stop 清理恢复前的子任务，再继续执行')
     if (activationBudget(plan, getConfig().maxActivations).remaining <= 0 && plan.tasks.some(task => task.status === 'queued')) {
       const message = pauseAtActivationLimit(plan); await save(); throw new Error(message)
@@ -1363,16 +1387,35 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   routeTool('delegation_control', '监督单个子任务：steer 发送纠偏消息；stop 仅表示取消，须提供 reason，不能用来成功收尾；retry 在已处理失败原因后重试。返回的子任务自动释放，无需 stop。', {
     taskId: string, action: { type: 'string', enum: ['steer', 'stop', 'retry'] }, message: string, reason: string,
   }, ['taskId', 'action'], control)
-  routeTool('delegation_cancel', '取消整个计划，停止并清理其活动子任务。保留已有记录供核对。', {}, [], async (_args, exec) => {
-    const { plan } = ownPlan(exec)
+  routeTool('delegation_cancel', '取消整个计划，停止并清理其活动子任务。明确用户取消时传 reason；失败或超时后无原因调用会沿用原计划自动恢复可重试任务，不会把计划误标为已停止。', { reason: string }, [], async (args, exec) => {
+    const { plan, parent } = ownPlan(exec)
     if (planStatus(plan) === 'accepted') return { status: 'accepted', completion: plan.completion ?? null }
+    const hasLive = targetsOf(plan).some(task => LIVE.includes(task.status))
+    const recoverable = !args.reason && !hasLive && plan.tasks.filter(task => ['failed', 'blocked'].includes(task.status)
+      && !task.recovered && task.attempts < getConfig().maxAttempts)
+    if (recoverable.length) {
+      queuePlanRecovery(plan, recoverable, '上一轮执行失败或超时；沿用原计划继续，先核对已有产物和失败原因，再完成本次任务。')
+      remember(plan, 'plan.auto_recovery', `无原因取消未终止计划，自动恢复 ${recoverable.length} 个可重试任务`)
+      await save(); const failure = await pump(); if (failure) throw failure
+      if (service('agents')?.get(parent.id) === parent) parent.inject?.(runtimeMessage(plan,
+        `系统已拦截无原因的整计划取消，沿用原计划自动恢复：${recoverable.map(task => task.id).join('、')}。请读取 delegation_status，继续监督并完成验证验收；若用户确实要取消，必须再次提供明确 reason。`, 'delegation-recovery'))
+      await save()
+      return { status: 'recovering', taskIds: recoverable.map(task => task.id), completion: null }
+    }
+    if (!args.reason && !hasLive && plan.tasks.some(task => ['failed', 'blocked'].includes(task.status))) {
+      const limit = getConfig().maxAttempts
+      const message = `计划未取消：失败任务已达到每任务执行次数上限（${limit}）。请提高 maxAttempts 后明确 retry，或提供 reason 取消。`
+      remember(plan, 'plan.auto_recovery_blocked', message)
+      await save()
+      return { status: 'blocked', completion: plan.completion ?? finishPlan(plan, message) }
+    }
     invalidateCompletion(plan)
-    plan.cancelled = true; plan.autoDispatch = false; plan.wakeSuppressed = true
+    plan.cancelled = true; plan.cancelledBy = args.reason ? 'explicit' : 'implicit'; plan.autoDispatch = false; plan.wakeSuppressed = true
     cancellingPlans.add(plan)
     try { for (const task of plan.tasks) if (task.status !== 'accepted') {
       await control({ taskId: task.id, action: 'stop', reason: '主控明确取消整个计划' }, exec)
     } } finally { cancellingPlans.delete(plan) }
-    remember(plan, 'plan.cancelled', '主 Agent 已停止计划，历史记录保留')
+    remember(plan, 'plan.cancelled', args.reason ? '主 Agent 已停止计划：' + args.reason : '主 Agent 已停止计划，历史记录保留')
     finishPlan(plan)
     await save(); return { status: 'cancelled', completion: plan.completion ?? null }
   })
