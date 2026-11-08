@@ -1415,6 +1415,11 @@ window.__ModuleLoader__.load({
     }
 
     const DASHBOARD_STYLES = `
+/* Use the same full-height surface as Trajectory. Like Context, hide only
+   this occurrence's ordinary composer; pending user interactions stay visible. */
+[data-conversation-scroll]:has(> [data-slot="conversation.session"] [data-ddf-acceptance]) > [data-composer-seat]:not(:has([data-approval-key],[data-question-key],[data-plan-review-key])) { display:none; }
+[data-conversation-scroll]:has(> [data-slot="conversation.session"] [data-ddf-acceptance]) ~ [data-width-handle] { display:none; }
+[data-conversation-scroll]:has(> [data-slot="conversation.session"] [data-ddf-acceptance]):has(> [data-composer-seat] :is([data-approval-key],[data-question-key],[data-plan-review-key])) [data-ddf-acceptance] .ddf-board { padding-bottom:calc(40px + var(--dsh-composer-height,200px)); }
 .ddf-board-root { display:flex; flex-direction:column; flex:1 1 auto; width:100%; height:100%; min-width:0; min-height:0; overflow:auto; background:var(--dsw-alias-bg-layer-2,#f5f6f7); color:var(--dsw-alias-label-primary,#1f2329); font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif; }
 .ddf-board-root *,.ddf-board-root *::before,.ddf-board-root *::after { box-sizing:border-box; }
 .ddf-board { flex:none; width:100%; max-width:1120px; min-width:0; margin:0 auto; padding:24px 24px 40px; display:flex; flex-direction:column; gap:16px; }
@@ -1647,7 +1652,7 @@ window.__ModuleLoader__.load({
         h('strong', { className: 'ddf-board-metric-value' }, value),
         note ? h('span', { className: 'ddf-board-metric-note' }, note) : null)
       const progress = tasks.length ? Math.round((accepted / tasks.length) * 100) : 0
-      return h('div', { className: 'ddf-board-root' },
+      return h('div', { className: 'ddf-board-root', 'data-ddf-acceptance': '', 'data-conversation-composer-overlay': '' },
         h('style', null, DASHBOARD_STYLES),
         h('main', { className: 'ddf-board', 'data-status': status },
           h('header', { className: 'ddf-board-header' },

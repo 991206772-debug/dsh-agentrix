@@ -5,6 +5,36 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('acceptance uses the native full-height conversation surface and hides only its ordinary composer', async () => {
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true,
+    json: async () => ({ ok: true, sessionId: 'session-current', plans: [], sessions: [] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    const root = view.nodes('div').find(node => node.props?.className === 'ddf-board-root')
+    assert.equal(root.props['data-conversation-composer-overlay'], '')
+    assert.equal(root.props['data-ddf-acceptance'], '')
+    const styles = view.nodes('style').map(node => node.children.join('')).join('\n')
+    assert.match(styles, /\[data-conversation-scroll\]:has\(> \[data-slot="conversation\.session"\] \[data-ddf-acceptance\]\)/)
+    assert.match(styles, /> \[data-composer-seat\]:not\(:has\(\[data-approval-key\],\[data-question-key\],\[data-plan-review-key\]\)\)/)
+    assert.match(styles, /padding-bottom:calc\(40px \+ var\(--dsh-composer-height,200px\)\)/)
+    assert.equal(view.nodes('textarea').length, 0)
+  } finally { view.close(); f.close() }
+})
+
+test('the conversation surface contract also covers loading and failed reads before settings mount', async () => {
+  const f = await sidebarFixture(undefined, { fetchState: async () => { throw new Error('HTTP 503') } })
+  const view = f.mountView('session-current')
+  try {
+    const marker = () => view.nodes('div').find(node => node.props?.['data-ddf-acceptance'] === '')
+    assert.ok(marker(), 'the loading view must already own the full-height surface')
+    await view.flush()
+    assert.ok(marker())
+    assert.match(view.text(), /暂时无法显示任务状态/)
+    assert.ok(view.button('重新读取'))
+  } finally { view.close(); f.close() }
+})
+
 test('Agentrix branding is consistent in plugin metadata, navigation and configuration', async () => {
   for (const language of ['zh', 'en']) {
     const metadata = JSON.parse(await readFile(new URL(`../locale/${language}.json`, import.meta.url), 'utf8'))
