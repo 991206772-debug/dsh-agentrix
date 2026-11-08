@@ -149,6 +149,25 @@ test('chat and acceptance read the same program receipt and never label cancella
   } finally { view.close(); f.close() }
 })
 
+test('a terminal timeout receipt explains why the flow cannot continue and does not say it is still waiting', async () => {
+  const plan = { protocolVersion: 2, sessionId: 'session-current', goal: '修复 DSH 插件注册', status: 'blocked',
+    tasks: [{ id: 'a', title: '修复 DSH 插件注册', status: 'failed', attempts: 1, error: '子任务超过 60 分钟，已请求停止', criteria: [], checks: [], outputs: [] }],
+    completion: { id: 'receipt-blocked-1', outcome: 'blocked', accepted: 0, total: 1, evidence: [], deliverables: [],
+      remaining: [{ taskId: 'a', title: '修复 DSH 插件注册', status: 'failed', reason: '子任务超过 60 分钟，已请求停止' }] } }
+  const body = { ok: true, sessionId: 'session-current', limits: { maxAttempts: 1 }, plans: [plan], sessions: [] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const notice = f.mountNotice('session-current'), action = f.mountAction('session-current'), view = f.mountView('session-current')
+  try {
+    await notice.flush(); await action.flush(); await view.flush()
+    assert.match(notice.text(), /达到每任务执行次数上限/)
+    assert.doesNotMatch(notice.text(), /等待 Agent|提交正式报告/)
+    assert.match(action.text(), /已阻塞/)
+    assert.doesNotMatch(action.text(), /等待 Agent|提交正式报告/)
+    assert.match(view.text(), /达到每任务执行次数上限/)
+    assert.match(view.text(), /新建计划/)
+  } finally { notice.close(); action.close(); view.close(); f.close() }
+})
+
 test('new plans without a final receipt show accepted counts rather than a completed delivery claim', async () => {
   const body = { ok: true, sessionId: 'session-current', plans: [{ protocolVersion: 2, sessionId: 'session-current', status: 'accepted', completion: null,
     tasks: [{ id: 'a', status: 'accepted' }] }], sessions: [] }

@@ -501,7 +501,9 @@ window.__ModuleLoader__.load({
       'completion.blocked': '尚未完成，已阻塞', 'completion.partial': '部分完成，其余尚未验收', 'completion.partialStopped': '部分完成，其余已停止',
       'completion.accepted': '已验收 {done}/{total}', 'completion.id': '回执编号', 'completion.deliverables': '已验收交付物',
       'completion.evidence': '验证证据', 'completion.remaining': '未完成项', 'completion.reason': '原因',
-      'completion.next': '最终交付结论与未完成项以程序回执为准。',
+      'completion.next': '最终交付结论与未完成项以程序回执为准。', 'completion.blockedNext': '处理失败原因后，让主 Agent 明确重试；当前回执不会自动继续。',
+      'completion.blockedAttempts': '该任务已达到每任务执行次数上限（{limit} 次）。请在 DSH Agentrix 提高“每任务最多执行”后，再让主 Agent 明确重试；也可以新建计划。',
+      'completion.cancelledNext': '计划已停止。如需继续，请让主 Agent 新建计划。',
       'completion.stopSource': '取消来源', 'completion.stopTime': '取消时间',
       'completion.source.coordinator': '主控', 'completion.source.host': '用户或宿主',
       'chat.receiptPending': '验收通过，回执生成中', 'chat.partial': '部分完成',
@@ -518,7 +520,9 @@ window.__ModuleLoader__.load({
       'completion.blocked': 'Incomplete, blocked', 'completion.partial': 'Partially completed, remaining work not accepted', 'completion.partialStopped': 'Partially completed, remaining work stopped',
       'completion.accepted': '{done}/{total} accepted', 'completion.id': 'Receipt ID', 'completion.deliverables': 'Accepted deliverables',
       'completion.evidence': 'Verification evidence', 'completion.remaining': 'Unfinished work', 'completion.reason': 'Reason',
-      'completion.next': 'The program receipt records the final delivery outcome and unfinished work.',
+      'completion.next': 'The program receipt records the final delivery outcome and unfinished work.', 'completion.blockedNext': 'Resolve the cause, then ask the coordinator to retry explicitly; this receipt will not continue automatically.',
+      'completion.blockedAttempts': 'This task reached the per-task attempt limit ({limit}). Increase Maximum attempts in DSH Agentrix, then ask the coordinator to retry explicitly, or create a new plan.',
+      'completion.cancelledNext': 'The plan was stopped. Ask the coordinator to create a new plan if you want to continue.',
       'completion.stopSource': 'Cancellation source', 'completion.stopTime': 'Cancelled at',
       'completion.source.coordinator': 'Coordinator', 'completion.source.host': 'User or host',
       'chat.receiptPending': 'Accepted, generating receipt', 'chat.partial': 'Partially completed',
@@ -973,6 +977,21 @@ window.__ModuleLoader__.load({
       return t('completion.' + (stopped ? 'partialStopped' : receipt.outcome))
     }
 
+    function completionNext(t, plan, state) {
+      const receipt = plan?.completion
+      if (!receipt) return ''
+      if (receipt.outcome === 'blocked') {
+        const limit = state?.limits?.maxAttempts
+        const exhausted = Number.isInteger(limit) && receipt.remaining.some(item => {
+          const task = (plan.tasks ?? []).find(candidate => candidate.id === item.taskId)
+          return task && Number.isInteger(task.attempts) && task.attempts >= limit
+        })
+        return exhausted ? fill(t('completion.blockedAttempts'), { limit }) : t('completion.blockedNext')
+      }
+      if (receipt.outcome === 'cancelled') return t('completion.cancelledNext')
+      return t('completion.next')
+    }
+
     const RECEIPT_STYLES = `
 .ddf-receipt { box-sizing:border-box; min-width:0; margin:12px 0; padding:14px 16px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-left:3px solid var(--dsw-alias-border-l2,#c9cdd4); border-radius:7px; background:var(--dsw-alias-bg-layer-1,#fff); color:var(--dsw-alias-label-primary,#1f2329); font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif; overflow-wrap:anywhere; }
 .ddf-receipt[data-outcome="completed"] { border-left-color:var(--dsw-alias-state-success-primary,#1f9d55); }
@@ -983,13 +1002,14 @@ window.__ModuleLoader__.load({
 .ddf-receipt summary { cursor:pointer; }
 `
 
-    function CompletionReceipt({ t, plan }) {
+    function CompletionReceipt({ t, plan, state }) {
       const receipt = plan?.completion
       if (!receipt) return null
       return h('section', { className: 'ddf-receipt', 'data-outcome': receipt.outcome, role: 'status' },
         h('style', null, RECEIPT_STYLES),
         h('strong', null, t('completion.title') + ' · ' + completionLabel(t, receipt)),
         h('p', null, fill(t('completion.accepted'), { done: receipt.accepted, total: receipt.total })),
+        h('p', { className: 'ddf-receipt-next' }, completionNext(t, plan, state)),
         receipt.reason ? h('p', null, t('completion.reason') + '：' + receipt.reason) : null,
         receipt.deliverables.length ? h('div', null, h('b', null, t('completion.deliverables')),
           h('ul', null, ...receipt.deliverables.map(task => h('li', { key: task.taskId }, task.title + '：' + task.paths.join('、'))))) : null,
@@ -1005,7 +1025,7 @@ window.__ModuleLoader__.load({
       const result = useChatProgress(progress, sessionId, latest, seq)
       if (!latest || !sessionId) return null
       const plan = result.data?.plans?.find(item => item.sessionId === sessionId)
-      if (plan?.completion) return h(CompletionReceipt, { t, plan })
+      if (plan?.completion) return h(CompletionReceipt, { t, plan, state: result.data })
       const problem = chatProblem(plan)
       if (!problem) return null
       const task = problem.primary, tasks = plan.tasks ?? []
@@ -1695,7 +1715,7 @@ window.__ModuleLoader__.load({
       const blockers = plan ? blockersOf(plan) : []
       const modelBlock = blockers.find(task => task.issue?.code === 'MODEL_CONFIG_INVALID')
       const route = plan?.routing || state?.sessions?.find(item => item.sessionId === sessionId)?.route
-      const next = plan?.completion ? t('completion.next') : plan ? dashboardNextText(t, status, tasks, modelBlock, rootTask) : ''
+      const next = plan?.completion ? completionNext(t, plan, state) : plan ? dashboardNextText(t, status, tasks, modelBlock, rootTask) : ''
       const links = (state ? ['chat', 'fleet', 'share'] : ['chat']).map(id => {
         const enabled = enabledView(id)
         return h('button', { key: id, type: 'button', className: 'ddf-board-action', disabled: !enabled,
@@ -1724,7 +1744,7 @@ window.__ModuleLoader__.load({
               route ? h('p', { className: 'ddf-board-route' }, h('b', null, t('plans.route') + '：'), routeLabel(t, route), ' · ', routeReasonsText(t, route),
                 plan.routingWarnings?.length ? h('span', null, ' · ' + fill(t('plans.routeWarnings'), { warnings: plan.routingWarnings.join('；') })) : null) : null),
             h('span', { className: 'ddf-board-status', 'data-status': status, role: 'status' }, statusLabel)) : null,
-          h(CompletionReceipt, { t, plan }),
+          h(CompletionReceipt, { t, plan, state }),
           plan ? h('section', { className: 'ddf-board-metrics', 'aria-label': t('view.boardProgress') },
             metric('boardReturned', `${returned} / ${tasks.length}`), metric('boardAccepted', `${accepted} / ${tasks.length}`),
             metric('boardRunning', String(running)), metric('boardWaiting', String(waiting)),
