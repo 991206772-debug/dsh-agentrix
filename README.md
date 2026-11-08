@@ -1,4 +1,6 @@
-# 委派优先
+# DSH Agentrix
+
+多 Agent 编排与验收。
 
 让主 Agent 负责拆分任务、监督和验收，让子 Agent 按配置的模型执行。
 
@@ -18,9 +20,11 @@
 
 ## 安装
 
+安装包继续使用原有标识 `@local/dsh-delegation-first`，已有安装、配置和历史记录可继续使用。
+
 需要支持原生子代理的 DeepSeek Harness。当前验证范围为 Windows、PowerShell 7（`pwsh`）和 Git；其他系统尚未验证。
 
-桌面版使用应用内的插件管理或插件市场安装。未收录时，可使用[本仓库地址](https://github.com/991206772-debug/dsh-delegation-first)或 [Releases 安装包](https://github.com/991206772-debug/dsh-delegation-first/releases/latest/download/dsh-delegation-first.tgz)作为安装来源。
+桌面版使用应用内的插件管理或插件市场安装。未收录时，可使用[本仓库地址](https://github.com/991206772-debug/dsh-agentrix)或 [Releases 安装包](https://github.com/991206772-debug/dsh-agentrix/releases/latest/download/dsh-agentrix.tgz)作为安装来源。
 
 命令行版在自己的 Profile 中安装，命令格式为：
 
@@ -30,15 +34,15 @@ dsh plugin --profile <Profile名称> add <GitHub仓库地址或tgz文件路径>
 
 `--profile` 位于 `plugin` 后面。独立安装的命令行版可能不允许管理桌面版保留的 `desktop` Profile，桌面版应使用应用自身的安装入口。
 
-安装后在插件管理中启用“委派优先”。配置和任务详情还需要 DSH 的 Web 界面服务。
+安装后在插件管理中启用“DSH Agentrix”。配置和任务详情还需要 DSH 的 Web 界面服务。
 
 ## 第一次使用
 
 1. 在对话框选择负责规划与验收的主控模型。
-2. 打开侧栏“委派优先”，选择执行模型；按需设置独立审查模型，也可让审查跟随主控。
+2. 打开侧栏“DSH Agentrix”，选择执行模型；按需设置独立审查模型，也可让审查跟随主控。
 3. 保存配置，再向主控提出任务。可先在临时项目中执行一个小任务，检查执行、报告、实际验证和验收回执。
 
-侧栏负责配置；当前会话的“委派验收”页显示需求、任务、进度、所用模型、验证证据和未完成原因。聊天消息旁的进度按钮可进入该页。这里展示的模型是 DSH 发给服务商的标识；服务商路由组内部的选型以服务商信息为准。
+侧栏负责配置；当前会话的“任务验收”页显示需求、任务、进度、所用模型、验证证据和未完成原因。聊天消息旁的进度按钮可进入该页。这里展示的模型是 DSH 发给服务商的标识；服务商路由组内部的选型以服务商信息为准。
 
 更新插件后需由宿主重新加载才会生效。请先让已有任务收尾，再按宿主提示更新。
 

@@ -39,8 +39,8 @@ window.__ModuleLoader__.load({
     // -----------------------------------------------------------------------
 
     const zh = {
-      nav: '委派优先',
-      title: '委派优先',
+      nav: 'DSH Agentrix',
+      title: 'DSH Agentrix',
       subtitle: '设置自动委派的模式、子任务模型和资源上限。',
       'badge.on': '已启用',
       'badge.off': '已关闭',
@@ -108,8 +108,8 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
-      nav: 'Delegation',
-      title: 'Delegation first',
+      nav: 'DSH Agentrix',
+      title: 'DSH Agentrix',
       subtitle: 'Configure automatic delegation, worker models, and execution limits.',
       'badge.on': 'On',
       'badge.off': 'Off',
@@ -254,7 +254,7 @@ window.__ModuleLoader__.load({
         throw new Error('返回的记录与当前会话不一致，已停止显示。请重新读取。')
       }
       if (!Array.isArray(data.plans) || !Array.isArray(data.sessions)) {
-        throw new Error('返回的数据缺少任务记录。请重新加载“委派优先”插件后重试。')
+        throw new Error('返回的数据缺少任务记录。请重新加载“DSH Agentrix”插件后重试。')
       }
       return { ...data, sessionId, legacyHost,
         plans: data.plans.filter(plan => plan.sessionId === sessionId),
@@ -291,9 +291,9 @@ window.__ModuleLoader__.load({
       'execution.NEEDS_CONTEXT': '缺少上下文，已暂停', 'execution.BLOCKED': '执行受阻，已暂停', 'execution.report': '完整报告',
       'chat.auditCount': '审查中 {count}', 'chat.auditQueuedCount': '等待审查 {count}',
       'plans.recent': '最近进展', 'plans.blockers': '需要处理',
-      'view.tab': '委派验收', 'view.hint': '打开需要查看的会话，在“委派验收”页签核对当前需求；协作过程看 Fleet，整理与导出用“分享会话”。',
+      'view.tab': '任务验收', 'view.hint': '打开需要查看的会话，在“任务验收”页签核对当前需求；协作过程看 Fleet，整理与导出用“分享会话”。',
       'view.empty': '本会话还没有托管任务。主 Agent 建立计划后，这里会显示需求、进度和验收结果。',
-      'view.noSession': '请先打开一个会话，再查看委派验收。', 'view.request': '本次需求', 'view.unknownSource': '历史计划未保存原始需求，请回到聊天核对。',
+      'view.noSession': '请先打开一个会话，再查看任务验收。', 'view.request': '本次需求', 'view.unknownSource': '历史计划未保存原始需求，请回到聊天核对。',
       'view.project': '项目', 'view.noProject': '未提供项目目录', 'view.session': '会话', 'view.currentSession': '当前会话',
       'view.returned': '结果已返回 {returned} / {total}', 'view.accepted': '已验收 {accepted} / {total}',
       'view.next': '下一步', 'view.reviewNext': '主 Agent 运行验证并逐条验收。',
@@ -326,7 +326,7 @@ window.__ModuleLoader__.load({
       'view.footNote': '会话验收页每 3 秒只读取当前会话状态。',
       'view.coordinator': '主控 · 当前会话', 'view.returnedLabel': '结果已返回',
       'view.statAccepted': '已验收', 'view.statAttempts': '启动尝试', 'view.remaining': '剩余 {count}',
-      'view.legacyHost': '插件服务仍在使用旧版，已筛选当前会话的记录。重新加载“委派优先”后可启用新版需求关联。',
+      'view.legacyHost': '插件服务仍在使用旧版，已筛选当前会话的记录。重新加载“DSH Agentrix”后可启用新版需求关联。',
       'plans.waiting': '等待主控验证与评审', 'plans.unverified': '尚未验证', 'plans.passed': '通过', 'plans.failed': '失败或结果不明确',
       'plans.configured': '用户配置', 'plans.observed': '已读取子 Agent 实际配置',
       'plans.notStarted': '尚未启动', 'plans.configPaused': '等待调整模型', 'plans.fixModel': '去调整模型',
@@ -349,12 +349,12 @@ window.__ModuleLoader__.load({
       'plans.routeWarnings': '路由提醒：{warnings}', 'plans.taskComplexity': '任务复杂度：{complexity}',
       'chat.routeDecision': '自动判断：{route}', 'chat.planSummary': '{status} · 已完成 {done}/{total}',
       'chat.activeSummary': '进行中 {running} · 已完成 {done}/{total}', 'chat.completedSummary': '已完成 {done}/{total}',
-      'chat.navigationUnavailable': '当前版本无法从此处打开，请切换到会话的“委派验收”页签。',
+      'chat.navigationUnavailable': '当前版本无法从此处打开，请切换到会话的“任务验收”页签。',
       'chat.stopped': '已停止', 'chat.issueTask': '任务', 'chat.issueReason': '原因',
       'chat.unknownReason': '记录中未提供具体原因。', 'chat.unknownTask': '记录中未提供任务名称',
       'chat.stoppedNext': '如需继续，请让主 Agent 重新安排未完成的任务。',
       'chat.recoveredReason': '插件重新加载，旧子任务需要先清理。',
-      'chat.affected': '共 {count} 项任务受影响，完整记录见委派验收。',
+      'chat.affected': '共 {count} 项任务受影响，完整记录见任务验收。',
       'chat.noPlan': '等待主 Agent 建立任务卡', 'chat.reason': '依据：{reasons}', 'chat.budget': '启动尝试 {used}/{limit}',
       'chat.details': '查看任务进度', 'chat.running': '进行中', 'chat.waiting': '等待中', 'chat.review': '待验收',
       'chat.completed': '已完成', 'chat.failed': '有失败', 'chat.blocked': '已阻塞', 'chat.direct': '直接执行',
@@ -394,7 +394,7 @@ window.__ModuleLoader__.load({
       'execution.NEEDS_CONTEXT': 'Context required; paused', 'execution.BLOCKED': 'Blocked; paused', 'execution.report': 'Full report',
       'chat.auditCount': 'Reviewing {count}', 'chat.auditQueuedCount': 'Waiting for review {count}',
       'plans.recent': 'Recent progress', 'plans.blockers': 'Needs attention',
-      'view.tab': 'Delegation acceptance', 'view.hint': 'Open a conversation and use Delegation acceptance to check its request and results. Use Fleet for collaboration and Share for exports.',
+      'view.tab': 'Task acceptance', 'view.hint': 'Open a conversation and use Task acceptance to check its request and results. Use Fleet for collaboration and Share for exports.',
       'view.empty': 'No managed tasks in this conversation yet. A coordinator plan will show its request, progress, and acceptance here.',
       'view.noSession': 'Open a conversation to view its acceptance.', 'view.request': 'Current request', 'view.unknownSource': 'This older plan has no saved original request. Check the conversation.',
       'view.project': 'Project', 'view.noProject': 'No project directory', 'view.session': 'Conversation', 'view.currentSession': 'Current conversation',
@@ -430,7 +430,7 @@ window.__ModuleLoader__.load({
       'view.footNote': 'This acceptance view reads only the current conversation, every 3 seconds.',
       'view.coordinator': 'Coordinator · this conversation', 'view.returnedLabel': 'Results returned',
       'view.statAccepted': 'Accepted', 'view.statAttempts': 'Startup attempts', 'view.remaining': '{count} left',
-      'view.legacyHost': 'An older plugin service is running. Records have been filtered to this conversation. Reload Delegation First to enable original request tracking.',
+      'view.legacyHost': 'An older plugin service is running. Records have been filtered to this conversation. Reload DSH Agentrix to enable original request tracking.',
       'plans.waiting': 'Awaiting coordinator verification and review', 'plans.unverified': 'Not verified', 'plans.passed': 'Passed', 'plans.failed': 'Failed or inconclusive',
       'plans.configured': 'Configured route', 'plans.observed': 'Observed child configuration',
       'plans.notStarted': 'Not started', 'plans.configPaused': 'Model selection required', 'plans.fixModel': 'Adjust model',
@@ -453,12 +453,12 @@ window.__ModuleLoader__.load({
       'plans.routeWarnings': 'Routing note: {warnings}', 'plans.taskComplexity': 'Task complexity: {complexity}',
       'chat.routeDecision': 'Automatic decision: {route}', 'chat.planSummary': '{status} · {done}/{total} completed',
       'chat.activeSummary': '{running} running · {done}/{total} completed', 'chat.completedSummary': '{done}/{total} completed',
-      'chat.navigationUnavailable': 'This version cannot open the view here. Select Delegation acceptance in this conversation.',
+      'chat.navigationUnavailable': 'This version cannot open the view here. Select Task acceptance in this conversation.',
       'chat.stopped': 'stopped', 'chat.issueTask': 'Task', 'chat.issueReason': 'Reason',
       'chat.unknownReason': 'No specific reason was recorded.', 'chat.unknownTask': 'No task name was recorded',
       'chat.stoppedNext': 'To continue, ask the coordinator to make a new plan for the unfinished tasks.',
       'chat.recoveredReason': 'The plugin reloaded. Previous workers need cleanup first.',
-      'chat.affected': '{count} tasks are affected. See Delegation acceptance for the complete record.',
+      'chat.affected': '{count} tasks are affected. See Task acceptance for the complete record.',
       'chat.noPlan': 'Waiting for the coordinator to create the task card', 'chat.reason': 'Reasons: {reasons}',
       'chat.budget': 'Startup attempts {used}/{limit}', 'chat.details': 'View task progress', 'chat.running': 'running',
       'chat.waiting': 'waiting', 'chat.review': 'awaiting review', 'chat.completed': 'completed', 'chat.failed': 'failed',
@@ -543,7 +543,7 @@ window.__ModuleLoader__.load({
       'cfg.modelsHint': '按执行、审查角色选择模型，列表与主界面模型选择器共用。执行模型未配置时暂停；审查模型可明确跟随主控。',
       'limits.timeoutLabel': '单任务时限',
       'cfg.whenNow': '立即', 'cfg.whenPlan': '新建计划', 'cfg.whenTask': '新任务',
-      'cfg.acceptanceNote': '打开需要查看的会话，在「委派验收」页签核对当前需求；协作过程看 Fleet，整理与导出用「分享会话」。',
+      'cfg.acceptanceNote': '打开需要查看的会话，在「任务验收」页签核对当前需求；协作过程看 Fleet，整理与导出用「分享会话」。',
       'cfg.defaultMode': '默认', 'cfg.times': '次', 'cfg.agents': '个', 'cfg.minutes': '分钟',
       'cfg.nowTool': '下一次工具调用生效', 'cfg.nextDispatch': '下一次派单生效', 'cfg.nextRework': '后续返工生效',
       'cfg.newPlan': '仅新建计划生效', 'cfg.newTask': '仅新启动任务生效',
@@ -581,7 +581,7 @@ window.__ModuleLoader__.load({
       'cfg.modelsHint': 'Choose execution and review models from the shared catalog. An unset execution model pauses dispatch; review may explicitly follow the coordinator.',
       'limits.timeoutLabel': 'Task timeout',
       'cfg.whenNow': 'Immediately', 'cfg.whenPlan': 'New plans', 'cfg.whenTask': 'New activations',
-      'cfg.acceptanceNote': 'Open a conversation and use Delegation acceptance to inspect the request. Fleet shows collaboration; Share conversation provides exports.',
+      'cfg.acceptanceNote': 'Open a conversation and use Task acceptance to inspect the request. Fleet shows collaboration; Share conversation provides exports.',
       'cfg.defaultMode': 'Default', 'cfg.times': 'attempts', 'cfg.agents': 'tasks', 'cfg.minutes': 'minutes', 'cfg.nowTool': 'Next tool call', 'cfg.nextDispatch': 'Next dispatch', 'cfg.nextRework': 'Subsequent rework', 'cfg.newPlan': 'New plans only', 'cfg.newTask': 'New activations only',
       'cfg.policyNote': 'Disabling removes the coordinator discipline at the next prompt assembly. Send a new message to continue under the new mode. Environment overrides require a Harness restart.',
       'cfg.limitsNote': 'Existing plans retain their activation limit. Running tasks keep their timers and models.', 'cfg.modelsNote': 'Queued tasks, rework and retries use the new selection when started. Running tasks keep their models. Configuration-blocked tasks require explicit continuation.',

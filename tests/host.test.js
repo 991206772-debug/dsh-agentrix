@@ -349,7 +349,7 @@ test('saving a stale provider explains the fix and preserves the saved configura
   const previous = await h.request('GET')
   const result = await h.request('POST', { models: { routine: { provider: 'retired', model: 'cheap' }, complex: null } })
   assert.equal(result.status, 400)
-  assert.match(result.payload.error, /执行模型.*失效.*委派优先/)
+  assert.match(result.payload.error, /执行模型.*失效.*DSH Agentrix/)
   assert.equal(result.payload.issue.retryable, false)
   assert.deepEqual((await h.request('GET')).payload.models, previous.payload.models)
   assert.equal((await h.request('POST', { mode: 'off', models: { routine: { provider: 'retired', model: 'cheap' }, complex: null } })).status, 200,

@@ -5,6 +5,23 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('Agentrix branding is consistent in plugin metadata, navigation and configuration', async () => {
+  for (const language of ['zh', 'en']) {
+    const metadata = JSON.parse(await readFile(new URL(`../locale/${language}.json`, import.meta.url), 'utf8'))
+    assert.equal(metadata.meta.title, 'DSH Agentrix')
+    const f = await sidebarFixture({ status: 'ready', value: { groups: [{ id: 'demo', name: 'Demo',
+      models: [{ id: 'worker', name: 'Worker' }] }], failures: [] } }, { language })
+    await f.setConfig({ ...designConfig(), models: { worker: { provider: 'demo', model: 'worker' }, reviewer: null } })
+    const panel = f.mountPanel()
+    try {
+      await panel.flush()
+      assert.equal(f.label(), 'DSH Agentrix')
+      assert.match(panel.text(), /DSH Agentrix/)
+      assert.doesNotMatch(panel.text(), /委派优先|Delegation [Ff]irst/)
+    } finally { panel.close(); f.close() }
+  }
+})
+
 test('model configuration separates execution from review and saves role keys without changing the layout', async () => {
   const f = await sidebarFixture({ status: 'ready', value: { groups: [{ id: 'demo', name: 'Demo', models: [
     { id: 'low', name: '低模型' }, { id: 'high', name: '高模型' },
@@ -215,7 +232,7 @@ async function sidebarFixture(initialCatalog = { status: 'ready', value: { group
     modelDirectories: { catalog },
     layout: { selectPanel(id) { selectedPanel = id } },
     effect(fn) { cleanups.push(fn()) },
-    locale: { register(_ns, value) { dictionaries = value }, bind: () => key => dictionaries.zh[key] ?? key },
+    locale: { register(_ns, value) { dictionaries = value }, bind: () => key => dictionaries[options.language || 'zh'][key] ?? key },
     slots: {
       inject(_name, fn) { cleanups.push(fn()) },
       entries: () => ['fleet', 'share', 'chat'].map(id => ({ options: { id } })),
@@ -490,7 +507,7 @@ test('an older host response is scoped locally without showing unrelated tasks o
   try {
     await view.flush()
     assert.match(view.text(), /本会话还没有托管任务/)
-    assert.match(view.text(), /重新加载.*委派优先/)
+    assert.match(view.text(), /重新加载.*DSH Agentrix/)
     assert.doesNotMatch(view.text(), /读取失败|其他会话的私有需求|其他会话的档案提示/)
   } finally { view.close(); f.close() }
 })
@@ -735,7 +752,7 @@ test('settings render before the first response and do not include the old globa
   try {
     const text = f.panelText()
     assert.match(text, /配置/)
-    assert.match(text, /委派验收/)
+    assert.match(text, /任务验收/)
     assert.doesNotMatch(text, /查看历史任务|打开任务档案|查看验收详情/)
   } finally { f.close() }
 })
@@ -743,9 +760,9 @@ test('settings render before the first response and do not include the old globa
 test('sidebar marks stale models before the configuration page is opened and clears after a saved correction', async () => {
   const f = await sidebarFixture()
   try {
-    assert.match(f.label(), /委派优先.*模型不可用/)
+    assert.match(f.label(), /DSH Agentrix.*模型不可用/)
     await f.setConfig({ ok: true, mode: 'auto', models: { routine: null, complex: null } })
-    assert.equal(f.label(), '委派优先')
+    assert.equal(f.label(), 'DSH Agentrix')
   } finally { f.close() }
 })
 
@@ -769,9 +786,9 @@ test('a visible reminder explains the impact, can be dismissed, and opens model 
 test('loading and provider catalog failures do not become stale-model alerts', async () => {
   const f = await sidebarFixture({ status: 'loading', value: null })
   try {
-    assert.equal(f.label(), '委派优先')
+    assert.equal(f.label(), 'DSH Agentrix')
     f.setCatalog({ status: 'ready', value: { groups: [], failures: [{ id: 'retired', message: 'temporary failure' }] } })
-    assert.equal(f.label(), '委派优先')
+    assert.equal(f.label(), 'DSH Agentrix')
     f.setCatalog({ status: 'ready', value: { groups: [], failures: [] } })
     assert.match(f.label(), /模型不可用/)
   } finally { f.close() }
@@ -1007,8 +1024,8 @@ test('a host without chat navigation explains how to reach acceptance without ex
     const [button] = action.nodes('button')
     assert.ok(button)
     assert.equal(button.props.disabled, true)
-    assert.match(button.props.title, /无法从此处打开.*委派验收/)
-    assert.match(button.props['aria-label'], /无法从此处打开.*委派验收/)
+    assert.match(button.props.title, /无法从此处打开.*任务验收/)
+    assert.match(button.props['aria-label'], /无法从此处打开.*任务验收/)
     assert.equal(action.nodes('details').length, 0)
   } finally { action.close(); f.close() }
 })

@@ -44,7 +44,7 @@ export async function validateModelRoute(llm, route, tier, signal) {
     const message = noAdapter
       ? `${label}配置已失效：${route.provider} / ${route.model}。当前 DSH 未注册服务“${route.provider}”`
       : `${label}的思考强度“${route.reasoningEffort}”不可用：${route.provider} / ${route.model}`
-    const action = `请打开“委派优先 → 子任务模型 → ${label}”，从当前列表重新选择${tier === 'worker' || tier === 'routine' ? '执行模型' : '审查模型，或明确选择跟随主控'}，然后保存。配置未更新前不要重试`
+    const action = `请打开“DSH Agentrix → 子任务模型 → ${label}”，从当前列表重新选择${tier === 'worker' || tier === 'routine' ? '执行模型' : '审查模型，或明确选择跟随主控'}，然后保存。配置未更新前不要重试`
     const issue = { code: 'MODEL_CONFIG_INVALID', retryable: false, tier, role: tier, provider: route.provider, model: route.model, message, action, details }
     throw Object.assign(new Error(`${message}。${action}。`), { issue })
   }
@@ -552,13 +552,13 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const role = modelRole(task), route = orchestrationOptions(getConfig()).models[role]
     if (!route && role === 'worker') {
       const message = '执行模型尚未配置，任务未启动；不会自动继承主控模型'
-      const action = '请打开“委派优先 → 子任务模型 → 执行模型”，选择用于做事的模型并保存，然后继续原计划'
+      const action = '请打开“DSH Agentrix → 子任务模型 → 执行模型”，选择用于做事的模型并保存，然后继续原计划'
       throw Object.assign(new Error(message + '。' + action), { issue: { code: 'MODEL_CONFIG_INVALID', retryable: false, tier: role, role, message, action } })
     }
     const inherited = parent.session?.requestHeader?.()?.config ?? parent.options ?? {}
     const selected = clone(route ?? { provider: inherited.provider, model: inherited.model,
       ...(inherited.reasoningEffort ? { reasoningEffort: inherited.reasoningEffort } : {}) })
-    if (!selected.provider || !selected.model) throw new Error('无法确定子任务模型，请在“委派优先”中选择模型或检查主 Agent 模型')
+    if (!selected.provider || !selected.model) throw new Error('无法确定子任务模型，请在“DSH Agentrix”中选择模型或检查主 Agent 模型')
     return { selected, source: route ? 'configured' : 'inherited' }
   }
   function recordModelSelection(task, selected, source, resolved = null) {
@@ -1207,11 +1207,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const expected = expectedRoutes.get(exec.agent?.id)
       const task = expected?.task ?? [...plans.values()].flatMap(targetsOf).find(item => item.childId === exec.agent?.id)
       if (task?.protocolVersion >= 2 && task.execution) return task.execution.commitState === 'committed'
-        ? '[委派优先] 报告已提交，子回合正在结束，不能继续执行工具。' : '[委派优先] 报告正在确认，不能继续执行工具。'
+        ? '[DSH Agentrix] 报告已提交，子回合正在结束，不能继续执行工具。' : '[DSH Agentrix] 报告正在确认，不能继续执行工具。'
       if (!expected) return undefined
-      if (task.protocolVersion >= 2 && exec.name === 'send_message') return '[委派优先] 托管任务必须通过 delegation_report 提交正式报告；普通消息不能代替报告。'
-      if (['subagent', 'subagent_fork', 'spawn_teammate', ...(getConfig().delegationTools ?? [])].includes(exec.name)) return '[委派优先] 执行者和审查者不能继续委派。'
-      if (expected.task.role === 'reviewer' && !['read', 'grep', 'glob', 'delegation_report'].includes(exec.name)) return '[委派优先] 独立审查只允许只读检索和提交报告；命令与实际验证由主控执行。'
+      if (task.protocolVersion >= 2 && exec.name === 'send_message') return '[DSH Agentrix] 托管任务必须通过 delegation_report 提交正式报告；普通消息不能代替报告。'
+      if (['subagent', 'subagent_fork', 'spawn_teammate', ...(getConfig().delegationTools ?? [])].includes(exec.name)) return '[DSH Agentrix] 执行者和审查者不能继续委派。'
+      if (expected.task.role === 'reviewer' && !['read', 'grep', 'glob', 'delegation_report'].includes(exec.name)) return '[DSH Agentrix] 独立审查只允许只读检索和提交报告；命令与实际验证由主控执行。'
     },
     async history(before) { await ready; if (writing) await writing; return records.history(before) },
     async readArchive(id) {

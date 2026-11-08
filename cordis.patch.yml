@@ -1,4 +1,4 @@
-# 委派优先 bundle：两行，一个 gate + 一个 Skill 来源。
+# DSH Agentrix bundle：两行，一个 gate + 一个 Skill 来源。
 # 第一行：gate 本体 —— 主 agent 在派单前的动手调用会被工具层拒绝。
 # 第二行：把本包 skills/ 注册成 filesystem Skill 来源，delegation-first
 #         （编排手册 / 任务卡模板 / 子 agent 契约）才能被按需加载。

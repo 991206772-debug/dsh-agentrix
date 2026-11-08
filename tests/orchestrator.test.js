@@ -1021,7 +1021,7 @@ test('a retired provider blocks the whole dispatch with an actionable error and 
   const f = await fixture({ models: { routine: { provider: 'retired', model: 'cheap' }, complex: { provider: 'local', model: 'deep' } } })
   await f.plan([card('valid-first', { complexity: 'complex' }), card('stale-route')])
   for (let i = 0; i < 3; i++) {
-    await assert.rejects(f.execute('delegation_run'), /执行模型.*失效.*委派优先.*配置未更新前不要重试/)
+    await assert.rejects(f.execute('delegation_run'), /执行模型.*失效.*DSH Agentrix.*配置未更新前不要重试/)
     assert.equal(f.calls.length, 0)
     assert.equal(f.snapshot().tasks[1].attempts, 0)
   }
