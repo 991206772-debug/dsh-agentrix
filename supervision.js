@@ -4,13 +4,13 @@ export const REPEATED_ERROR_LIMIT = 3
 export const EXECUTION_BUDGET = Object.freeze({ requests: 80, outputTokens: 40000, contextTokens: 100000, maxOutputTokens: 8192 })
 export const SUPERVISION_POLICY = Object.freeze({ correctionLimit: SUPERVISION_LIMIT, repeatedErrorLimit: REPEATED_ERROR_LIMIT, ...EXECUTION_BUDGET })
 
-export function startSupervision(task, now, timeoutMs) {
+export function startSupervision(task, now, timeoutMs, preserveCheckpoint = false) {
   const previous = task.supervision
   task.supervision = { used: 0, attempt: task.attempts, limit: SUPERVISION_LIMIT, pending: null,
     lastCorrection: previous?.lastCorrection ?? null, startedAt: now, deadlineAt: now + timeoutMs,
     idleMs: Math.min(10 * 60_000, timeoutMs / 2), wrapUpAt: now + timeoutMs - Math.min(5 * 60_000, timeoutMs / 5),
     wrapUpRequestedAt: null,
-    lastProgressAt: now, failure: null, checkpoint: null, activity: { kind: 'waiting_model', at: now },
+    lastProgressAt: now, failure: null, checkpoint: preserveCheckpoint ? previous?.checkpoint ?? null : null, activity: { kind: 'waiting_model', at: now },
     limits: { ...EXECUTION_BUDGET }, notices: {},
     metrics: { requests: 0, inputTokens: 0, outputTokens: 0, contextTokens: 0 }, evidence: [] }
   return task.supervision

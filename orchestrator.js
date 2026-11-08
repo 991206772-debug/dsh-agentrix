@@ -483,6 +483,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       '验收标准：', ...task.criteria.map((item, i) => `${i + 1}. ${item}`),
       ...plan.tasks.filter(item => task.dependsOn.includes(item.id)).map(item => `已验收前置任务 ${item.id}：${item.execution ? item.execution.summary + '；完整报告：' + item.execution.reportPath : brief(item.report)}`),
       task.feedback ? `主控返工要求：${task.feedback}` : '',
+      task.continuation?.used ? `这是同一任务的第 ${task.continuation.used + 1} 段自动续跑；上一段的工具证据和阶段记录已保留，先读取现有产物并完成剩余工作，不要从头重复调查。` : '',
       task.reworkIds?.length ? '只修复以下问题及其直接回归，不扩展任务：\n' + JSON.stringify(task.issues.filter(issue => task.reworkIds.includes(issue.id))) : '',
       '调查、实现、验证阶段取得结论后调用 delegation_checkpoint，提交 phase（investigation/implementation/verification）、summary、nextStep 和当前成功工具 callId 的 evidence。阶段结论待主控核实，不能代替最终报告。读取使用 read/grep/glob，目录访问用这些原生工具；delegation_inspect/note/status 等管理入口仅供主控。参数必须按当前 schema，read 用 file_path；Electron app.asar 内路径不能用原生 grep/glob 搜索，应读取公开接口或精确文件。',
       '同类参数或路径错误连续出现时停止重复尝试，按主控纠正继续。每次执行最多 80 次模型调用、累计 40000 输出 Token，单次生成最多 8192 Token；到 60 次调用或 32000 输出 Token 会预警，上下文到 100000 Token 会通知主控。接近时限立即整理已有产物和未完成项，避免全库检索和长篇重复推理。预算不能靠阶段记录、重复查询刷新。',
@@ -587,6 +588,25 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     })()
     return handle.releasePromise
   }
+  function queueBudgetContinuation(plan, task, error) {
+    const state = task.supervision
+    const budget = activationBudget(plan, getConfig().maxActivations)
+    const hasProgress = Boolean(state && ((state.lastProgressAt ?? state.startedAt) > state.startedAt || state.checkpoint))
+    if (error?.issue?.code !== 'EXECUTION_BUDGET_EXHAUSTED' || !hasProgress || budget.remaining <= 0) return false
+    task.continuation ??= { used: 0, pending: false, history: [] }
+    task.continuation.used++
+    task.continuation.history = [...(task.continuation.history ?? []), {
+      at: Date.now(), segment: task.continuation.used, attempt: task.attempts,
+      metrics: clone(state.metrics), lastProgress: clone(state.lastProgress ?? null), checkpoint: clone(state.checkpoint ?? null), report: task.report,
+    }].slice(-8)
+    task.continuation.pending = true
+    task.feedback = `上一段执行已达到模型预算（${state.metrics.requests} 次请求、${state.metrics.outputTokens} 输出 Token），已保留产物和阶段证据；这是第 ${task.continuation.used + 1} 段执行。先核对已有结果，不要重复上一段已完成的命令，完成后立即提交 delegation_report。`
+    task.status = 'queued'; task.error = null; task.issue = null
+    plan.autoDispatch = true; plan.wakeSuppressed = false; plan.dispatchWait = null
+    invalidateCompletion(plan)
+    remember(plan, 'task.budget_continuation', task.feedback, task, { continuation: clone(task.continuation) })
+    return true
+  }
   async function settle(plan, task, handle, result, error) {
     if (handle.settling) return
     handle.settling = true
@@ -600,11 +620,15 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (live.get(handle.key) !== handle) { handle.done?.resolve(); return }
     live.delete(handle.key)
     expectedRoutes.delete(task.childId)
+    let continued = false
     if (LIVE.includes(task.status)) {
       if (!task.execution) task.report = textOf(result?.output).slice(0, 24000)
-      task.status = !error && result?.stopReason === 'completed' ? 'review' : error?.issue ? 'blocked' : 'failed'
-      task.issue = error?.issue ?? null
-      task.error = error ? messageOf(error) : task.status === 'failed' ? `子任务停止原因：${result?.stopReason ?? 'unknown'}` : null
+      continued = queueBudgetContinuation(plan, task, error)
+      if (!continued) {
+        task.status = !error && result?.stopReason === 'completed' ? 'review' : error?.issue ? 'blocked' : 'failed'
+        task.issue = error?.issue ?? null
+        task.error = error ? messageOf(error) : task.status === 'failed' ? `子任务停止原因：${result?.stopReason ?? 'unknown'}` : null
+      }
       if (task.status === 'review' && task.protocolVersion && (!task.execution || (task.protocolVersion >= 2 && task.execution.commitState !== 'committed'))) {
         task.status = 'blocked'; task.error = '执行者没有提交结构化报告，不能验收。请核对交付物和缺失原因后明确重试，不会自动重开。'
       } else if (task.status === 'review' && ['NEEDS_CONTEXT', 'BLOCKED'].includes(task.execution?.status)) {
@@ -622,15 +646,17 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       }
       if (task.status === 'review' && task.protocolVersion && task.complexity === 'complex') queueAudit(task)
       task.finishedAt = Date.now()
-      remember(plan, ['review', 'completed'].includes(task.status) ? 'task.returned' : task.status === 'blocked' ? 'task.blocked' : 'task.failed',
-        task.status === 'completed' ? '独立审查已返回，等待主控核对结论' : task.status === 'review' ? '子 Agent 已返回，等待主 Agent 验证与评审' : task.error,
-        task, { report: task.report, error: task.error })
-      if (['failed', 'blocked'].includes(task.status)) pauseAfterFailure(plan, task)
+      if (!continued) {
+        remember(plan, ['review', 'completed'].includes(task.status) ? 'task.returned' : task.status === 'blocked' ? 'task.blocked' : 'task.failed',
+          task.status === 'completed' ? '独立审查已返回，等待主控核对结论' : task.status === 'review' ? '子 Agent 已返回，等待主 Agent 验证与评审' : task.error,
+          task, { report: task.report, error: task.error })
+        if (['failed', 'blocked'].includes(task.status)) pauseAfterFailure(plan, task)
+      }
     }
     try {
       await save()
       if (!closed) await pump()
-      if (task.protocolVersion >= 2) notifyParent(plan, task, handle)
+      if (task.protocolVersion >= 2 && !continued) notifyParent(plan, task, handle)
     } finally { handle.done?.resolve() }
   }
   function modelSelection(task, parent) {
@@ -748,8 +774,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         void expireTask(plan, task, handle, timeoutMinutes).catch(failure => { storageError = messageOf(failure) })
       }, timeoutMinutes * 60_000)
       handle.timer.unref?.()
-      task.attempts++; task.startedAt = Date.now(); task.childId = randomUUID()
-      startSupervision(task, task.startedAt, timeoutMinutes * 60_000)
+      const continuation = task.continuation?.pending === true
+      if (continuation) task.continuation.pending = false
+      else task.attempts++
+      task.startedAt = Date.now(); task.childId = randomUUID()
+      startSupervision(task, task.startedAt, timeoutMinutes * 60_000, continuation)
       expectedRoutes.set(task.childId, { plan, task, handle, config: clone(resolved) })
       await save()
       handle.receipt = await subagents.startActivation({

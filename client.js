@@ -542,6 +542,7 @@ window.__ModuleLoader__.load({
       'supervision.activity.waiting_model': '等待下一步模型请求', 'supervision.activity.waiting_tool': '模型响应已返回，准备执行工具',
       'supervision.activity.tool': '工具正在执行', 'supervision.reporting': '正在提交报告',
       'supervision.wrapUp': '已提醒收尾：提交已有结果及未完成项',
+      'supervision.continuation': '已自动续跑第 {segment} 段，沿用上一段产物和证据',
     })
     Object.assign(en, {
       'supervision.title': 'Execution supervision', 'supervision.waiting': 'Awaiting coordinator correction', 'supervision.count': '{count} awaiting correction',
@@ -555,6 +556,7 @@ window.__ModuleLoader__.load({
       'supervision.activity.waiting_model': 'Waiting for the next model request', 'supervision.activity.waiting_tool': 'Response received; preparing tools',
       'supervision.activity.tool': 'Tool running', 'supervision.reporting': 'Submitting report',
       'supervision.wrapUp': 'Wrap-up requested: report existing results and unfinished work',
+      'supervision.continuation': 'Automatically continuing segment {segment} with the previous work and evidence',
     })
     const CONFIG_NUMBERS = ['threshold', 'maxParallel', 'maxAttempts', 'maxActivations', 'taskTimeoutMinutes']
     // Compatibility only; current hosts provide the authoritative defaults and ranges.
@@ -1394,6 +1396,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'ddf-supervision', role: 'group', 'aria-label': t('supervision.title') },
         line(fill(t('supervision.elapsed'), { minutes }), activity ? ' · ' + activity + (state.activity?.tool ? ' · ' + state.activity.tool : '') : '',
           ' · ' + fill(t('supervision.corrections'), { used: state.used, limit: state.limit })),
+        task.continuation?.used ? line(fill(t('supervision.continuation'), { segment: task.continuation.used + 1 })) : null,
         state.metrics && state.limits ? line(fill(t('supervision.budget'), { requests: state.metrics.requests, requestLimit: state.limits.requests,
           output: state.metrics.outputTokens, outputLimit: state.limits.outputTokens }), state.metrics.contextTokens ? ' · ' + fill(t('supervision.context'), { tokens: state.metrics.contextTokens }) : '') : null,
         state.pending ? line(h('strong', null, t(live ? 'supervision.waiting' : 'supervision.title') + '：'), state.pending.reason) : null,

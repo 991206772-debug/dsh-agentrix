@@ -37,6 +37,7 @@ export function taskSummary(plan) {
   for (const task of plan.tasks) {
     lines.push('', '## ' + task.id + ' · ' + task.title, '',
       '- 状态：' + labels[task.status], '- 执行次数：' + task.attempts,
+      ...(task.continuation?.used ? ['- 自动续跑段数：' + task.continuation.used + '（上一段预算已用尽，已沿用现有产物继续）'] : []),
       '- 模型角色：' + (task.modelRoute?.role === 'worker' ? '执行模型' : task.modelRoute?.role === 'reviewer' ? '审查模型' : '历史未记录'),
       '- 任务复杂度：' + (task.complexity === 'complex' ? '复杂问题' : '普通执行'),
       '- 档位依据：' + (task.complexityReason || '未记录'),

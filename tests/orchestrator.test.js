@@ -1289,7 +1289,7 @@ test('changed files break a repeated-failure streak and cancellation suppresses 
   assert.equal(f.pending[0].receipt.disposeCount, 1)
 })
 
-test('execution budget blocks the next expensive request and retains a submitted phase record', async () => {
+test('execution budget automatically continues a task that has real progress', async () => {
   const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
   const child = f.children[0]
   f.engine.observe({ agent: child, name: 'read', callId: 'read-proof' }, { isError: false, content: [] })
@@ -1297,10 +1297,36 @@ test('execution budget blocks the next expensive request and retains a submitted
   f.emit('session/event', { id: child.id }, { type: 'assistant/message', seq: 1, data: { usage: { outputTokens: 40000 } } })
   let sent = 0
   assert.throws(() => f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => { sent++ }), /预算/)
-  await waitFor(() => f.snapshot().tasks[0].status === 'blocked')
+  await waitFor(() => f.calls.length === 2 && f.snapshot().tasks[0].status === 'running')
   assert.equal(sent, 0)
   assert.equal(f.snapshot().tasks[0].supervision.checkpoint.summary, '已有调查结论，尚未实现。')
   assert.equal(f.pending[0].receipt.disposeCount, 1)
+  assert.equal(f.snapshot().tasks[0].continuation.used, 1)
+  assert.equal(f.snapshot().tasks[0].attempts, 1, 'a budget continuation is the same logical attempt')
+  assert.equal(f.snapshot().activationBudget.used, 2)
+  await f.complete(1, { stopReason: 'completed', output: [] })
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+})
+
+test('execution budget blocks when no progress or activation slot remains', async () => {
+  const noProgress = await fixture()
+  await noProgress.plan([card('a')]); await noProgress.execute('delegation_run')
+  const child = noProgress.children[0]
+  noProgress.emit('session/event', { id: child.id }, { type: 'assistant/message', seq: 1, data: { usage: { outputTokens: 40000 } } })
+  assert.throws(() => noProgress.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => {}), /预算/)
+  await waitFor(() => noProgress.snapshot().tasks[0].status === 'blocked')
+  assert.equal(noProgress.snapshot().tasks[0].continuation, undefined)
+  assert.equal(noProgress.calls.length, 1)
+
+  const exhausted = await fixture({ maxActivations: 1 })
+  await exhausted.plan([card('b')]); await exhausted.execute('delegation_run')
+  const exhaustedChild = exhausted.children[0]
+  exhausted.engine.observe({ agent: exhaustedChild, name: 'pwsh', callId: 'progress-proof' }, { isError: false, value: { exitCode: 0 }, content: [] })
+  exhausted.emit('session/event', { id: exhaustedChild.id }, { type: 'assistant/message', seq: 1, data: { usage: { outputTokens: 40000 } } })
+  assert.throws(() => exhausted.emit('llm/stream', { sessionId: exhaustedChild.id, provider: 'local', model: 'cheap' }, () => {}), /预算/)
+  await waitFor(() => exhausted.snapshot().tasks[0].status === 'blocked')
+  assert.equal(exhausted.calls.length, 1)
+  assert.equal(exhausted.snapshot().activationBudget.used, 1)
 })
 
 test('a report already in the real result pipeline gets a bounded confirmation window at the deadline', async t => {
