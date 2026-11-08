@@ -1,0 +1,137 @@
+# 工具与运行约定
+
+本页说明主控与子代理使用的工具、验收规则、记录和接口。安装与模型配置见 [README](../README.md)。
+
+## 主 Agent 的工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `delegation_inspect` | `operation: list/git_status`，可指定 `directory`；通过原生工具管线运行固定的只读检查，每次最多显示 200 项 |
+| `delegation_note` | `kind: task_plan/findings/progress` 和 `content`；保存本会话本需求的专用记录并返回路径，最多 64 KiB |
+| `delegation_plan` | 提交目标、任务卡、依赖、修改路径、任务复杂度、标准和验证步骤 |
+| `delegation_run` | 开始调度，无依赖任务自动派出 |
+| `delegation_status` | 查询当前计划和任务结果 |
+| `delegation_control` | `steer` 纠偏、`stop` 取消且必须提供原因、`retry` 有依据地重试；正常返回无需 stop |
+| `delegation_verify` | 用 DSH 工具管线执行指定验证，返回实际证据编号 |
+| `delegation_report` | 当前执行者或审查者提交身份绑定的完整报告，工具确认后自动结束，主控不能代报 |
+| `delegation_audit` | 请求独立审查；复杂任务自动安排，失败后须给出原因处理说明才重试 |
+| `delegation_review` | 逐条验收，或按问题编号、标准与实际证据返工 |
+| `delegation_cancel` | 停止整个计划并保留记录 |
+
+插件启用时，主控的自动派单必须经 `delegation_plan/run`；直接调用旧 `subagent/subagent_fork/spawn_teammate` 会收到明确的入口说明，避免绕过角色模型和资源限制。不替换原生工具定义，不干预其他插件的人工操作；关闭插件后恢复原生派单行为。
+
+`delegation_note` 的文件位于插件数据目录中的 `<运行状态文件名>.notes/<会话摘要>/<需求摘要>/`，只保存 `task_plan.md`、`findings.md` 和 `progress.md`。目录由插件确定，不接受业务路径；各层目录与文件均检查链接，写入采用临时文件替换。换需求使用新的目录，承接原需求继续使用原目录，不增加独立档案中心。
+
+### 任务卡示例
+
+以下是主 Agent 调用 `delegation_plan` 的参数。实际任务必须先读相关文件，再填写真实路径和命令。
+
+```json
+{
+  "goal": "补充登录失败路径测试并核对结果",
+  "tasks": [{
+    "id": "login-tests",
+    "title": "补充登录失败测试",
+    "instructions": "参考现有测试，补充密码错误和账号锁定场景；遇到实现缺陷先报告，不自行改实现。",
+    "scope": "只改指定测试文件，不改业务实现和依赖。缺少必要信息时报告阻塞。",
+    "outputs": ["tests/login.test.js"],
+    "writes": ["tests/login.test.js"],
+    "dependsOn": [],
+    "complexity": "routine",
+    "complexityReason": "按已有实现补充确定的失败测试，无需重新设计",
+    "criteria": ["覆盖密码错误和账号锁定", "测试全部通过"],
+    "checks": [
+      {"tool": "read", "arguments": {"path": "tests/login.test.js"}},
+      {"tool": "pwsh", "arguments": {"description": "Run login failure tests", "command": "node --test tests/login.test.js"}}
+    ]
+  }]
+}
+```
+
+验证步骤支持 `read`、`grep`、`glob`、`pwsh`、`bash`，参数遵守当前 DSH 工具定义。只读任务的 `writes` 用空数组。不能用后台 shell 任务作为已通过的验证。
+
+任务返回后，主 Agent 对每个验证步骤调用：
+
+```js
+delegation_verify({taskId: 'login-tests', checkIndex: 0})
+delegation_verify({taskId: 'login-tests', checkIndex: 1})
+```
+
+`checkIndex` 和验收标准编号从 0 开始。主控阅读返回结果后，在 `delegation_review` 的 `findings` 中逐条写明结论，`evidence` 引用这次实际返回的 `callId`。编造编号、缺少条目、验证失败、后台命令或无退出码的 shell 结果，都不能通过验收。返工后旧证据作废。
+
+### 执行报告与独立审查
+
+执行者结束前调用 `delegation_report({status,summary,report,reason?,concerns?})`。`status` 为 `DONE`、`DONE_WITH_CONCERNS`、`NEEDS_CONTEXT` 或 `BLOCKED`；后两项必须说明 `reason`，有疑点必须列 `concerns`。完整 `report` 最多 24000 字符，超限明确报错，不能静默截断。报告保存在任务档案的 `reports/<taskId>/`，实现与审查、不同执行次数分别存放。辅助档案暂时不可写时，必需的任务快照仍保留全文并提示记录问题。
+
+新建的 `complex` 任务返回后自动排队审查；审查者只允许 `read/grep/glob` 和提交报告，禁止修改、命令执行或继续派代理。审查报告必须同时提供 `specVerdict` 与 `qualityVerdict`（`pass/fail`），以及具体 `issues`。审查未结束或有未解决重要问题时不能验收。审查结果是额外检查，主控仍须实际运行验证。测试通过不能代替视觉还原或真实场景验证。
+
+普通任务可用 `delegation_audit({taskId})` 请求审查，重复请求不会重复启动。审查服务失败不会重跑实现；处理原因后用 `delegation_audit({taskId,message:'已处理的具体原因'})` 明确重试。每次执行对应的审查启动次数单独受现有 `maxAttempts` 限制，所有启动同时计入计划 `maxActivations`。模型不自动升级或切换。
+
+返工优先引用审查产生的 `issueIds`；主控新发现的问题用 `issues:[{criterion,severity,finding,evidence:[callId]}]`，允许引用实际验证失败的证据。`critical/important` 可触发返工，`minor` 仅记录。独立复查必须对原问题逐条返回 `ADDRESSED/NOT_ADDRESSED` 和证据；范围外发现只能作为可选建议，重要新问题必须说明由本次修复引入。普通任务由主控在最终验收时用 `resolutions:[{id,status:'ADDRESSED',evidence:[新callId]}]` 确认修复。
+
+历史任务未记录这些字段时保留原验收合同，不补造审查结果；新任务执行者未提交结构化报告会暂停，不能凭一段“已完成”通过验收。插件自然重载后新计划使用本流程；不强制重启宿主。
+
+### 程序控制收尾
+
+新计划采用协议 2。子代理用 `delegation_report` 交成果，通过实际工具结果管线确认后结束回合；`delivery: caller` 由插件通知原主控，成果不经 `send_message` 提交。报告失败不能进入待验收，成功提交后不能继续修改交付物。返回的子代理自动释放，`stop` 仅表示取消，必须提供 `reason`；取消记录来源、原因和时间，同时保留原失败、报告与验证证据。已验收任务重复清理保持原结果。
+
+`agent/turn-stopping` 检查遗漏步骤：未交报告时提醒原子代理；主控仍有任务运行时等待事件；有报告未验证或验收时提醒原主控。主控每计划、子代理每次执行分别最多补流程两次，计数持久化；查询、重复 run 和重载不会重置。超限保留真实未完成原因，不自动新开代理；用户取消不自动唤醒。
+
+最后一次实际验收成功后，插件生成 `plan.completion` 并结束主控回合，不另加完成工具或要求模型写总结。回执包含结果、验收数量、交付物、真实证据及未完成原因，聊天、验收页和 Markdown 共用。全部验收才显示“已完成”；测试有结果但未验收仍是未完成。全部剩余任务取消显示“已停止”，部分通过其余取消显示“部分完成，其余已停止”。明确重试会使当前回执失效，历史回执保留。
+
+宿主可能先显示模型文字再触发结束检查，无法保证撤回已经显示的错误句子。完成标签与最终交付结论以程序回执为准，不匹配模型措辞判断成功。
+
+## 状态与资源限制
+
+任务正常经过 `queued → starting → running → review → accepted`。失败进入 `failed`，模型配置阻塞、重新加载的活动任务或计划派发预算用尽进入 `blocked`，停止后为 `cancelled`。返工进入 `queued` 后重新执行，受单任务次数和计划总派发预算双重限制。
+
+子任务运行失败时，从原生 `turn/end` 事件保留真实原因，显示在任务面板、状态工具和主控提示中，并随任务保存。403、模型不存在等问题需要先解决服务或模型配置，再由主控说明依据后重试；插件不绕过服务限制，也不自动替换模型。已有历史任务中只保存了 `error` 的记录不会凭空补出原始原因。
+
+- 同一 profile 的运行缓存最多保留 12 个会话计划；空间满时只移出已完成或已取消的最旧计划，其独立档案仍保留。
+- 每计划最多 16 个任务，每任务最多 4 个验证步骤；新计划输入最多 64 KiB。
+- 报告、工具输出和证据条数有上限，面板不保存完整对话或思考过程。
+- 每个活动任务有独立的计时器和取消控制；不轮询唤醒子 Agent。
+- 计划档案保存 `routing`、路由提醒和 `activationBudget`（已用、上限、剩余），面板和 Markdown 摘要都显示这些字段。
+- 插件卸载、任务结束、超时或取消时调用原生 activation 的 `dispose()`。
+- 配置页每 3 秒只读取配置；会话验收页每 3 秒只读取当前会话状态。未完成的请求不叠加，请求 8 秒超时；切换会话时重新挂载，旧请求取消，旧结果不会覆盖新会话。
+- 侧栏提醒每 15 秒读取本地配置，并订阅共享模型目录；不读取任务历史或轮询模型服务，卸载插件后停止。页面保存后立即更新提醒。
+
+配置保存到 `<DSH_HOME>/delegation-first/<profile>.json`，任务保存到同目录的 `<profile>.runs.json`。未设置 `DSH_PROFILE` 时使用 `default`；已有 v1 配置保留模式和预算，其余字段取默认值。文件通过临时文件加重命名写入，任务写入串行并合并中间更新。恢复失败会展示错误并保留原文件。
+
+## 执行记录与会话导出
+
+必要运行状态以 `<profile>.runs.json` 为准，其中包含原始需求关联、当前报告、验证证据和验收结论。新辅助记录位于配置文件旁：
+
+~~~text
+<profile>.runs.archive/.agent-tasks/<创建时间>-<唯一编号>/
+  task.md          可读摘要
+  task.json        结构化任务快照
+  events.jsonl     追加保存的关键事件
+~~~
+
+摘要包括目标、任务说明、模型和子 Agent、声明的交付物、验收标准、当前报告、实际验证证据、主控结论和未完成项。它根据现有任务状态自动生成，手工修改摘要会在下次生成时被覆盖。
+
+创建、派单、返回、失败、验证、纠偏、返工、重试、停止、验收及中断均由插件记录。返工前的报告和验证证据保留在事件文件中；摘要显示当前结果。普通成功工具活动只更新最近活动，按一秒合并保存运行状态，不逐次重写摘要；打开当前任务档案时会刷新摘要。
+
+不再提供独立的历史中心、档案预览和下载面板。插件在聊天显示程序交付回执，用户通过“分享会话”整理和导出完整记录。验收页提供 Fleet、分享和聊天的原生页签入口；对应页签未启用时，按钮禁用并提示检查插件设置。
+
+已有 `.agent-tasks/` 项目档案保留原路径。旧档案查询接口继续兼容读取，索引按每页 20 条读取；日常状态刷新不扫描历史，不读取完整会话日志。
+
+已有快照不补造原始需求或历史。重启后的活动任务仍按现有规则阻塞，先清理旧子任务再重试；读取记录不会自动续跑。辅助档案写入失败时在对应会话显示提示，必要运行文件已保存的调度继续；必要运行状态保存或恢复失败仍阻止派单。
+
+本功能只记录通过本插件建立的托管计划。简单任务以及其他工具单独创建的子 Agent，继续按原有方式处理。没有增加常驻模型循环或独立规划框架。
+
+客户端已更新、服务仍运行旧版时，会按完整会话编号筛选旧版响应，并提示重新加载插件；明确返回其他会话编号的响应不会显示。首次读取失败提供“重新读取”和“回到聊天”，具体原因可展开；后续刷新失败保留上次结果，并标注尚未更新。
+
+子任务运行失败或超时后，当前计划会暂停后续自动派单，尚未启动的排队任务会标为“未启动”。已在运行的任务继续收尾；主 Agent 处理失败原因后，必须对具体任务用 `delegation_control retry` 明确重试。单任务重试仍受“每任务最多执行”限制。
+
+## HTTP 接口
+
+- `GET /dsh-delegation-first/api/config`：配置。
+- `POST /dsh-delegation-first/api/config`：保存模式、预算、并发、次数、时限与模型。
+- `GET /dsh-delegation-first/api/state?sessionId=<会话编号>`：仅返回指定会话的计数、计划、需求来源、模型、验证和辅助档案提示。省略参数保留旧版全局读取兼容。
+- `GET /dsh-delegation-first/api/history?before=<档案编号>`：按创建时间倒序读取历史索引，最多 20 条；返回 `next` 游标。
+- `GET /dsh-delegation-first/api/archive?id=<档案编号>`：读取指定任务快照和 Markdown 摘要。
+- 同一档案接口加 `format=markdown`：下载摘要。接口只接受生成的档案编号，不接受文件路径。
+
+路由仍通过 `ctx.inject(['webServer'], registerRoutes)` 等待服务就绪后注册，避免启动顺序造成的 404。

@@ -1,0 +1,14 @@
+# 委派优先 bundle：两行，一个 gate + 一个 Skill 来源。
+# 第一行：gate 本体 —— 主 agent 在派单前的动手调用会被工具层拒绝。
+# 第二行：把本包 skills/ 注册成 filesystem Skill 来源，delegation-first
+#         （编排手册 / 任务卡模板 / 子 agent 契约）才能被按需加载。
+#         Skill 根目录用已安装的 npm 身份解析，不从 baseUrl 拼接路径。
+- insert:
+    - id: dsh-delegation-first
+      name: '@local/dsh-delegation-first'
+    - id: dsh-delegation-first-skill
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        providerName: delegation-first-plugin
+        includeDefaultRoots: false
+        bundledSkillDir: !!js process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@local/dsh-delegation-first/package.json')), 'skills')

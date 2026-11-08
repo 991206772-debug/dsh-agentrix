@@ -1,0 +1,23 @@
+# Local dependencies, generated packages and editor files
+node_modules/
+dist/
+release/
+*.tgz
+*.log
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local configuration and development records
+.env
+.env.*
+!.env.example
+task_plan.md
+findings.md
+progress.md
+.agent-tasks/
+.dsh/
+.agent/
+.claude/
+.gemini/

@@ -1,0 +1,60 @@
+{
+  "name": "@local/dsh-delegation-first",
+  "version": "1.7.0",
+  "private": true,
+  "author": "991206772-debug",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/991206772-debug/dsh-delegation-first.git"
+  },
+  "homepage": "https://github.com/991206772-debug/dsh-delegation-first#readme",
+  "bugs": {
+    "url": "https://github.com/991206772-debug/dsh-delegation-first/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.3.0"
+  },
+  "keywords": ["dsh-plugin", "workflow", "subagent", "delegation", "review"],
+  "description": "Coordinator task planning, bounded native delegation, role-based execution and review models, supervision, and evidence-based acceptance.",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "check": "node --check index.js && node --check orchestrator.js && node --check completion.js && node --check task-records.js && node --check client.js"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "orchestrator.js",
+    "completion.js",
+    "task-records.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "skills",
+    "docs/usage.md",
+    "assets/*.png",
+    "assets/*.jpg",
+    "screenshots.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}
