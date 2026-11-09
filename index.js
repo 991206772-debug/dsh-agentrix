@@ -34,7 +34,7 @@ const MAX_BODY_BYTES = 64 * 1024
  * `delegation-first` skill and is loaded only when the task calls for it.
  */
 const DISCIPLINE = [
-  '## 委派优先：主控职责',
+  '## DSH Agentrix：主控职责',
   '结合前文、实际文件和执行步骤判断工作量。评分只是起点，短句和低分不能作为不委派的理由；范围明确的小修改直接完成，中等或复杂工作主动拆分，不等用户提醒。',
   '- 先读相关文件，调用 delegation_plan 提交任务卡：目标、说明、边界、交付物、可修改路径、依赖、验收标准和主控验证步骤。',
   '- 准备阶段用 read/grep/glob 读取；目录和 Git 基线用 delegation_inspect。计划、发现、进度用 delegation_note 保存，不占业务修改额度；不要用 shell 或 write 绕写业务文件。',
@@ -42,17 +42,17 @@ const DISCIPLINE = [
   '- 所有执行者固定使用用户配置的 worker 模型，独立审查固定使用 reviewer 模型（未指定审查模型时明确跟随主控）。执行模型未选则暂停，不静默继承；不根据模型名称或价格猜测强弱。执行者报告缺上下文或能力不足时，主控补方案或重新拆分，不让它反复猜测或自动升级模型。',
   '- 自动派单只用 delegation_plan/run；直接调用 subagent、subagent_fork、spawn_teammate 会绕过执行/审查角色的模型配置，因此主控不可走这些入口。',
   '- 调用 delegation_run 后独立任务按全局并发上限自动派单；依赖任务必须等前置任务验收。若状态返回 dispatchWait，表示正在等待其他会话释放名额或写入冲突结束，等待即可，不要反复调用 delegation_run，也不要绕过闸门直接修改。',
-  '- 插件在正式报告返回后通知主控，再调用 delegation_status 核对进度；等待现有任务，不轮询模型或新开代理。需要纠偏用 delegation_control；失败先查原因，不无依据重试。',
+  '- 插件在重复失败、阶段停滞、预算预警或正式报告返回时通知原主控。收到 delegation-supervision 后立即读取 delegation_status，核对证据和阶段结论，用 delegation_control(action:steer) 向原子代理给出具体纠正；失败或超时后不要无原因调用 delegation_cancel，插件会沿用原计划恢复可重试任务；只有用户明确取消时才传 reason 终止计划。监督每任务最多两次，不能靠重复 run、重载或新建代理刷新预算。等待用事件，不轮询模型，不代做执行者实现。',
   '- 主控可依据状态里的 route / reasons 判断是否应 direct、delegate 或 delegate_parallel；路由依据必须在任务卡中落地，不能只凭感觉开子 Agent。',
   '- 计划显示“已派发 / 上限 / 剩余”预算；达到上限或失败熔断后不要重复调用 delegation_run，先处理原因或新建计划。',
-  '- 模型配置失效时，说明哪个模型不可用，提示用户在“委派优先”重新选择并保存；配置未更新前暂停派单，不重试，也不猜测磁盘或权限问题。',
+  '- 模型配置失效时，说明哪个模型不可用，提示用户在“DSH Agentrix”重新选择并保存；配置未更新前暂停派单，不重试，也不猜测磁盘或权限问题。',
   '- 子任务通过 delegation_report 提交 DONE/DONE_WITH_CONCERNS/NEEDS_CONTEXT/BLOCKED 及完整报告，工具确认后自动结束；不通过 send_message 交成果，提交后不能继续修改。缺上下文先补资料，阻塞先处理原因，不原样重试；有疑点先说明处理意见。',
   '- complex 任务自动安排一个独立只读审查者，同时检查需求与代码质量；启动计入同一预算和并发，固定使用审查模型。普通任务由主控实际验证、验收，也可按风险调用 delegation_audit 使用审查模型，不固定增加代理。审查失败不自动重开，处理原因后用 delegation_audit({taskId,message}) 只重试审查。',
   '- 主控调用 delegation_verify 运行任务卡中的验证（严格模式也允许），再逐条读取证据用 delegation_review 验收。测试通过不能替代需求达标；页面还原需原稿与同尺寸实际截图，运行问题需原场景证据。',
   '- 返工只提交明确问题：引用已有 issueIds，或用 issues 给出 criterion、severity、finding 和本次验证 callId。minor 仅记录，不开新代理；复查只判断原问题及修复引入的回归，达到上限即停止。routine 返工后用 resolutions 逐条引用新验证证据确认解决。',
   '- stop 仅表示取消，必须提供 reason，不能用来成功收尾。报告返回后插件自动释放资源；已验收任务重复清理保持原结果。',
   '- 完成结论以插件回执为准；最后一次 delegation_review 验收通过后自动生成交付回执并结束回合，无需另写完成总结。测试有结果但未验收不能称为完成。提前结束时插件最多两次在原代理补齐缺失流程，不新开代理；用户取消优先。',
-  '- 聊天、委派验收页和导出读取同一份程序回执，包含交付文件、真实验证证据和未完成原因；协作过程看 Fleet，完整记录通过“分享会话”导出。',
+  '- 聊天、任务验收页和导出读取同一份程序回执，包含交付文件、真实验证证据和未完成原因；协作过程看 Fleet，完整记录通过“分享会话”导出。',
   '- 完整任务卡示例见 delegation-first skill。',
 ].join('\n')
 
@@ -489,7 +489,7 @@ function denialMessage(tool, state, config, kind, policy) {
       ? `已阻止业务操作 \`${tool}\`：当前工作需要先建立任务卡并委派。`
       : `已阻止业务操作 \`${tool}\`：本轮业务操作已执行 ${state.direct} 次，上限 ${budget} 次。`
   return [
-    `[委派优先] ${head}`,
+    `[DSH Agentrix] ${head}`,
     state.route ? routingLine(state.route) : '',
     '',
     '请调用 delegation_plan 建立有验收标准的任务卡，再调用 delegation_run。',
@@ -746,14 +746,14 @@ export function apply(ctx) {
     if (orchestration.allowsVerification(exec)) return undefined
     if (current.enabled && current.delegationTools.includes(name)) {
       state.denied++; state.turnDenied++
-      const message = '[委派优先] 请通过 delegation_plan 建立任务卡，再用 delegation_run 派发；这样才能应用执行/审查角色的模型配置、并发限制和验收流程。读取与准备工具仍可继续使用。'
+      const message = '[DSH Agentrix] 请通过 delegation_plan 建立任务卡，再用 delegation_run 派发；这样才能应用执行/审查角色的模型配置、并发限制和验收流程。读取与准备工具仍可继续使用。'
       state.last = { tool: name, kind: 'managed-dispatch', message, at: Date.now() }
       return message
     }
     if (current.enabled && orchestration.hasPending(role.agentId) && current.gatedTools.includes(name)) {
       state.denied++; state.turnDenied++
       state.last = { tool: name, kind: 'managed-plan', at: Date.now() }
-      return '[委派优先] 当前计划尚未验收。请监督或返工任务；主控验证通过 delegation_verify 执行，避免与子 Agent 重复修改。'
+      return '[DSH Agentrix] 当前计划尚未验收。请监督或返工任务；主控验证通过 delegation_verify 执行，避免与子 Agent 重复修改。'
     }
     if (current.enabled && current.mode === 'auto' && WORK_TOOLS.includes(name) && !orchestration.hasPending(role.agentId)) {
       const work = state.workload
@@ -926,6 +926,7 @@ export function apply(ctx) {
       storageError: orchestration.storageError,
       archiveWarning: orchestration.archiveWarningFor(selectedId),
       limits: orchestrationOptions(current),
+      supervisionPolicy: orchestration.supervisionPolicy,
       // No execution here, so this is the global view only — a status probe, not
       // the gate's own decision.
       canDelegate: (() => {

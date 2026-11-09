@@ -1,26 +1,34 @@
 {
   "name": "@local/dsh-delegation-first",
-  "version": "1.7.0",
+  "version": "1.7.3",
   "private": true,
   "author": "991206772-debug",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/991206772-debug/dsh-delegation-first.git"
+    "url": "https://github.com/991206772-debug/dsh-agentrix.git"
   },
-  "homepage": "https://github.com/991206772-debug/dsh-delegation-first#readme",
+  "homepage": "https://github.com/991206772-debug/dsh-agentrix#readme",
   "bugs": {
-    "url": "https://github.com/991206772-debug/dsh-delegation-first/issues"
+    "url": "https://github.com/991206772-debug/dsh-agentrix/issues"
   },
   "type": "module",
   "engines": {
     "node": ">=22.3.0"
   },
-  "keywords": ["dsh-plugin", "workflow", "subagent", "delegation", "review"],
-  "description": "Coordinator task planning, bounded native delegation, role-based execution and review models, supervision, and evidence-based acceptance.",
+  "keywords": [
+    "dsh-plugin",
+    "workflow",
+    "subagent",
+    "delegation",
+    "review",
+    "agentrix",
+    "multi-agent"
+  ],
+  "description": "DSH Agentrix: native multi-agent planning, role-based execution and review, and evidence-based acceptance.",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node --check index.js && node --check orchestrator.js && node --check completion.js && node --check task-records.js && node --check client.js"
+    "check": "node --check index.js && node --check orchestrator.js && node --check supervision.js && node --check completion.js && node --check task-records.js && node --check client.js"
   },
   "exports": {
     ".": "./index.js",
@@ -32,6 +40,7 @@
   "files": [
     "index.js",
     "orchestrator.js",
+    "supervision.js",
     "completion.js",
     "task-records.js",
     "client.js",

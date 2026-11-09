@@ -18,6 +18,19 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('default execution limits dispatch four tasks and retain the expanded plan and time budgets', async () => {
+  const f = await fixture()
+  await f.plan(['a', 'b', 'c', 'd', 'e'].map(id => card(id)))
+  await f.execute('delegation_run')
+  const plan = f.snapshot()
+  assert.equal(f.calls.length, 4)
+  assert.equal(plan.tasks[4].status, 'queued')
+  assert.equal(plan.activationBudget.limit, 64)
+  for (const task of plan.tasks.slice(0, 4)) {
+    assert.equal(task.supervision.deadlineAt - task.supervision.startedAt, 120 * 60_000)
+  }
+})
+
 test('execution models depend on role rather than task complexity and both audit paths use the reviewer', async () => {
   const f = await fixture({ autoConclude: true, models: {
     worker: { provider: 'local', model: 'low-worker' }, reviewer: { provider: 'local', model: 'high-reviewer' },
@@ -84,6 +97,55 @@ test('a coordinator cannot use an unexplained stop as successful cleanup', async
   assert.equal(f.snapshot().tasks[0].stop.reason, '用户明确取消本次修改')
   assert.equal(f.snapshot().tasks[0].review, null)
   assert.equal(f.pending[0].receipt.disposeCount, 1)
+})
+
+test('an unexplained whole-plan cancel after failure resumes the same plan when retry budget remains', async () => {
+  const f = await fixture({ maxAttempts: 2 })
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  f.pending[0].reject(new Error('模型服务短暂不可用'))
+  await waitFor(() => f.snapshot().tasks[0].status === 'failed')
+  const result = await f.execute('delegation_cancel')
+  assert.equal(result.status, 'recovering')
+  assert.equal(f.snapshot().cancelled, false)
+  assert.equal(f.snapshot().completion, null)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.snapshot().tasks[0].attempts, 2)
+  assert.equal(f.calls.length, 2)
+  assert.match(f.parent.injected.at(-1).content[0].text, /沿用原计划自动恢复/)
+})
+
+test('an explicit reason still cancels a failed plan, while exhausted retries stay blocked', async () => {
+  const explicit = await fixture({ maxAttempts: 2 })
+  await explicit.plan([card('a')]); await explicit.execute('delegation_run')
+  explicit.pending[0].reject(new Error('外部服务不可用'))
+  await waitFor(() => explicit.snapshot().tasks[0].status === 'failed')
+  await explicit.execute('delegation_cancel', { reason: '用户明确取消，不再继续尝试' })
+  assert.equal(explicit.snapshot().status, 'cancelled')
+  assert.equal(explicit.snapshot().completion.outcome, 'cancelled')
+  await assert.rejects(explicit.execute('delegation_run'), /计划已取消/)
+
+  const exhausted = await fixture({ maxAttempts: 1 })
+  await exhausted.plan([card('b')]); await exhausted.execute('delegation_run')
+  exhausted.pending[0].reject(new Error('重试额度已用尽'))
+  await waitFor(() => exhausted.snapshot().tasks[0].status === 'failed')
+  const result = await exhausted.execute('delegation_cancel')
+  assert.equal(result.status, 'blocked')
+  assert.equal(exhausted.snapshot().cancelled, false)
+  assert.equal(exhausted.snapshot().completion.outcome, 'blocked')
+  assert.equal(exhausted.calls.length, 1)
+})
+
+test('a legacy internal cancellation can resume the original plan after the retry limit is raised', async () => {
+  const f = await fixture({ maxAttempts: 2 })
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.execute('delegation_cancel')
+  assert.equal(f.snapshot().status, 'cancelled')
+  const result = await f.execute('delegation_run')
+  assert.equal(result.plan.status, 'running')
+  assert.equal(f.snapshot().completion, null)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.snapshot().tasks[0].attempts, 2)
+  assert.equal(f.calls.length, 2)
 })
 
 test('a committed report concludes the original child and a failed tool result cannot become a report', async () => {
@@ -672,6 +734,7 @@ async function fixture(options = {}) {
     get children() { return [...children.values()] },
     endTurn: (index, signal = new AbortController().signal) => events.get('agent/turn-stopping')?.({ agent: index === undefined ? parent : children.get(pending[index].receipt.childId), signal }),
     report: (index, args) => invoke('delegation_report', args, children.get(pending[index].receipt.childId)),
+    checkpoint: (index, args) => invoke('delegation_checkpoint', args, children.get(pending[index].receipt.childId)),
     async complete(index, result) {
       await this.report(index, { status: 'DONE', summary: '已完成隔离任务', report: result.output?.filter(item => item.type === 'text').map(item => item.text).join('\n') || '已检查隔离产物。' })
       pending[index].resolve(result)
@@ -1021,7 +1084,7 @@ test('a retired provider blocks the whole dispatch with an actionable error and 
   const f = await fixture({ models: { routine: { provider: 'retired', model: 'cheap' }, complex: { provider: 'local', model: 'deep' } } })
   await f.plan([card('valid-first', { complexity: 'complex' }), card('stale-route')])
   for (let i = 0; i < 3; i++) {
-    await assert.rejects(f.execute('delegation_run'), /执行模型.*失效.*委派优先.*配置未更新前不要重试/)
+    await assert.rejects(f.execute('delegation_run'), /执行模型.*失效.*DSH Agentrix.*配置未更新前不要重试/)
     assert.equal(f.calls.length, 0)
     assert.equal(f.snapshot().tasks[1].attempts, 0)
   }
@@ -1058,6 +1121,49 @@ test('rejects cyclic dependency plans and serializes overlapping writes', async 
   await f.plan([card('a', { writes: ['src'] }), card('b', { writes: ['src/file.js'] })]); await f.execute('delegation_run')
   assert.equal(f.calls.length, 1)
 })
+test('wildcard write scopes reserve their own directory instead of unrelated projects', async () => {
+  const f = await fixture()
+  await f.plan([card('unrelated', { writes: ['C:/Users/Demo/Coopanion'] }),
+    card('workbench', { writes: ['D:/projects/workbench/**'] }),
+    card('overlap', { writes: ['D:/projects/workbench/src/main.go'] })])
+  await f.execute('delegation_run')
+  assert.equal(f.calls.length, 2)
+  assert.equal(f.snapshot().tasks[1].status, 'running')
+  assert.equal(f.snapshot().tasks[2].status, 'queued')
+  assert.equal(f.snapshot().dispatchWait.taskId, 'workbench')
+})
+test('an unrelated historical session awaiting review does not block a wildcard writer', async () => {
+  const f = await fixture()
+  f.parent.id = 'previous-session'
+  await f.plan([card('old-cleanup', { writes: ['C:/Users/Demo/Coopanion'] })])
+  await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  f.parent.id = 'current-session'
+  await f.plan([card('build', { writes: ['D:/projects/workbench/**'] })])
+  await f.execute('delegation_run')
+  const plans = f.engine.snapshot()
+  assert.equal(plans.find(plan => plan.sessionId === 'previous-session').status, 'review')
+  assert.equal(plans.find(plan => plan.sessionId === 'current-session').tasks[0].status, 'running')
+  assert.equal(plans.find(plan => plan.sessionId === 'current-session').dispatchWait, null)
+  assert.equal(f.calls.length, 2)
+})
+test('explicit cancellation clears write waits and historical cancelled waits stay hidden after reload', async () => {
+  const f = await fixture()
+  await f.plan([card('a', { writes: ['src'] }), card('b', { writes: ['src/file.js'] })])
+  await f.execute('delegation_run')
+  assert.equal(f.snapshot().dispatchWait.reason, 'write-conflict')
+  await f.execute('delegation_cancel', { reason: '用户明确结束本计划' })
+  assert.equal(f.snapshot().dispatchWait, null)
+  const launches = f.calls.length
+  await f.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    stored.plans[0].dispatchWait = { reason: 'write-conflict', message: '旧版本残留的等待信息', taskId: 'a' }
+    await writeFile(file, JSON.stringify(stored))
+  })
+  assert.equal(f.snapshot().status, 'cancelled')
+  assert.equal(f.snapshot().dispatchWait, null)
+  assert.equal(f.calls.length, launches)
+})
 test('restart marks unfinished tasks blocked and does not spawn again', async () => {
   const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
   const engine = await f.reload()
@@ -1088,6 +1194,297 @@ test('supervision messages and cancellation use the exact native child and relea
   assert.equal(f.snapshot().status, 'cancelled')
   assert.equal(f.pending[0].receipt.disposed, true)
 })
+test('repeated child errors wake the waiting original coordinator without reopening a child or spending completion recovery', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const stopping = f.endTurn()
+  await tick()
+  const child = f.children[0]
+  for (let i = 0; i < 3; i++) f.engine.observe({ agent: child, name: 'cordis_inspect_query', callId: 'invalid-' + i,
+    arguments: { input: '{}' } }, { isError: true, content: [{ type: 'text', text: 'input must be an object' }] })
+  await waitFor(() => f.parent.injected.some(message => message.source.kind === 'delegation-supervision'))
+  await stopping
+  assert.equal(f.snapshot().recovery.used, 0)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.pending.length, 1)
+  assert.equal(f.pending[0].receipt.disposed, undefined)
+  const alert = f.snapshot().tasks[0].supervision.pending
+  assert.equal(alert.code, 'REPEATED_TOOL_ERROR')
+  assert.match(alert.reason, /input must be an object/)
+  await f.execute('delegation_control', { taskId: 'a', action: 'steer', message: 'input 传对象，按已公开 schema 重试一次。' })
+  assert.equal(f.calls[1][1], child.id)
+  assert.equal(f.snapshot().tasks[0].supervision.used, 1)
+  assert.equal(f.snapshot().tasks[0].supervision.pending, null)
+})
+
+test('stage checkpoints keep current-task evidence and unfinished work without claiming acceptance or extending the deadline', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const deadline = f.snapshot().tasks[0].supervision.deadlineAt
+  const args = { phase: 'investigation', summary: '已核对原生工具参数，尚未修改。', nextStep: '按确认的接口实现修复。', evidence: ['read-current'] }
+  await assert.rejects(f.checkpoint(0, args), /证据/)
+  f.engine.observe({ agent: f.children[0], name: 'read', callId: 'read-current' }, { isError: false, content: [] })
+  await f.checkpoint(0, args)
+  const task = f.snapshot().tasks[0]
+  assert.equal(task.supervision.checkpoint.summary, args.summary)
+  assert.equal(task.supervision.checkpoint.verified, false)
+  assert.equal(task.supervision.deadlineAt, deadline)
+  assert.equal(task.status, 'running')
+  assert.equal(f.snapshot().completion, null)
+  await assert.rejects(f.execute('delegation_checkpoint', args), /托管子/)
+  await f.reload()
+  assert.equal(f.snapshot().tasks[0].supervision.checkpoint.nextStep, args.nextStep)
+})
+
+test('no stage progress requests supervision and a near deadline asks the same worker to report before the hard timeout', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+  const f = await fixture({ taskTimeoutMinutes: 1 }); await f.plan([card('a')]); await f.execute('delegation_run')
+  t.mock.timers.tick(30_000)
+  for (let i = 0; i < 50 && !f.snapshot().tasks[0].supervision.pending; i++) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.snapshot().tasks[0].supervision.pending?.code, 'NO_STAGE_PROGRESS')
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  await f.execute('delegation_control', { taskId: 'a', action: 'steer', message: '结束调查，按已确认方案修改指定文件。' })
+  t.mock.timers.tick(18_000)
+  for (let i = 0; i < 50 && !f.calls.some(call => Array.isArray(call) && /delegation_report/.test(call[2][0].text)); i++) await new Promise(resolve => setImmediate(resolve))
+  assert.ok(f.calls.some(call => Array.isArray(call) && call[1] === f.pending[0].receipt.childId && /delegation_report/.test(call[2][0].text)))
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  t.mock.timers.tick(12_000)
+  for (let i = 0; i < 50 && f.snapshot().tasks[0].status === 'running'; i++) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.snapshot().tasks[0].status, 'failed')
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+  assert.equal(f.pending.length, 1)
+})
+
+test('token usage is observed without imposing generation or cumulative token limits', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  assert.equal(f.calls[0].request.agentOptions.maxTokens, undefined)
+  assert.doesNotMatch(f.calls[0].request.prompt[0].text, /40000|8192|32000/)
+  const child = f.children[0]
+  let sent = 0
+  f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => { sent++ })
+  const event = { type: 'assistant/message', seq: 11, data: { usage: { inputTokens: 1000, cacheReadTokens: 99000, outputTokens: 50000 } } }
+  f.emit('session/event', { id: child.id }, event)
+  f.emit('session/event', { id: child.id }, event)
+  await tick()
+  const task = f.snapshot().tasks[0]
+  assert.equal(task.supervision.metrics.requests, 1)
+  assert.equal(task.supervision.metrics.contextTokens, 100000)
+  assert.equal(task.supervision.metrics.outputTokens, 50000)
+  assert.equal(task.supervision.pending, null)
+  f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => { sent++ })
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.pending[0].receipt.disposeCount, undefined)
+  assert.equal(f.calls.length, 1)
+  assert.equal(sent, 2)
+  assert.equal(task.modelRoute.actual.model, 'cheap')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const archive = await f.engine.readArchive(f.snapshot().archive.id)
+  assert.match(archive.markdown, /输出 Token：50000（仅统计，不设插件上限）/)
+  assert.doesNotMatch(archive.markdown, /50000\/(?:null|undefined|40000)/)
+})
+test('a provider configured output allowance is preserved rather than reduced to 8192', async () => {
+  const f = await fixture()
+  f.ctx.llm.resolveCallConfig = async route => ({ config: { ...route, maxTokens: 32768 } })
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  assert.equal(f.calls[0].request.agentOptions.maxTokens, 32768)
+})
+test('native output truncations continue the same child without using report recovery or starting a replacement', async () => {
+  const f = await fixture()
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  const child = f.children[0]
+  for (let i = 0; i < 3; i++) {
+    const stream = f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => (async function* () {
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    })())
+    for await (const chunk of stream) {}
+    await f.endTurn(0)
+  }
+  assert.equal(f.snapshot().tasks[0].recovery.used, 0)
+  assert.equal(child.injected.length, 3)
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.pending[0].receipt.disposeCount, undefined)
+  await f.execute('delegation_cancel', { reason: '用户取消优先于输出续接' })
+  const notices = child.injected.length
+  await f.endTurn(0)
+  assert.equal(child.injected.length, notices)
+})
+test('a committed report survives the native sticky max-tokens stop reason and remains subject to acceptance', async () => {
+  const f = await fixture()
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'max-tokens', output: [] })
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+  assert.equal(f.snapshot().completion, null)
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+})
+test('the original coordinator can continue truncated output without consuming acceptance recovery', async () => {
+  const f = await fixture()
+  await f.plan([card('a')])
+  for (let i = 0; i < 3; i++) {
+    const stream = f.emit('llm/stream', { sessionId: f.parent.id, provider: 'local', model: 'parent' }, () => (async function* () {
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    })())
+    for await (const chunk of stream) {}
+    await f.endTurn()
+  }
+  assert.equal(f.snapshot().recovery.used, 0)
+  assert.equal(f.parent.injected.length, 3)
+  assert.equal(f.calls.length, 0)
+})
+
+test('an unspecified reasoning effort accepts only the native recorded default and pins it for subsequent requests', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const child = f.children[0]
+  child.session.requestHeader = () => ({ config: { provider: 'local', model: 'cheap', reasoningEffort: 'max' }, adapterDefaults: { reasoningEffort: true } })
+  let sent = 0
+  const request = { sessionId: child.id, provider: 'local', model: 'cheap', reasoningEffort: 'max' }
+  f.emit('llm/stream', request, () => { sent++ })
+  assert.equal(sent, 1)
+  assert.equal(f.snapshot().tasks[0].modelRoute.resolved.reasoningEffort, 'max')
+  assert.equal(f.snapshot().tasks[0].modelRoute.defaultSource, 'native-request-header')
+  assert.throws(() => f.emit('llm/stream', { ...request, reasoningEffort: 'high' }, () => { sent++ }), /模型请求与任务配置不一致/)
+  assert.equal(sent, 1)
+  const explicit = await fixture({ models: { worker: { provider: 'local', model: 'cheap', reasoningEffort: 'high' }, reviewer: null } })
+  await explicit.plan([card('b')]); await explicit.execute('delegation_run')
+  explicit.children[0].session.requestHeader = child.session.requestHeader
+  assert.throws(() => explicit.emit('llm/stream', { ...request, sessionId: explicit.children[0].id }, () => { sent++ }), /模型请求与任务配置不一致/)
+  assert.equal(sent, 1)
+})
+
+test('task cards reject missing live-tool required arguments before any worker is started', async () => {
+  const f = await fixture()
+  f.ctx.tools.schemas = () => [
+    { name: 'read', parameters: { type: 'object', required: ['file_path'], properties: { file_path: { type: 'string' } } } },
+    { name: 'glob', parameters: { type: 'object', required: ['pattern'], properties: { path: { type: 'string' }, pattern: { type: 'string' } } } },
+  ]
+  await assert.rejects(f.plan([card('a')]), /read.*file_path/)
+  await assert.rejects(f.plan([card('a', { checks: [{ tool: 'glob', arguments: { path: '.' } }] })]), /glob.*pattern/)
+  assert.equal(f.pending.length, 0)
+  await f.plan([card('a', { checks: [{ tool: 'read', arguments: { file_path: 'result.txt' } }] })])
+  await f.execute('delegation_run')
+  assert.equal(f.pending.length, 1)
+})
+
+test('supervision deduplicates errors, persists its correction cap and never restarts or releases a child twice', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  let call = 0
+  const fail = () => f.engine.observe({ agent: f.children[0], name: 'grep', callId: 'missing-path-' + ++call },
+    { isError: true, content: [{ type: 'text', text: 'search failed: packaged path is not a directory' }] })
+  for (let round = 0; round < 2; round++) {
+    for (let i = 0; i < 8; i++) fail()
+    await waitFor(() => f.parent.injected.filter(message => message.source.kind === 'delegation-supervision').length === round + 1)
+    await f.execute('delegation_control', { taskId: 'a', action: 'steer', message: '使用已确认可用的读取入口，第 ' + (round + 1) + ' 次纠正。' })
+    assert.equal(f.snapshot().tasks[0].supervision.used, round + 1)
+  }
+  for (let i = 0; i < 3; i++) fail()
+  await waitFor(() => f.snapshot().tasks[0].status === 'blocked')
+  assert.equal(f.snapshot().tasks[0].issue.code, 'SUPERVISION_EXHAUSTED')
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+  assert.equal(f.pending.length, 1)
+  await f.reload()
+  assert.equal(f.snapshot().tasks[0].supervision.used, 2)
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+})
+
+test('changed files break a repeated-failure streak and cancellation suppresses pending supervision', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const child = f.children[0], failure = { isError: false, value: { exitCode: 1 }, content: [{ type: 'text', text: 'one assertion failed' }] }
+  let call = 0
+  const fail = () => f.engine.observe({ agent: child, name: 'pwsh', callId: 'test-failed-' + ++call }, failure)
+  fail(); fail()
+  f.engine.observe({ agent: child, name: 'edit', callId: 'fix-applied' }, { isError: false, content: [] })
+  fail(); fail()
+  assert.equal(f.snapshot().tasks[0].supervision.pending, null)
+  fail()
+  await f.execute('delegation_cancel')
+  await tick()
+  const notices = f.parent.injected.length
+  fail(); await tick()
+  assert.equal(f.parent.injected.length, notices)
+  assert.equal(f.snapshot().tasks[0].status, 'cancelled')
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+})
+
+test('execution budget automatically continues a task that has real progress', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const child = f.children[0]
+  f.engine.observe({ agent: child, name: 'read', callId: 'read-proof' }, { isError: false, content: [] })
+  await f.checkpoint(0, { phase: 'investigation', summary: '已有调查结论，尚未实现。', nextStep: '主控补充接口方案。', evidence: ['read-proof'] })
+  for (let i = 0; i < 80; i++) f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => {})
+  let sent = 0
+  assert.throws(() => f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => { sent++ }), /预算/)
+  await waitFor(() => f.calls.length === 2 && f.snapshot().tasks[0].status === 'running')
+  assert.equal(sent, 0)
+  assert.equal(f.snapshot().tasks[0].supervision.checkpoint.summary, '已有调查结论，尚未实现。')
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+  assert.equal(f.snapshot().tasks[0].continuation.used, 1)
+  assert.equal(f.snapshot().tasks[0].attempts, 1, 'a budget continuation is the same logical attempt')
+  assert.equal(f.snapshot().activationBudget.used, 2)
+  await f.complete(1, { stopReason: 'completed', output: [] })
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+})
+
+test('execution budget blocks when no progress or activation slot remains', async () => {
+  const noProgress = await fixture()
+  await noProgress.plan([card('a')]); await noProgress.execute('delegation_run')
+  const child = noProgress.children[0]
+  for (let i = 0; i < 80; i++) noProgress.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => {})
+  assert.throws(() => noProgress.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => {}), /预算/)
+  await waitFor(() => noProgress.snapshot().tasks[0].status === 'blocked')
+  assert.equal(noProgress.snapshot().tasks[0].continuation, undefined)
+  assert.equal(noProgress.calls.length, 1)
+
+  const exhausted = await fixture({ maxActivations: 1 })
+  await exhausted.plan([card('b')]); await exhausted.execute('delegation_run')
+  const exhaustedChild = exhausted.children[0]
+  exhausted.engine.observe({ agent: exhaustedChild, name: 'pwsh', callId: 'progress-proof' }, { isError: false, value: { exitCode: 0 }, content: [] })
+  for (let i = 0; i < 80; i++) exhausted.emit('llm/stream', { sessionId: exhaustedChild.id, provider: 'local', model: 'cheap' }, () => {})
+  assert.throws(() => exhausted.emit('llm/stream', { sessionId: exhaustedChild.id, provider: 'local', model: 'cheap' }, () => {}), /预算/)
+  await waitFor(() => exhausted.snapshot().tasks[0].status === 'blocked')
+  assert.equal(exhausted.calls.length, 1)
+  assert.equal(exhausted.snapshot().activationBudget.used, 1)
+})
+
+test('a persisted budget block resumes the same plan after plugin reload when progress remains', async () => {
+  const f = await fixture({ maxActivations: 3 })
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    const task = stored.plans[0].tasks[0]
+    task.status = 'blocked'
+    delete task.recovered
+    task.issue = { code: 'EXECUTION_BUDGET_EXHAUSTED', retryable: false, message: '旧版本达到模型预算' }
+    task.error = task.issue.message
+    delete task.continuation
+    task.supervision.lastProgressAt = task.supervision.startedAt + 1
+    task.supervision.metrics = { requests: 80, inputTokens: 1000, outputTokens: 40000, contextTokens: 1000 }
+    await writeFile(file, JSON.stringify(stored))
+  })
+  const result = await f.execute('delegation_run')
+  await waitFor(() => f.calls.length === 2 && f.snapshot().tasks[0].status === 'running')
+  assert.equal(result.plan.status, 'running')
+  assert.equal(f.snapshot().tasks[0].continuation.used, 1)
+  assert.equal(f.snapshot().tasks[0].attempts, 1)
+  assert.equal(f.snapshot().activationBudget.used, 2)
+})
+
+test('a report already in the real result pipeline gets a bounded confirmation window at the deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+  const entered = Promise.withResolvers(), release = Promise.withResolvers()
+  const f = await fixture({ taskTimeoutMinutes: 1, beforeResult: async exec => {
+    if (exec.name === 'delegation_report') { entered.resolve(); await release.promise }
+  } })
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  const reporting = f.report(0, { status: 'DONE', summary: '实际测试已有结果', report: '原始产物与测试结果均已记录，等待主控验收。' })
+  await entered.promise
+  t.mock.timers.tick(60_000)
+  assert.equal(f.pending[0].receipt.disposed, undefined)
+  release.resolve(); await reporting
+  for (let i = 0; i < 100 && f.snapshot().tasks[0].status === 'running'; i++) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+  assert.equal(f.snapshot().tasks[0].execution.commitState, 'committed')
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+  assert.equal(f.snapshot().completion, null)
+})
+
 test('task timeout requests native cleanup without retrying', async t => {
   const f = await fixture({ taskTimeoutMinutes: 1 })
   t.mock.timers.enable({ apis: ['setTimeout'] })

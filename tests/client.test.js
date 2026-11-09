@@ -5,6 +5,55 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('acceptance uses the native full-height conversation surface and hides only its ordinary composer', async () => {
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true,
+    json: async () => ({ ok: true, sessionId: 'session-current', plans: [], sessions: [] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    const root = view.nodes('div').find(node => node.props?.className === 'ddf-board-root')
+    assert.equal(root.props['data-conversation-composer-overlay'], '')
+    assert.equal(root.props['data-ddf-acceptance'], '')
+    const styles = view.nodes('style').map(node => node.children.join('')).join('\n')
+    assert.match(styles, /\[data-conversation-scroll\]:has\(> \[data-slot="conversation\.session"\] \[data-ddf-acceptance\]\)/)
+    assert.match(styles, /> \[data-composer-seat\]:not\(:has\(\[data-approval-key\],\[data-question-key\],\[data-plan-review-key\]\)\)/)
+    assert.match(styles, /padding-bottom:calc\(40px \+ var\(--dsh-composer-height,200px\)\)/)
+    assert.equal(view.nodes('textarea').length, 0)
+  } finally { view.close(); f.close() }
+})
+
+test('the conversation surface contract also covers loading and failed reads before settings mount', async () => {
+  const f = await sidebarFixture(undefined, { fetchState: async () => { throw new Error('HTTP 503') } })
+  const view = f.mountView('session-current')
+  try {
+    const marker = () => view.nodes('div').find(node => node.props?.['data-ddf-acceptance'] === '')
+    assert.ok(marker(), 'the loading view must already own the full-height surface')
+    await view.flush()
+    assert.ok(marker())
+    assert.match(view.text(), /暂时无法显示任务状态/)
+    assert.ok(view.button('重新读取'))
+  } finally { view.close(); f.close() }
+})
+
+test('Agentrix branding is consistent in plugin metadata, navigation and configuration', async () => {
+  for (const language of ['zh', 'en']) {
+    const metadata = JSON.parse(await readFile(new URL(`../locale/${language}.json`, import.meta.url), 'utf8'))
+    assert.equal(metadata.meta.title, 'DSH Agentrix')
+  }
+  for (const language of ['zh', 'en']) {
+    const f = await sidebarFixture({ status: 'ready', value: { groups: [{ id: 'demo', name: 'Demo',
+      models: [{ id: 'worker', name: 'Worker' }] }], failures: [] } }, { language })
+    await f.setConfig({ ...designConfig(), models: { worker: { provider: 'demo', model: 'worker' }, reviewer: null } })
+    const panel = f.mountPanel()
+    try {
+      await panel.flush()
+      assert.equal(f.label(), 'DSH Agentrix')
+      assert.match(panel.text(), /DSH Agentrix/)
+      assert.doesNotMatch(panel.text(), /委派优先|Delegation [Ff]irst/)
+    } finally { panel.close(); f.close() }
+  }
+})
+
 test('model configuration separates execution from review and saves role keys without changing the layout', async () => {
   const f = await sidebarFixture({ status: 'ready', value: { groups: [{ id: 'demo', name: 'Demo', models: [
     { id: 'low', name: '低模型' }, { id: 'high', name: '高模型' },
@@ -38,9 +87,10 @@ test('task details display execution and review models separately from task comp
   const view = f.mountView('session-current')
   try {
     await view.flush()
-    assert.match(view.text(), /执行模型 → demo \/ low-worker/)
+    assert.match(view.text(), /执行模型\s+low-worker/)
+    assert.ok(view.nodes('strong').some(node => node.props?.title === 'demo / low-worker'))
     assert.match(view.text(), /审查模型：demo \/ high-reviewer/)
-    assert.match(view.text(), /任务复杂度：设计与复杂问题/)
+    assert.match(view.text(), /任务复杂度\s+复杂/)
   } finally { view.close(); f.close() }
 })
 
@@ -100,6 +150,25 @@ test('chat and acceptance read the same program receipt and never label cancella
     assert.match(view.text(), /client.js/)
     assert.match(view.text(), /actual-check/)
   } finally { view.close(); f.close() }
+})
+
+test('a terminal timeout receipt explains why the flow cannot continue and does not say it is still waiting', async () => {
+  const plan = { protocolVersion: 2, sessionId: 'session-current', goal: '修复 DSH 插件注册', status: 'blocked',
+    tasks: [{ id: 'a', title: '修复 DSH 插件注册', status: 'failed', attempts: 1, error: '子任务超过 60 分钟，已请求停止', criteria: [], checks: [], outputs: [] }],
+    completion: { id: 'receipt-blocked-1', outcome: 'blocked', accepted: 0, total: 1, evidence: [], deliverables: [],
+      remaining: [{ taskId: 'a', title: '修复 DSH 插件注册', status: 'failed', reason: '子任务超过 60 分钟，已请求停止' }] } }
+  const body = { ok: true, sessionId: 'session-current', limits: { maxAttempts: 1 }, plans: [plan], sessions: [] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const notice = f.mountNotice('session-current'), action = f.mountAction('session-current'), view = f.mountView('session-current')
+  try {
+    await notice.flush(); await action.flush(); await view.flush()
+    assert.match(notice.text(), /达到每任务执行次数上限/)
+    assert.doesNotMatch(notice.text(), /等待 Agent|提交正式报告/)
+    assert.match(action.text(), /已阻塞/)
+    assert.doesNotMatch(action.text(), /等待 Agent|提交正式报告/)
+    assert.match(view.text(), /达到每任务执行次数上限/)
+    assert.match(view.text(), /新建计划/)
+  } finally { notice.close(); action.close(); view.close(); f.close() }
 })
 
 test('new plans without a final receipt show accepted counts rather than a completed delivery claim', async () => {
@@ -215,7 +284,7 @@ async function sidebarFixture(initialCatalog = { status: 'ready', value: { group
     modelDirectories: { catalog },
     layout: { selectPanel(id) { selectedPanel = id } },
     effect(fn) { cleanups.push(fn()) },
-    locale: { register(_ns, value) { dictionaries = value }, bind: () => key => dictionaries.zh[key] ?? key },
+    locale: { register(_ns, value) { dictionaries = value }, bind: () => key => dictionaries[options.language ?? 'zh'][key] ?? key },
     slots: {
       inject(_name, fn) { cleanups.push(fn()) },
       entries: () => ['fleet', 'share', 'chat'].map(id => ({ options: { id } })),
@@ -371,6 +440,37 @@ const designConfig = () => ({ ok: true, mode: 'auto', threshold: 2, maxParallel:
   ranges: { threshold: { min: 0, max: 20 }, maxParallel: { min: 1, max: 4 }, maxAttempts: { min: 1, max: 3 }, maxActivations: { min: 1, max: 32 }, taskTimeoutMinutes: { min: 1, max: 60 } },
   source: { kind: 'file', profile: 'default', environmentValue: null }, modelRouting: 'roles', models: { worker: null, reviewer: null }, locked: false, file: 'C:/test/default.json' })
 
+test('expanded defaults and server ranges work without replacing saved lower limits', async () => {
+  const defaults = { maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120 }
+  const maxima = { maxParallel: 8, maxAttempts: 10, maxActivations: 256, taskTimeoutMinutes: 240 }
+  const ranges = Object.fromEntries(Object.entries(maxima).map(([key, max]) => [key, { min: 1, max }]))
+  const f = await sidebarFixture()
+  await f.setConfig({ ok: true, mode: 'auto', models: { worker: null, reviewer: null }, defaults, ranges })
+  const panel = f.mountPanel()
+  try {
+    await panel.flush(); panel.button('执行限制').props.onClick(); await panel.flush()
+    for (const [key, value] of Object.entries(defaults)) {
+      const input = panel.nodes('input').find(node => node.props.id === 'ddf-' + key)
+      assert.equal(Number(input.props.value), value, key + ' fallback')
+      assert.equal(input.props.max, maxima[key], key + ' range')
+      assert.ok(panel.text().includes('默认 ' + value), key + ' default label')
+    }
+    const saved = designConfig()
+    await f.setConfig({ ...saved, revision: 'expanded-revision', defaults, ranges }); await panel.flush()
+    for (const key of Object.keys(defaults)) {
+      assert.equal(Number(panel.nodes('input').find(node => node.props.id === 'ddf-' + key).props.value), saved[key], key + ' saved value')
+    }
+    const expanded = { maxParallel: 6, maxAttempts: 6, maxActivations: 128, taskTimeoutMinutes: 180 }
+    for (const [key, value] of Object.entries(expanded)) {
+      panel.nodes('input').find(node => node.props.id === 'ddf-' + key).props.onChange({ target: { value: String(value) } })
+      await panel.flush()
+    }
+    assert.equal(panel.button('保存').props.disabled, false)
+    await panel.button('保存').props.onClick(); await panel.flush()
+    for (const [key, value] of Object.entries(expanded)) assert.equal(f.posted().at(-1)[key], value, key + ' saved')
+  } finally { panel.close(); f.close() }
+})
+
 test('the four configuration tabs preserve drafts and validate fields using server ranges', async () => {
   const configured = designConfig(); configured.ranges.maxAttempts.max = 4
   const f = await sidebarFixture(); await f.setConfig(configured); const panel = f.mountPanel()
@@ -490,7 +590,7 @@ test('an older host response is scoped locally without showing unrelated tasks o
   try {
     await view.flush()
     assert.match(view.text(), /本会话还没有托管任务/)
-    assert.match(view.text(), /重新加载.*委派优先/)
+    assert.match(view.text(), /重新加载.*DSH Agentrix/)
     assert.doesNotMatch(view.text(), /读取失败|其他会话的私有需求|其他会话的档案提示/)
   } finally { view.close(); f.close() }
 })
@@ -735,7 +835,7 @@ test('settings render before the first response and do not include the old globa
   try {
     const text = f.panelText()
     assert.match(text, /配置/)
-    assert.match(text, /委派验收/)
+    assert.match(text, /任务验收/)
     assert.doesNotMatch(text, /查看历史任务|打开任务档案|查看验收详情/)
   } finally { f.close() }
 })
@@ -743,9 +843,9 @@ test('settings render before the first response and do not include the old globa
 test('sidebar marks stale models before the configuration page is opened and clears after a saved correction', async () => {
   const f = await sidebarFixture()
   try {
-    assert.match(f.label(), /委派优先.*模型不可用/)
+    assert.match(f.label(), /DSH Agentrix.*模型不可用/)
     await f.setConfig({ ok: true, mode: 'auto', models: { routine: null, complex: null } })
-    assert.equal(f.label(), '委派优先')
+    assert.equal(f.label(), 'DSH Agentrix')
   } finally { f.close() }
 })
 
@@ -769,12 +869,75 @@ test('a visible reminder explains the impact, can be dismissed, and opens model 
 test('loading and provider catalog failures do not become stale-model alerts', async () => {
   const f = await sidebarFixture({ status: 'loading', value: null })
   try {
-    assert.equal(f.label(), '委派优先')
+    assert.equal(f.label(), 'DSH Agentrix')
     f.setCatalog({ status: 'ready', value: { groups: [], failures: [{ id: 'retired', message: 'temporary failure' }] } })
-    assert.equal(f.label(), '委派优先')
+    assert.equal(f.label(), 'DSH Agentrix')
     f.setCatalog({ status: 'ready', value: { groups: [], failures: [] } })
     assert.match(f.label(), /模型不可用/)
   } finally { f.close() }
+})
+
+test('judgment-first board exposes the current session assessment before tasks and separates the actual dependency order', async () => {
+  const body = { ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current', status: 'running',
+    goal: '按接口规范开发工具', routing: { route: 'delegate_parallel', reasons: ['multiple_files'] }, tasks: [
+      { id: 'spec', title: '确定接口规范', status: 'running', complexity: 'routine' },
+      { id: 'build', title: '开发工具', status: 'queued', complexity: 'complex', dependsOn: ['spec'] },
+    ] }], sessions: [
+    { sessionId: 'another-session', difficulty: { level: 'complex', score: 19, signals: ['其他会话信号'] } },
+    { sessionId: 'session-current', difficulty: { level: 'medium', score: 3, signals: ['涉及多个文件'] },
+      route: { route: 'delegate_parallel', reasons: ['multiple_files'] }, turnStats: { direct: 1, delegated: 1, denied: 0 },
+      sessionStats: { denied: 4 }, last: { tool: 'pwsh', message: '主控命令需要先委派' } },
+  ] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    const sections = view.nodes('section')
+    const decisionIndex = sections.findIndex(node => node?.props?.className === 'ddf-board-decision')
+    assert.ok(decisionIndex >= 0, 'judgment summary must be visible without expanding diagnostics')
+    assert.ok(decisionIndex < sections.findIndex(node => node?.props?.['data-task-list'] === ''), 'judgment must precede task cards')
+    assert.match(view.text(), /本轮难度.*中等.*评分 3/)
+    assert.match(view.text(), /系统建议.*并行委派多个子 Agent/)
+    assert.match(view.text(), /当前实际安排.*按任务依赖先后执行/)
+    assert.match(view.text(), /本轮拦截.*0.*本次载入后累计 4 次/)
+    assert.doesNotMatch(view.text(), /其他会话信号|评分 19/)
+    assert.match(view.text(), /最近一次策略拦截.*pwsh.*主控命令需要先委派/)
+  } finally { view.close(); f.close() }
+})
+
+test('judgment summary retains zero scores and never presents cumulative counters as this-turn counts', async () => {
+  const body = { ok: true, sessionId: 'session-current', plans: [], sessions: [{ sessionId: 'session-current',
+    difficulty: { level: 'simple', score: 0, signals: [] }, route: { route: 'direct', reasons: [] }, direct: 8, delegated: 6, denied: 4 }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    assert.match(view.text(), /评分 0/)
+    const counters = view.nodes('div').filter(node => node.props?.className === 'ddf-board-decision-count')
+    assert.equal(counters.length, 3)
+    assert.ok(counters.every(node => node.children.flat(Infinity).some(child => child?.type === 'strong' && child.children.includes('未记录'))))
+  } finally { view.close(); f.close() }
+})
+
+test('task facts keep models and complexity separate and current tool activity wins over the previous tool', async () => {
+  const task = { id: 'a', title: '分析接口', status: 'running', complexity: 'complex', complexityReason: '包含协议适配', progress: { tool: 'read' },
+    modelRoute: { role: 'worker', requested: { provider: 'magpie', model: 'group/xiaodi' }, actual: { provider: 'magpie', model: 'group/xiaodi' } },
+    audit: { status: 'queued', modelRoute: { role: 'reviewer', requested: { provider: 'demo', model: 'high-reviewer' } } },
+    supervision: { startedAt: Date.now(), used: 0, limit: 2, activity: { kind: 'tool', tool: 'pwsh' } } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true, sessions: [],
+    plans: [{ sessionId: 'session-current', goal: '核查当前动作', status: 'running', tasks: [task] }] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    assert.ok(view.nodes('dl').some(node => node.props?.className === 'ddf-board-task-facts'))
+    const activity = view.nodes('p').find(node => node.props?.className === 'ddf-board-task-line' && node.props?.['data-current-activity'])
+    assert.ok(activity, 'current activity needs its own visible line')
+    assert.match(activity.children.flat(Infinity).filter(child => typeof child === 'string').join(' '), /工具正在执行.*pwsh/)
+    assert.doesNotMatch(activity.children.flat(Infinity).filter(child => typeof child === 'string').join(' '), /read/)
+    assert.match(view.text(), /group\/xiaodi/)
+    assert.match(view.text(), /high-reviewer/)
+    assert.match(view.text(), /仅核对.*模型标识/)
+  } finally { view.close(); f.close() }
 })
 
 test('the acceptance view explains the automatic route and plan dispatch budget', async () => {
@@ -795,7 +958,7 @@ test('the acceptance view explains the automatic route and plan dispatch budget'
     assert.match(view.text(), /复杂度达到高位/)
     assert.match(view.text(), /派发尝试.*2 \/ 8.*剩余 6/)
     assert.match(view.text(), /路由提醒/)
-    assert.match(view.text(), /任务复杂度：设计与复杂问题/)
+    assert.match(view.text(), /任务复杂度\s+复杂/)
   } finally { view.close(); f.close() }
 })
 
@@ -960,6 +1123,38 @@ test('the latest assistant action shows multi-task progress and updates to final
   } finally { action.close(); f.close() }
 })
 
+test('running supervision is visible in chat and task details with evidence, elapsed time and separate budgets', async () => {
+  const task = { id: 'a', title: '修复工具参数', status: 'running', criteria: [], checks: [],
+    supervision: { used: 1, limit: 2, startedAt: Date.now() - 720000, deadlineAt: Date.now() + 600000,
+      pending: { code: 'REPEATED_TOOL_ERROR', reason: 'input 必须传对象，连续三次参数错误。' },
+      activity: { kind: 'model' }, metrics: { requests: 12, outputTokens: 1200, contextTokens: 24000 },
+      limits: { requests: 80, outputTokens: 40000 },
+      checkpoint: { phase: 'investigation', summary: '已确认真实参数 schema。', nextStep: '按已确认接口实现。', verified: false },
+      lastCorrection: { message: '先使用正确的对象参数。' } } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true, sessions: [],
+    plans: [{ protocolVersion: 2, sessionId: 'session-current', goal: '验证过程监督', status: 'running', tasks: [task] }] }) }) })
+  const view = f.mountView('session-current'), action = f.mountAction('session-current'), notice = f.mountNotice('session-current')
+  try {
+    await view.flush(); await action.flush(); await notice.flush()
+    assert.match(view.text(), /已执行.*12.*分钟/)
+    assert.match(view.text(), /模型正在生成/)
+    assert.match(view.text(), /模型调用.*12\/80/)
+    assert.match(view.text(), /1200\/40000/)
+    assert.match(view.text(), /执行者提交，待核实/)
+    assert.match(view.text(), /按已确认接口实现/)
+    assert.match(view.text(), /先使用正确的对象参数/)
+    assert.match(action.text(), /待主控纠偏.*1/)
+    assert.match(notice.text(), /input 必须传对象/)
+    assert.ok(notice.nodes('section').some(node => node.props['data-kind'] === 'supervision'))
+    assert.doesNotMatch(notice.text(), /执行失败|已完成/)
+    task.supervision.limits.outputTokens = null
+    task.supervision.metrics.outputTokens = 50000
+    await view.tick()
+    assert.match(view.text(), /累计输出 50000 Token.*仅统计/)
+    assert.doesNotMatch(view.text(), /50000\/(?:null|undefined|40000)/)
+  } finally { view.close(); action.close(); notice.close(); f.close() }
+})
+
 test('the chat action owns its compact styles without mounting a settings or acceptance page', async () => {
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true,
     json: async () => ({ ok: true, sessionId: 'session-current', plans: [],
@@ -1007,8 +1202,8 @@ test('a host without chat navigation explains how to reach acceptance without ex
     const [button] = action.nodes('button')
     assert.ok(button)
     assert.equal(button.props.disabled, true)
-    assert.match(button.props.title, /无法从此处打开.*委派验收/)
-    assert.match(button.props['aria-label'], /无法从此处打开.*委派验收/)
+    assert.match(button.props.title, /无法从此处打开.*任务验收/)
+    assert.match(button.props['aria-label'], /无法从此处打开.*任务验收/)
     assert.equal(action.nodes('details').length, 0)
   } finally { action.close(); f.close() }
 })

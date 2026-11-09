@@ -39,8 +39,8 @@ window.__ModuleLoader__.load({
     // -----------------------------------------------------------------------
 
     const zh = {
-      nav: '委派优先',
-      title: '委派优先',
+      nav: 'DSH Agentrix',
+      title: 'DSH Agentrix',
       subtitle: '设置自动委派的模式、子任务模型和资源上限。',
       'badge.on': '已启用',
       'badge.off': '已关闭',
@@ -108,8 +108,8 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
-      nav: 'Delegation',
-      title: 'Delegation first',
+      nav: 'DSH Agentrix',
+      title: 'DSH Agentrix',
       subtitle: 'Configure automatic delegation, worker models, and execution limits.',
       'badge.on': 'On',
       'badge.off': 'Off',
@@ -254,7 +254,7 @@ window.__ModuleLoader__.load({
         throw new Error('返回的记录与当前会话不一致，已停止显示。请重新读取。')
       }
       if (!Array.isArray(data.plans) || !Array.isArray(data.sessions)) {
-        throw new Error('返回的数据缺少任务记录。请重新加载“委派优先”插件后重试。')
+        throw new Error('返回的数据缺少任务记录。请重新加载“DSH Agentrix”插件后重试。')
       }
       return { ...data, sessionId, legacyHost,
         plans: data.plans.filter(plan => plan.sessionId === sessionId),
@@ -291,9 +291,9 @@ window.__ModuleLoader__.load({
       'execution.NEEDS_CONTEXT': '缺少上下文，已暂停', 'execution.BLOCKED': '执行受阻，已暂停', 'execution.report': '完整报告',
       'chat.auditCount': '审查中 {count}', 'chat.auditQueuedCount': '等待审查 {count}',
       'plans.recent': '最近进展', 'plans.blockers': '需要处理',
-      'view.tab': '委派验收', 'view.hint': '打开需要查看的会话，在“委派验收”页签核对当前需求；协作过程看 Fleet，整理与导出用“分享会话”。',
+      'view.tab': '任务验收', 'view.hint': '打开需要查看的会话，在“任务验收”页签核对当前需求；协作过程看 Fleet，整理与导出用“分享会话”。',
       'view.empty': '本会话还没有托管任务。主 Agent 建立计划后，这里会显示需求、进度和验收结果。',
-      'view.noSession': '请先打开一个会话，再查看委派验收。', 'view.request': '本次需求', 'view.unknownSource': '历史计划未保存原始需求，请回到聊天核对。',
+      'view.noSession': '请先打开一个会话，再查看任务验收。', 'view.request': '本次需求', 'view.unknownSource': '历史计划未保存原始需求，请回到聊天核对。',
       'view.project': '项目', 'view.noProject': '未提供项目目录', 'view.session': '会话', 'view.currentSession': '当前会话',
       'view.returned': '结果已返回 {returned} / {total}', 'view.accepted': '已验收 {accepted} / {total}',
       'view.next': '下一步', 'view.reviewNext': '主 Agent 运行验证并逐条验收。',
@@ -326,7 +326,7 @@ window.__ModuleLoader__.load({
       'view.footNote': '会话验收页每 3 秒只读取当前会话状态。',
       'view.coordinator': '主控 · 当前会话', 'view.returnedLabel': '结果已返回',
       'view.statAccepted': '已验收', 'view.statAttempts': '启动尝试', 'view.remaining': '剩余 {count}',
-      'view.legacyHost': '插件服务仍在使用旧版，已筛选当前会话的记录。重新加载“委派优先”后可启用新版需求关联。',
+      'view.legacyHost': '插件服务仍在使用旧版，已筛选当前会话的记录。重新加载“DSH Agentrix”后可启用新版需求关联。',
       'plans.waiting': '等待主控验证与评审', 'plans.unverified': '尚未验证', 'plans.passed': '通过', 'plans.failed': '失败或结果不明确',
       'plans.configured': '用户配置', 'plans.observed': '已读取子 Agent 实际配置',
       'plans.notStarted': '尚未启动', 'plans.configPaused': '等待调整模型', 'plans.fixModel': '去调整模型',
@@ -349,12 +349,12 @@ window.__ModuleLoader__.load({
       'plans.routeWarnings': '路由提醒：{warnings}', 'plans.taskComplexity': '任务复杂度：{complexity}',
       'chat.routeDecision': '自动判断：{route}', 'chat.planSummary': '{status} · 已完成 {done}/{total}',
       'chat.activeSummary': '进行中 {running} · 已完成 {done}/{total}', 'chat.completedSummary': '已完成 {done}/{total}',
-      'chat.navigationUnavailable': '当前版本无法从此处打开，请切换到会话的“委派验收”页签。',
+      'chat.navigationUnavailable': '当前版本无法从此处打开，请切换到会话的“任务验收”页签。',
       'chat.stopped': '已停止', 'chat.issueTask': '任务', 'chat.issueReason': '原因',
       'chat.unknownReason': '记录中未提供具体原因。', 'chat.unknownTask': '记录中未提供任务名称',
       'chat.stoppedNext': '如需继续，请让主 Agent 重新安排未完成的任务。',
       'chat.recoveredReason': '插件重新加载，旧子任务需要先清理。',
-      'chat.affected': '共 {count} 项任务受影响，完整记录见委派验收。',
+      'chat.affected': '共 {count} 项任务受影响，完整记录见任务验收。',
       'chat.noPlan': '等待主 Agent 建立任务卡', 'chat.reason': '依据：{reasons}', 'chat.budget': '启动尝试 {used}/{limit}',
       'chat.details': '查看任务进度', 'chat.running': '进行中', 'chat.waiting': '等待中', 'chat.review': '待验收',
       'chat.completed': '已完成', 'chat.failed': '有失败', 'chat.blocked': '已阻塞', 'chat.direct': '直接执行',
@@ -394,7 +394,7 @@ window.__ModuleLoader__.load({
       'execution.NEEDS_CONTEXT': 'Context required; paused', 'execution.BLOCKED': 'Blocked; paused', 'execution.report': 'Full report',
       'chat.auditCount': 'Reviewing {count}', 'chat.auditQueuedCount': 'Waiting for review {count}',
       'plans.recent': 'Recent progress', 'plans.blockers': 'Needs attention',
-      'view.tab': 'Delegation acceptance', 'view.hint': 'Open a conversation and use Delegation acceptance to check its request and results. Use Fleet for collaboration and Share for exports.',
+      'view.tab': 'Task acceptance', 'view.hint': 'Open a conversation and use Task acceptance to check its request and results. Use Fleet for collaboration and Share for exports.',
       'view.empty': 'No managed tasks in this conversation yet. A coordinator plan will show its request, progress, and acceptance here.',
       'view.noSession': 'Open a conversation to view its acceptance.', 'view.request': 'Current request', 'view.unknownSource': 'This older plan has no saved original request. Check the conversation.',
       'view.project': 'Project', 'view.noProject': 'No project directory', 'view.session': 'Conversation', 'view.currentSession': 'Current conversation',
@@ -430,7 +430,7 @@ window.__ModuleLoader__.load({
       'view.footNote': 'This acceptance view reads only the current conversation, every 3 seconds.',
       'view.coordinator': 'Coordinator · this conversation', 'view.returnedLabel': 'Results returned',
       'view.statAccepted': 'Accepted', 'view.statAttempts': 'Startup attempts', 'view.remaining': '{count} left',
-      'view.legacyHost': 'An older plugin service is running. Records have been filtered to this conversation. Reload Delegation First to enable original request tracking.',
+      'view.legacyHost': 'An older plugin service is running. Records have been filtered to this conversation. Reload DSH Agentrix to enable original request tracking.',
       'plans.waiting': 'Awaiting coordinator verification and review', 'plans.unverified': 'Not verified', 'plans.passed': 'Passed', 'plans.failed': 'Failed or inconclusive',
       'plans.configured': 'Configured route', 'plans.observed': 'Observed child configuration',
       'plans.notStarted': 'Not started', 'plans.configPaused': 'Model selection required', 'plans.fixModel': 'Adjust model',
@@ -453,12 +453,12 @@ window.__ModuleLoader__.load({
       'plans.routeWarnings': 'Routing note: {warnings}', 'plans.taskComplexity': 'Task complexity: {complexity}',
       'chat.routeDecision': 'Automatic decision: {route}', 'chat.planSummary': '{status} · {done}/{total} completed',
       'chat.activeSummary': '{running} running · {done}/{total} completed', 'chat.completedSummary': '{done}/{total} completed',
-      'chat.navigationUnavailable': 'This version cannot open the view here. Select Delegation acceptance in this conversation.',
+      'chat.navigationUnavailable': 'This version cannot open the view here. Select Task acceptance in this conversation.',
       'chat.stopped': 'stopped', 'chat.issueTask': 'Task', 'chat.issueReason': 'Reason',
       'chat.unknownReason': 'No specific reason was recorded.', 'chat.unknownTask': 'No task name was recorded',
       'chat.stoppedNext': 'To continue, ask the coordinator to make a new plan for the unfinished tasks.',
       'chat.recoveredReason': 'The plugin reloaded. Previous workers need cleanup first.',
-      'chat.affected': '{count} tasks are affected. See Delegation acceptance for the complete record.',
+      'chat.affected': '{count} tasks are affected. See Task acceptance for the complete record.',
       'chat.noPlan': 'Waiting for the coordinator to create the task card', 'chat.reason': 'Reasons: {reasons}',
       'chat.budget': 'Startup attempts {used}/{limit}', 'chat.details': 'View task progress', 'chat.running': 'running',
       'chat.waiting': 'waiting', 'chat.review': 'awaiting review', 'chat.completed': 'completed', 'chat.failed': 'failed',
@@ -501,7 +501,9 @@ window.__ModuleLoader__.load({
       'completion.blocked': '尚未完成，已阻塞', 'completion.partial': '部分完成，其余尚未验收', 'completion.partialStopped': '部分完成，其余已停止',
       'completion.accepted': '已验收 {done}/{total}', 'completion.id': '回执编号', 'completion.deliverables': '已验收交付物',
       'completion.evidence': '验证证据', 'completion.remaining': '未完成项', 'completion.reason': '原因',
-      'completion.next': '最终交付结论与未完成项以程序回执为准。',
+      'completion.next': '最终交付结论与未完成项以程序回执为准。', 'completion.blockedNext': '处理失败原因后，让主 Agent 明确重试；当前回执不会自动继续。',
+      'completion.blockedAttempts': '该任务已达到每任务执行次数上限（{limit} 次）。请在 DSH Agentrix 提高“每任务最多执行”后，再让主 Agent 明确重试；也可以新建计划。',
+      'completion.cancelledNext': '计划已停止。如需继续，请让主 Agent 新建计划。',
       'completion.stopSource': '取消来源', 'completion.stopTime': '取消时间',
       'completion.source.coordinator': '主控', 'completion.source.host': '用户或宿主',
       'chat.receiptPending': '验收通过，回执生成中', 'chat.partial': '部分完成',
@@ -518,7 +520,9 @@ window.__ModuleLoader__.load({
       'completion.blocked': 'Incomplete, blocked', 'completion.partial': 'Partially completed, remaining work not accepted', 'completion.partialStopped': 'Partially completed, remaining work stopped',
       'completion.accepted': '{done}/{total} accepted', 'completion.id': 'Receipt ID', 'completion.deliverables': 'Accepted deliverables',
       'completion.evidence': 'Verification evidence', 'completion.remaining': 'Unfinished work', 'completion.reason': 'Reason',
-      'completion.next': 'The program receipt records the final delivery outcome and unfinished work.',
+      'completion.next': 'The program receipt records the final delivery outcome and unfinished work.', 'completion.blockedNext': 'Resolve the cause, then ask the coordinator to retry explicitly; this receipt will not continue automatically.',
+      'completion.blockedAttempts': 'This task reached the per-task attempt limit ({limit}). Increase Maximum attempts in DSH Agentrix, then ask the coordinator to retry explicitly, or create a new plan.',
+      'completion.cancelledNext': 'The plan was stopped. Ask the coordinator to create a new plan if you want to continue.',
       'completion.stopSource': 'Cancellation source', 'completion.stopTime': 'Cancelled at',
       'completion.source.coordinator': 'Coordinator', 'completion.source.host': 'User or host',
       'chat.receiptPending': 'Accepted, generating receipt', 'chat.partial': 'Partially completed',
@@ -526,6 +530,74 @@ window.__ModuleLoader__.load({
     })
 
     const CONFIG_TABS = ['policy', 'limits', 'models', 'diagnostics']
+    Object.assign(zh, {
+      'supervision.title': '过程监督', 'supervision.waiting': '等待主控纠偏', 'supervision.count': '待主控纠偏 {count} 项',
+      'supervision.elapsed': '已执行 {minutes} 分钟', 'supervision.corrections': '主控纠偏 {used}/{limit}',
+      'supervision.budget': '模型调用 {requests}/{requestLimit} · 输出 {output}/{outputLimit} Token',
+      'supervision.usage': '模型调用 {requests}/{requestLimit} · 累计输出 {output} Token（仅统计，不设插件上限）',
+      'supervision.context': '最近请求上下文 {tokens} Token', 'supervision.stage': '阶段结论（执行者提交，待核实）',
+      'supervision.nextStep': '执行者下一步', 'supervision.corrected': '最近主控纠正',
+      'supervision.next': '已通知原主控核对证据并纠正原子代理，已有产物和上下文保留。',
+      'supervision.investigation': '调查', 'supervision.implementation': '实现', 'supervision.verification': '验证',
+      'supervision.activity.model': '模型正在生成', 'supervision.activity.waiting_model_response': '等待模型响应',
+      'supervision.activity.waiting_model': '等待下一步模型请求', 'supervision.activity.waiting_tool': '模型响应已返回，准备执行工具',
+      'supervision.activity.tool': '工具正在执行', 'supervision.reporting': '正在提交报告',
+      'supervision.wrapUp': '已提醒收尾：提交已有结果及未完成项',
+      'supervision.continuation': '已自动续跑第 {segment} 段，沿用上一段产物和证据',
+    })
+    Object.assign(en, {
+      'supervision.title': 'Execution supervision', 'supervision.waiting': 'Awaiting coordinator correction', 'supervision.count': '{count} awaiting correction',
+      'supervision.elapsed': '{minutes} minutes elapsed', 'supervision.corrections': 'Coordinator corrections {used}/{limit}',
+      'supervision.budget': 'Model calls {requests}/{requestLimit} · Output {output}/{outputLimit} tokens',
+      'supervision.usage': 'Model calls {requests}/{requestLimit} · Total output {output} tokens (usage only; no plugin cap)',
+      'supervision.context': 'Latest request context: {tokens} tokens', 'supervision.stage': 'Stage report (worker supplied, unverified)',
+      'supervision.nextStep': 'Worker next step', 'supervision.corrected': 'Latest coordinator correction',
+      'supervision.next': 'The original coordinator has been notified to inspect evidence and correct the original worker. Existing work and context are retained.',
+      'supervision.investigation': 'Investigation', 'supervision.implementation': 'Implementation', 'supervision.verification': 'Verification',
+      'supervision.activity.model': 'Model generating', 'supervision.activity.waiting_model_response': 'Waiting for model response',
+      'supervision.activity.waiting_model': 'Waiting for the next model request', 'supervision.activity.waiting_tool': 'Response received; preparing tools',
+      'supervision.activity.tool': 'Tool running', 'supervision.reporting': 'Submitting report',
+      'supervision.wrapUp': 'Wrap-up requested: report existing results and unfinished work',
+      'supervision.continuation': 'Automatically continuing segment {segment} with the previous work and evidence',
+    })
+    Object.assign(zh, {
+      'view.decisionTitle': '本轮判断与执行安排', 'view.decisionDifficulty': '本轮难度',
+      'view.decisionHint': '规则评分用于建议如何拆分任务，不代表完成进度或模型能力。',
+      'view.suggestedRoute': '系统建议', 'view.actualArrangement': '当前实际安排',
+      'view.routeCurrent': '当前回合的建议', 'view.routeSnapshot': '计划建立时的建议',
+      'view.actualDependency': '按任务依赖先后执行', 'view.actualParallel': '当前 {count} 个子 Agent 同时执行',
+      'view.actualRunning': '当前 1 个子 Agent 在执行', 'view.actualQueued': '计划已建立，等待派发',
+      'view.actualNoPlan': '尚未建立任务计划', 'view.actualAudit': '正在独立审查',
+      'view.countersUnknown': '旧记录没有本轮统计，不用累计次数代替。',
+      'view.taskModel': '执行模型', 'view.taskComplexity': '任务复杂度', 'view.taskAudit': '独立审查',
+      'view.taskAcceptance': '主控验收', 'view.auditRequired': '复杂任务需独立审查',
+      'view.taskRoutine': '普通', 'view.taskComplex': '复杂', 'view.acceptanceStopped': '已停止，未验收',
+      'view.auditOptional': '按需安排独立审查', 'view.acceptancePending': '报告提交后实际验证并验收',
+      'view.acceptanceReview': '等待主控实际验证并逐条验收',
+      'view.modelIdentifierNote': '仅核对 DSH 发出的模型标识；路由组内部实际模型以服务商返回的信息为准。',
+      'view.currentAction': '当前动作', 'view.latestActivity': '最近工具记录',
+      'view.executionDiagnostics': '执行诊断与额度', 'view.requestConsistent': '请求标识一致',
+      'view.diagnostics': '查看完整判断与诊断',
+    })
+    Object.assign(en, {
+      'view.decisionTitle': 'Assessment and actual execution', 'view.decisionDifficulty': 'This turn\'s difficulty',
+      'view.decisionHint': 'Rule-based scores suggest how to split work; they do not measure progress or model capability.',
+      'view.suggestedRoute': 'Suggested route', 'view.actualArrangement': 'Actual arrangement',
+      'view.routeCurrent': 'Recommendation for this turn', 'view.routeSnapshot': 'Recommendation when the plan was created',
+      'view.actualDependency': 'Following task dependencies', 'view.actualParallel': '{count} child Agents are running concurrently',
+      'view.actualRunning': 'One child Agent is running', 'view.actualQueued': 'Plan created; awaiting dispatch',
+      'view.actualNoPlan': 'No task plan has been created', 'view.actualAudit': 'Independent review is running',
+      'view.countersUnknown': 'This older record has no turn counters; cumulative counts are not substituted.',
+      'view.taskModel': 'Execution model', 'view.taskComplexity': 'Task complexity', 'view.taskAudit': 'Independent review',
+      'view.taskAcceptance': 'Coordinator acceptance', 'view.auditRequired': 'Complex tasks require independent review',
+      'view.taskRoutine': 'Routine', 'view.taskComplex': 'Complex', 'view.acceptanceStopped': 'Stopped without acceptance',
+      'view.auditOptional': 'Independent review as needed', 'view.acceptancePending': 'Verification and acceptance after the report',
+      'view.acceptanceReview': 'Awaiting actual verification and criterion-by-criterion acceptance',
+      'view.modelIdentifierNote': 'Only the model identifier sent by DSH is checked; models selected inside a routing group depend on provider information.',
+      'view.currentAction': 'Current action', 'view.latestActivity': 'Latest tool record',
+      'view.executionDiagnostics': 'Execution diagnostics and limits', 'view.requestConsistent': 'Request identifier matches',
+      'view.diagnostics': 'Full assessment and diagnostics',
+    })
     const CONFIG_NUMBERS = ['threshold', 'maxParallel', 'maxAttempts', 'maxActivations', 'taskTimeoutMinutes']
     // Compatibility only; current hosts provide the authoritative defaults and ranges.
     const LEGACY_RANGES = { threshold: { min: 0, max: 20 }, maxParallel: { min: 1, max: 4 }, maxAttempts: { min: 1, max: 3 }, maxActivations: { min: 1, max: 32 }, taskTimeoutMinutes: { min: 1, max: 60 } }
@@ -543,7 +615,7 @@ window.__ModuleLoader__.load({
       'cfg.modelsHint': '按执行、审查角色选择模型，列表与主界面模型选择器共用。执行模型未配置时暂停；审查模型可明确跟随主控。',
       'limits.timeoutLabel': '单任务时限',
       'cfg.whenNow': '立即', 'cfg.whenPlan': '新建计划', 'cfg.whenTask': '新任务',
-      'cfg.acceptanceNote': '打开需要查看的会话，在「委派验收」页签核对当前需求；协作过程看 Fleet，整理与导出用「分享会话」。',
+      'cfg.acceptanceNote': '打开需要查看的会话，在「任务验收」页签核对当前需求；协作过程看 Fleet，整理与导出用「分享会话」。',
       'cfg.defaultMode': '默认', 'cfg.times': '次', 'cfg.agents': '个', 'cfg.minutes': '分钟',
       'cfg.nowTool': '下一次工具调用生效', 'cfg.nextDispatch': '下一次派单生效', 'cfg.nextRework': '后续返工生效',
       'cfg.newPlan': '仅新建计划生效', 'cfg.newTask': '仅新启动任务生效',
@@ -581,7 +653,7 @@ window.__ModuleLoader__.load({
       'cfg.modelsHint': 'Choose execution and review models from the shared catalog. An unset execution model pauses dispatch; review may explicitly follow the coordinator.',
       'limits.timeoutLabel': 'Task timeout',
       'cfg.whenNow': 'Immediately', 'cfg.whenPlan': 'New plans', 'cfg.whenTask': 'New activations',
-      'cfg.acceptanceNote': 'Open a conversation and use Delegation acceptance to inspect the request. Fleet shows collaboration; Share conversation provides exports.',
+      'cfg.acceptanceNote': 'Open a conversation and use Task acceptance to inspect the request. Fleet shows collaboration; Share conversation provides exports.',
       'cfg.defaultMode': 'Default', 'cfg.times': 'attempts', 'cfg.agents': 'tasks', 'cfg.minutes': 'minutes', 'cfg.nowTool': 'Next tool call', 'cfg.nextDispatch': 'Next dispatch', 'cfg.nextRework': 'Subsequent rework', 'cfg.newPlan': 'New plans only', 'cfg.newTask': 'New activations only',
       'cfg.policyNote': 'Disabling removes the coordinator discipline at the next prompt assembly. Send a new message to continue under the new mode. Environment overrides require a Harness restart.',
       'cfg.limitsNote': 'Existing plans retain their activation limit. Running tasks keep their timers and models.', 'cfg.modelsNote': 'Queued tasks, rework and retries use the new selection when started. Running tasks keep their models. Configuration-blocked tasks require explicit continuation.',
@@ -598,7 +670,8 @@ window.__ModuleLoader__.load({
     const modelRoutes = config => Object.fromEntries(MODEL_ROLES.map(role => [role,
       config?.models && Object.hasOwn(config.models, role) ? config.models[role] : config?.models?.[role === 'worker' ? 'routine' : 'complex'] ?? null]))
     const draftOf = config => ({ mode: config?.mode ?? 'auto', threshold: config?.threshold ?? 2,
-      maxParallel: config?.maxParallel ?? 2, maxAttempts: config?.maxAttempts ?? 2, maxActivations: config?.maxActivations ?? 8, taskTimeoutMinutes: config?.taskTimeoutMinutes ?? 15,
+      maxParallel: config?.maxParallel ?? config?.defaults?.maxParallel ?? 2, maxAttempts: config?.maxAttempts ?? config?.defaults?.maxAttempts ?? 2,
+      maxActivations: config?.maxActivations ?? config?.defaults?.maxActivations ?? 8, taskTimeoutMinutes: config?.taskTimeoutMinutes ?? config?.defaults?.taskTimeoutMinutes ?? 15,
       models: modelRoutes(config) })
     const configSignature = config => config?.revision ?? JSON.stringify(draftOf(config))
     const sameValue = (left, right) => JSON.stringify(left) === JSON.stringify(right)
@@ -896,7 +969,8 @@ window.__ModuleLoader__.load({
         .concat([{ count: tasks.filter(task => ['starting', 'running'].includes(task.audit?.status)).length, key: 'auditCount' },
           { count: tasks.filter(task => task.audit?.status === 'queued').length, key: 'auditQueuedCount' }])
         .filter(item => item.count > 0).map(item => fill(t('chat.' + item.key), { count: item.count }))
-      const summary = [baseSummary, ...counts].join(' · ')
+      const supervised = tasks.flatMap(task => [task, ...(task.audit ? [task.audit] : [])]).filter(task => ['starting', 'running'].includes(task.status) && task.supervision?.pending)
+      const summary = [baseSummary, ...counts, ...(supervised.length ? [fill(t('supervision.count'), { count: supervised.length })] : [])].join(' · ')
       const canOpen = typeof openView === 'function'
       const hint = canOpen ? t('view.details') : t('chat.navigationUnavailable')
       const label = `${summary} · ${hint}`
@@ -916,7 +990,11 @@ window.__ModuleLoader__.load({
       const stopped = plan.status === 'cancelled' || plan.cancelled || unfinished.length > 0 && unfinished.every(task => task.status === 'cancelled')
       const affected = (plan.tasks ?? []).map(task => ['failed', 'blocked'].includes(task.audit?.status) ? { ...task.audit, title: task.audit.title || task.title } : task).filter(task => stopped
         ? task.status !== 'accepted' : ['failed', 'blocked', 'cancelled'].includes(task.status))
-      if (!affected.length && !['failed', 'blocked'].includes(plan.status)) return null
+      if (!affected.length && !['failed', 'blocked'].includes(plan.status)) {
+        const pending = (plan.tasks ?? []).flatMap(task => [task, ...(task.audit ? [task.audit] : [])])
+          .filter(task => ['starting', 'running'].includes(task.status) && task.supervision?.pending)
+        return pending.length ? { kind: 'supervision', primary: pending[0], tasks: pending, affected: pending.length } : null
+      }
       const primary = affected.find(task => task.status === 'failed')
         ?? affected.find(task => task.issue?.message) ?? affected.find(task => task.recovered) ?? affected[0]
       return { kind: stopped ? 'stopped' : primary?.status === 'failed' ? 'failed' : 'blocked',
@@ -928,6 +1006,8 @@ window.__ModuleLoader__.load({
 .ddf-chat-notice[data-kind="stopped"] { border-left-color:var(--dsw-alias-border-l2,#c9cdd4); }
 .ddf-chat-notice-heading { color:var(--dsw-alias-state-error-primary,#f54a45); }
 .ddf-chat-notice[data-kind="stopped"] .ddf-chat-notice-heading { color:var(--dsw-alias-label-secondary,#646a73); }
+.ddf-chat-notice[data-kind="supervision"] { border-left-color:var(--dsw-alias-state-warning-primary,#b7791f); }
+.ddf-chat-notice[data-kind="supervision"] .ddf-chat-notice-heading { color:var(--dsw-alias-state-warning-primary,#b7791f); }
 .ddf-chat-notice p { margin:5px 0; white-space:pre-wrap; }
 .ddf-chat-notice-hint { color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-chat-notice-action { display:inline-block; max-width:100%; margin:4px 0 0; padding:0; border:0; background:transparent; color:var(--dsw-alias-brand-primary,#4f6ef7); font:inherit; text-align:left; overflow-wrap:anywhere; cursor:pointer; }
@@ -940,6 +1020,21 @@ window.__ModuleLoader__.load({
       return t('completion.' + (stopped ? 'partialStopped' : receipt.outcome))
     }
 
+    function completionNext(t, plan, state) {
+      const receipt = plan?.completion
+      if (!receipt) return ''
+      if (receipt.outcome === 'blocked') {
+        const limit = state?.limits?.maxAttempts
+        const exhausted = Number.isInteger(limit) && receipt.remaining.some(item => {
+          const task = (plan.tasks ?? []).find(candidate => candidate.id === item.taskId)
+          return task && Number.isInteger(task.attempts) && task.attempts >= limit
+        })
+        return exhausted ? fill(t('completion.blockedAttempts'), { limit }) : t('completion.blockedNext')
+      }
+      if (receipt.outcome === 'cancelled') return t('completion.cancelledNext')
+      return t('completion.next')
+    }
+
     const RECEIPT_STYLES = `
 .ddf-receipt { box-sizing:border-box; min-width:0; margin:12px 0; padding:14px 16px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-left:3px solid var(--dsw-alias-border-l2,#c9cdd4); border-radius:7px; background:var(--dsw-alias-bg-layer-1,#fff); color:var(--dsw-alias-label-primary,#1f2329); font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif; overflow-wrap:anywhere; }
 .ddf-receipt[data-outcome="completed"] { border-left-color:var(--dsw-alias-state-success-primary,#1f9d55); }
@@ -950,13 +1045,14 @@ window.__ModuleLoader__.load({
 .ddf-receipt summary { cursor:pointer; }
 `
 
-    function CompletionReceipt({ t, plan }) {
+    function CompletionReceipt({ t, plan, state }) {
       const receipt = plan?.completion
       if (!receipt) return null
       return h('section', { className: 'ddf-receipt', 'data-outcome': receipt.outcome, role: 'status' },
         h('style', null, RECEIPT_STYLES),
         h('strong', null, t('completion.title') + ' · ' + completionLabel(t, receipt)),
         h('p', null, fill(t('completion.accepted'), { done: receipt.accepted, total: receipt.total })),
+        h('p', { className: 'ddf-receipt-next' }, completionNext(t, plan, state)),
         receipt.reason ? h('p', null, t('completion.reason') + '：' + receipt.reason) : null,
         receipt.deliverables.length ? h('div', null, h('b', null, t('completion.deliverables')),
           h('ul', null, ...receipt.deliverables.map(task => h('li', { key: task.taskId }, task.title + '：' + task.paths.join('、'))))) : null,
@@ -972,19 +1068,19 @@ window.__ModuleLoader__.load({
       const result = useChatProgress(progress, sessionId, latest, seq)
       if (!latest || !sessionId) return null
       const plan = result.data?.plans?.find(item => item.sessionId === sessionId)
-      if (plan?.completion) return h(CompletionReceipt, { t, plan })
+      if (plan?.completion) return h(CompletionReceipt, { t, plan, state: result.data })
       const problem = chatProblem(plan)
       if (!problem) return null
       const task = problem.primary, tasks = plan.tasks ?? []
-      const recorded = task?.stop?.reason || task?.issue?.message || task?.error
+      const recorded = problem.kind === 'supervision' ? task.supervision.pending.reason : task?.stop?.reason || task?.issue?.message || task?.error
       const reason = typeof recorded === 'string' && recorded.trim() && !/^(error|子任务停止原因：error)$/i.test(recorded.trim())
         ? recorded.trim().split('\n')[0].slice(0, 400)
         : t(task?.recovered ? 'chat.recoveredReason' : 'chat.unknownReason')
-      const next = problem.kind === 'stopped' ? t('chat.stoppedNext')
+      const next = problem.kind === 'supervision' ? t('supervision.next') : problem.kind === 'stopped' ? t('chat.stoppedNext')
         : task?.issue?.action || t(task?.recovered ? 'view.recoveredNext' : 'view.failedNext')
       const done = tasks.filter(task => task.status === 'accepted').length
-      const heading = fill(t(problem.kind === 'stopped' ? 'chat.acceptedSummary' : 'chat.planSummary'), {
-        status: problem.kind === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${problem.kind}`), done, total: tasks.length })
+      const heading = fill(t(problem.kind === 'stopped' || problem.kind === 'supervision' ? 'chat.acceptedSummary' : 'chat.planSummary'), {
+        status: problem.kind === 'supervision' ? t('supervision.waiting') : problem.kind === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${problem.kind}`), done, total: tasks.length })
       const canOpen = typeof openView === 'function'
       return h('section', { className: 'ddf-chat-notice', 'data-kind': problem.kind,
         role: problem.kind === 'stopped' ? 'status' : 'alert', 'aria-label': heading },
@@ -1331,6 +1427,26 @@ window.__ModuleLoader__.load({
     }
 
     /** Full acceptance evidence stays available in the collapsed task record. */
+    function SupervisionDetails({ t, task }) {
+      const state = task?.supervision
+      if (!state) return null
+      const live = ['starting', 'running'].includes(task.status)
+      const minutes = Math.max(0, Math.floor(((task.finishedAt ?? Date.now()) - state.startedAt) / 60000))
+      const line = (...children) => h('p', { className: 'ddf-board-task-line' }, ...children)
+      const activity = live && task.execution ? t('supervision.reporting') : live && state.activity ? t('supervision.activity.' + state.activity.kind) : ''
+      return h('div', { className: 'ddf-supervision', role: 'group', 'aria-label': t('supervision.title') },
+        line(fill(t('supervision.elapsed'), { minutes }), activity ? ' · ' + activity + (state.activity?.tool ? ' · ' + state.activity.tool : '') : '',
+          ' · ' + fill(t('supervision.corrections'), { used: state.used, limit: state.limit })),
+        task.continuation?.used ? line(fill(t('supervision.continuation'), { segment: task.continuation.used + 1 })) : null,
+        state.metrics && state.limits ? line(fill(t(Number.isFinite(state.limits.outputTokens) ? 'supervision.budget' : 'supervision.usage'), { requests: state.metrics.requests, requestLimit: state.limits.requests,
+          output: state.metrics.outputTokens, outputLimit: state.limits.outputTokens }), state.metrics.contextTokens ? ' · ' + fill(t('supervision.context'), { tokens: state.metrics.contextTokens }) : '') : null,
+        state.pending ? line(h('strong', null, t(live ? 'supervision.waiting' : 'supervision.title') + '：'), state.pending.reason) : null,
+        state.wrapUpRequestedAt ? line(t('supervision.wrapUp')) : null,
+        state.checkpoint ? line(h('strong', null, t('supervision.stage') + ' · ' + t('supervision.' + state.checkpoint.phase) + '：'), state.checkpoint.summary,
+          ' · ' + t('supervision.nextStep') + '：' + state.checkpoint.nextStep) : null,
+        state.lastCorrection ? line(h('strong', null, t('supervision.corrected') + '：'), state.lastCorrection.message) : null)
+    }
+
     function TaskDetails({ t, task, compact = false }) {
       const route = task.modelRoute
       const selected = route?.resolved ?? route?.requested
@@ -1346,9 +1462,11 @@ window.__ModuleLoader__.load({
           h('div', null, `${tier} → ${selected?.model ?? task.model?.model ?? t('plans.modelUnknown')}`,
             h('span', { className: 'ddf-model-check' }, t(modelStatusKey(task)))),
           h('p', { className: 'ddf-hint' }, t('plans.modelReason') + '：' + (task.complexityReason || t('plans.modelReasonUnknown'))),
+          route ? h('p', { className: 'ddf-hint' }, t('view.modelIdentifierNote')) : null,
           h('p', { className: 'ddf-hint' }, t('plans.modelSource') + '：' + (route
             ? t(route.source === 'configured' ? 'plans.modelSourceConfigured' : 'plans.modelSourceInherited') : t('plans.modelUnknown'))),
           mismatch ? h('p', { className: 'ddf-error' }, task.error || t('plans.modelMismatch')) : null,
+          h(SupervisionDetails, { t, task }),
           task.execution ? h('p', { className: 'ddf-hint' }, t('execution.' + task.execution.status) + '：' + task.execution.summary) : null,
           task.stop ? h('div', null,
             h('p', null, t('completion.reason') + '：' + task.stop.reason),
@@ -1415,7 +1533,12 @@ window.__ModuleLoader__.load({
     }
 
     const DASHBOARD_STYLES = `
-.ddf-board-root { display:flex; flex-direction:column; flex:1 1 auto; width:100%; height:100%; min-width:0; min-height:0; overflow:auto; background:var(--dsw-alias-bg-layer-2,#f5f6f7); color:var(--dsw-alias-label-primary,#1f2329); font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif; }
+/* Use the same full-height surface as Trajectory. Like Context, hide only
+   this occurrence's ordinary composer; pending user interactions stay visible. */
+[data-conversation-scroll]:has(> [data-slot="conversation.session"] [data-ddf-acceptance]) > [data-composer-seat]:not(:has([data-approval-key],[data-question-key],[data-plan-review-key])) { display:none; }
+[data-conversation-scroll]:has(> [data-slot="conversation.session"] [data-ddf-acceptance]) ~ [data-width-handle] { display:none; }
+[data-conversation-scroll]:has(> [data-slot="conversation.session"] [data-ddf-acceptance]):has(> [data-composer-seat] :is([data-approval-key],[data-question-key],[data-plan-review-key])) [data-ddf-acceptance] .ddf-board { padding-bottom:calc(40px + var(--dsh-composer-height,200px)); }
+.ddf-board-root { --ddf-board-accent:var(--dsw-alias-state-business-primary,color-mix(in srgb,var(--dsw-alias-button-primary-fill,#2459d3) 80%,var(--dsw-alias-label-primary,#1f2329))); --ddf-board-success:var(--dsw-alias-state-success-primary,color-mix(in srgb,#16764b 65%,var(--dsw-alias-label-primary,#1f2329))); --ddf-board-warning:var(--dsw-alias-state-warn-primary,color-mix(in srgb,#946000 65%,var(--dsw-alias-label-primary,#1f2329))); --ddf-board-error:var(--dsw-alias-state-danger-primary,color-mix(in srgb,#b33239 65%,var(--dsw-alias-label-primary,#1f2329))); display:flex; flex-direction:column; flex:1 1 auto; width:100%; height:100%; min-width:0; min-height:0; overflow:auto; background:var(--dsw-alias-bg-layer-2,#f5f6f7); color:var(--dsw-alias-label-primary,#1f2329); font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif; }
 .ddf-board-root *,.ddf-board-root *::before,.ddf-board-root *::after { box-sizing:border-box; }
 .ddf-board { flex:none; width:100%; max-width:1120px; min-width:0; margin:0 auto; padding:24px 24px 40px; display:flex; flex-direction:column; gap:16px; }
 .ddf-board > * { min-width:0; }
@@ -1434,12 +1557,13 @@ window.__ModuleLoader__.load({
 .ddf-board-route b { color:var(--dsw-alias-label-primary,#1f2329); font-weight:600; }
 .ddf-board-status { align-self:start; justify-self:start; display:inline-flex; align-items:center; gap:7px; min-height:30px; padding:4px 10px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:999px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; white-space:nowrap; }
 .ddf-board-status::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; flex:none; }
-.ddf-board-status[data-status="running"],.ddf-board-status[data-status="starting"] { color:var(--dsw-alias-brand-primary,#4f6ef7); }
+.ddf-board-status[data-status="running"],.ddf-board-status[data-status="starting"] { color:var(--ddf-board-accent); }
 .ddf-board-status[data-status="accepted"] { color:var(--dsw-alias-state-success-primary,#1f9d55); }
 .ddf-board-status[data-status="failed"],.ddf-board-status[data-status="blocked"] { color:var(--dsw-alias-state-danger-primary,#d14343); }
 .ddf-board-status[data-status="cancelled"] { color:var(--dsw-alias-label-secondary,#646a73); }
-.ddf-board-metrics { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; }
-.ddf-board-metric { min-width:0; padding:13px 14px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:9px; background:var(--dsw-alias-bg-layer-1,#fff); }
+.ddf-board-metrics { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:0; padding:12px 0; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:9px; background:var(--dsw-alias-bg-layer-1,#fff); }
+.ddf-board-metric { min-width:0; padding:0 14px; border-right:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-board-metric:last-child { border-right:0; }
 .ddf-board-metric-label { display:block; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
 .ddf-board-metric-value { display:block; margin-top:4px; font:600 20px/1.2 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-variant-numeric:tabular-nums; color:var(--dsw-alias-label-primary,#1f2329); overflow-wrap:anywhere; }
 .ddf-board-metric-note { display:block; margin-top:4px; font-size:12px; color:var(--dsw-alias-label-secondary,#646a73); }
@@ -1458,14 +1582,27 @@ window.__ModuleLoader__.load({
 .ddf-board-task-tag { color:var(--dsw-alias-label-primary,#1f2329); font-weight:600; }
 .ddf-board-task-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; min-width:0; }
 .ddf-board-task-title-wrap { min-width:0; }
-.ddf-board-task-title { margin:0; font-size:14px; line-height:1.45; font-weight:650; overflow-wrap:anywhere; }
+.ddf-board-task-title { margin:0; font-size:16px; line-height:1.45; font-weight:650; overflow-wrap:anywhere; }
 .ddf-board-task-meta { display:flex; align-items:center; flex-wrap:wrap; gap:5px 12px; margin-top:5px; color:var(--dsw-alias-label-secondary,#646a73); font-size:11px; overflow-wrap:anywhere; }
 .ddf-board-task-meta code { color:var(--dsw-alias-label-tertiary,#8f959e); font:inherit; }
-.ddf-board-task-status { flex:none; padding:3px 8px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:999px; color:var(--dsw-alias-label-secondary,#646a73); font-size:11px; white-space:nowrap; }
-.ddf-board-task[data-status="running"] .ddf-board-task-status,.ddf-board-task[data-status="starting"] .ddf-board-task-status { color:var(--dsw-alias-brand-primary,#4f6ef7); border-color:currentColor; }
+.ddf-board-task-status { flex:none; padding:3px 8px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:6px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; white-space:nowrap; }
+.ddf-board-task[data-status="running"] .ddf-board-task-status,.ddf-board-task[data-status="starting"] .ddf-board-task-status { color:var(--ddf-board-accent); border-color:currentColor; background:color-mix(in srgb,currentColor 8%,var(--dsw-alias-bg-layer-1,#fff)); }
+.ddf-board-task[data-status="running"],.ddf-board-task[data-status="starting"] { border-left:3px solid var(--ddf-board-accent); }
+.ddf-board-task[data-status="review"] { border-left:3px solid var(--ddf-board-warning); }
+.ddf-board-task[data-status="review"] .ddf-board-task-status { color:var(--ddf-board-warning); border-color:currentColor; }
 .ddf-board-task[data-status="accepted"] .ddf-board-task-status { color:var(--dsw-alias-state-success-primary,#1f9d55); border-color:currentColor; }
 .ddf-board-task[data-status="failed"] .ddf-board-task-status,.ddf-board-task[data-status="blocked"] .ddf-board-task-status { color:var(--dsw-alias-state-danger-primary,#d14343); border-color:currentColor; }
 .ddf-board-task[data-status="cancelled"] .ddf-board-task-status { color:var(--dsw-alias-label-secondary,#646a73); }
+.ddf-board-task-facts { display:grid; grid-template-columns:1.1fr 1fr 1fr 1.2fr; gap:14px; margin:15px 0 13px; }
+.ddf-board-task-facts > div { min-width:0; }
+.ddf-board-task-facts dt { margin-bottom:4px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
+.ddf-board-task-facts dd { display:flex; flex-direction:column; gap:3px; margin:0; color:var(--dsw-alias-label-primary,#1f2329); font-size:14px; overflow-wrap:anywhere; }
+.ddf-board-fact-note { color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
+.ddf-board-model-check[data-state="plans.modelVerified"] { color:var(--ddf-board-success); }
+.ddf-board-model-check[data-state="plans.modelMismatch"] { color:var(--ddf-board-error); font-weight:600; }
+.ddf-board-task-line[data-current-activity] { padding-top:11px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); color:var(--dsw-alias-label-primary,#1f2329); font-size:14px; }
+.ddf-board-execution-diagnostics { margin-top:12px; }
+.ddf-board-execution-diagnostics > summary { color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
 .ddf-board-task-line { margin:10px 0 0; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
 .ddf-board-task-line strong { color:var(--dsw-alias-label-primary,#1f2329); font-weight:600; }
 .ddf-board-task-line[data-kind="error"] { color:var(--dsw-alias-state-danger-primary,#d14343); }
@@ -1512,6 +1649,28 @@ window.__ModuleLoader__.load({
 .ddf-board-load-issue details { margin-top:12px; }
 .ddf-board-inline-notice { margin:0; font-size:12px; color:var(--dsw-alias-label-secondary,#646a73); overflow-wrap:anywhere; }
 .ddf-board-inline-notice[data-kind="error"] { color:var(--dsw-alias-state-danger-primary,#d14343); }
+.ddf-board-decision { border:1px solid var(--dsw-alias-border-l1,#dfe5ee); border-radius:10px; overflow:hidden; background:var(--dsw-alias-bg-layer-1,#fff); }
+.ddf-board-decision-main { display:grid; grid-template-columns:minmax(0,.9fr) minmax(0,1.25fr); }
+.ddf-board-decision-main h2 { margin:0 0 8px; font-size:12px; color:var(--dsw-alias-label-secondary,#646a73); font-weight:600; }
+.ddf-board-decision-difficulty { padding:19px 20px; border-left:3px solid var(--ddf-board-accent); background:var(--dsw-alias-bg-layer-2,#f5f6f7); background:color-mix(in srgb,var(--ddf-board-accent) 7%,var(--dsw-alias-bg-layer-1,#fff)); }
+.ddf-board-decision-level { display:flex; align-items:baseline; flex-wrap:wrap; gap:12px; }
+.ddf-board-decision-level strong { font-size:27px; line-height:1.25; font-weight:650; color:var(--dsw-alias-label-primary,#1f2329); }
+.ddf-board-decision-level > span { color:var(--ddf-board-accent); font:600 13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+.ddf-board-decision-signals { margin:10px 0 0; font-size:13px; color:var(--dsw-alias-label-primary,#1f2329); overflow-wrap:anywhere; }
+.ddf-board-decision-note { margin:6px 0 0; font-size:12px; line-height:1.6; color:var(--dsw-alias-label-secondary,#646a73); overflow-wrap:anywhere; }
+.ddf-board-decision-routes { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.1fr); align-items:start; gap:18px; padding:19px 20px; }
+.ddf-board-decision-route { color:var(--ddf-board-accent); font-size:14px; font-weight:650; overflow-wrap:anywhere; }
+.ddf-board-decision-actual { border-left:2px solid var(--ddf-board-accent); padding-left:12px; min-width:0; }
+.ddf-board-decision-actual > strong { color:var(--dsw-alias-label-primary,#1f2329); font-size:14px; font-weight:650; }
+.ddf-board-decision-counters { display:flex; align-items:baseline; flex-wrap:wrap; gap:10px 22px; padding:11px 20px; border-top:1px solid var(--dsw-alias-border-l1,#dfe5ee); }
+.ddf-board-decision-count { display:flex; align-items:baseline; gap:7px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
+.ddf-board-decision-count > strong { color:var(--dsw-alias-label-primary,#1f2329); font:600 16px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+.ddf-board-decision-cumulative { color:var(--dsw-alias-label-secondary,#646a73); font-size:11px; }
+.ddf-board-decision-interception { flex:1 1 240px; min-width:0; }
+.ddf-board-decision-interception > summary { color:var(--ddf-board-accent); font-size:12px; }
+.ddf-board-decision-interception p { margin:6px 0 0; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; overflow-wrap:anywhere; }
+.ddf-board-decision-legacy { padding:0 20px 11px; }
+@media (max-width:960px){ .ddf-board-decision-main { grid-template-columns:1fr; } .ddf-board-task-facts { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width:720px){
   .ddf-board { padding:18px 14px 28px; }
   .ddf-board-header,.ddf-board-hero { grid-template-columns:1fr; display:grid; gap:14px; }
@@ -1523,6 +1682,9 @@ window.__ModuleLoader__.load({
   .ddf-board-progress-head,.ddf-board-section-head { flex-wrap:wrap; }
   .ddf-board-task-head { flex-direction:column; gap:8px; }
   .ddf-board-task-status { align-self:flex-start; }
+  .ddf-board-decision-routes { grid-template-columns:1fr; }
+  .ddf-board-decision-main > div { padding:16px; }
+  .ddf-board-decision-counters { padding:11px 16px; gap:10px 16px; }
 }
 @media (max-width:380px){ .ddf-board { gap:12px; padding:16px 12px 24px; } .ddf-board-hero,.ddf-board-task { padding:12px; } .ddf-board-metric { padding:12px; } .ddf-board-metric-value { font-size:18px; } .ddf-board-title { font-size:22px; } }
 `
@@ -1579,34 +1741,88 @@ window.__ModuleLoader__.load({
       return t('view.boardNoReason')
     }
 
+    function BoardDecision({ t, session, plan, status, running }) {
+      const route = session?.route ?? plan?.routing
+      const difficulty = session?.difficulty, level = levelKey(difficulty)
+      const tasks = plan?.tasks ?? []
+      const dependent = tasks.filter(task => ['queued', 'blocked'].includes(task.status)
+        && (task.dependsOn ?? []).some(id => tasks.some(item => item.id === id && item.status !== 'accepted')))
+      const actual = !plan ? t('view.actualNoPlan')
+        : ['accepted', 'cancelled', 'failed', 'blocked'].includes(status) ? t('status.' + status)
+        : running > 1 ? fill(t('view.actualParallel'), { count: running })
+        : dependent.length ? t('view.actualDependency')
+        : tasks.some(task => ['starting', 'running'].includes(task.audit?.status)) ? t('view.actualAudit')
+        : running ? t('view.actualRunning') : status === 'review' ? t('view.acceptanceReview') : t('view.actualQueued')
+      const count = (key, label) => h('div', { className: 'ddf-board-decision-count', key },
+        h('span', null, t('table.' + label)),
+        h('strong', null, Number.isFinite(session?.turnStats?.[key]) ? String(session.turnStats[key]) : t('cfg.unknown')))
+      const cumulative = session?.sessionStats?.denied ?? session?.denied
+      return h('section', { className: 'ddf-board-decision', 'aria-label': t('view.decisionTitle') },
+        h('div', { className: 'ddf-board-decision-main' },
+          h('div', { className: 'ddf-board-decision-difficulty' },
+            h('h2', null, t('view.decisionDifficulty')),
+            h('div', { className: 'ddf-board-decision-level' }, h('strong', null, level ? t('level.' + level) : t('cfg.unknown')),
+              Number.isFinite(difficulty?.score) ? h('span', null, fill(t('difficulty.score'), { score: difficulty.score })) : null),
+            h('p', { className: 'ddf-board-decision-signals' }, signalsText(t, difficulty)),
+            h('p', { className: 'ddf-board-decision-note' }, t('view.decisionHint'))),
+          h('div', { className: 'ddf-board-decision-routes' },
+            h('div', null, h('h2', null, t('view.suggestedRoute')), h('strong', { className: 'ddf-board-decision-route' }, routeLabel(t, route)),
+              route ? h('p', { className: 'ddf-board-decision-note' }, t(session?.route ? 'view.routeCurrent' : 'view.routeSnapshot')) : null,
+              h('p', { className: 'ddf-board-decision-note' }, routeReasonsText(t, route))),
+            h('div', { className: 'ddf-board-decision-actual' }, h('h2', null, t('view.actualArrangement')), h('strong', null, actual),
+              dependent.length ? h('p', { className: 'ddf-board-decision-note' }, fill(t('view.boardDependency'), {
+                tasks: [...new Set(dependent.flatMap(task => task.dependsOn ?? []))].map(id => tasks.find(task => task.id === id))
+                  .filter(task => task && task.status !== 'accepted').map(task => task.title || task.id).join('、') })) : null,
+              plan?.dispatchWait?.message ? h('p', { className: 'ddf-board-decision-note' }, plan.dispatchWait.message) : null))),
+        h('div', { className: 'ddf-board-decision-counters' }, count('direct', 'direct'), count('delegated', 'delegated'), count('denied', 'denied'),
+          Number.isFinite(cumulative) ? h('span', { className: 'ddf-board-decision-cumulative' }, fill(t('table.cumulative'), { count: cumulative })) : null,
+          session?.last?.tool ? h('details', { className: 'ddf-board-decision-interception' },
+            h('summary', null, t('table.last') + '：', h('code', null, session.last.tool)),
+            h('p', null, session.last.message || t('last.' + session.last.kind))) : null),
+        session && !session.turnStats ? h('p', { className: 'ddf-board-decision-note ddf-board-decision-legacy' }, t('view.countersUnknown')) : null)
+    }
+
     function DashboardTaskCard({ t, task, plan, rootTask, onFix }) {
       const status = task.status || 'queued'
       const route = task.modelRoute?.actual ?? task.modelRoute?.resolved ?? task.modelRoute?.requested ?? task.model
       const auditActivity = task.audit ? t('audit.title') + ' · ' + t('audit.' + task.audit.status) : ''
       const dependencies = (task.dependsOn ?? []).map(id => plan.tasks.find(item => item.id === id)).filter(item => item && item.status !== 'accepted')
       const waiting = status === 'queued' && dependencies.length ? fill(t('view.boardDependency'), { tasks: dependencies.map(item => item.title || item.id).join('、') }) : ''
-      const activity = auditActivity || task.execution?.summary || task.progress?.tool || waiting || t('view.boardNoActivity')
+      const current = ['starting', 'running'].includes(task.audit?.status) ? task.audit : task
+      const liveActivity = ['starting', 'running'].includes(current.status) && current.supervision?.activity
+      const activity = waiting || (liveActivity ? (current.execution ? t('supervision.reporting')
+        : t('supervision.activity.' + current.supervision.activity.kind) + (current.supervision.activity.tool ? '：' + current.supervision.activity.tool : ''))
+        : auditActivity || task.execution?.summary || (task.progress?.tool ? t('view.latestActivity') + '：' + task.progress.tool : t('view.boardNoActivity')))
       const reason = ['failed', 'blocked', 'cancelled'].includes(status) ? dashboardReason(t, task) : ''
       const affected = dashboardAffected(task, plan.tasks)
       const next = status === 'cancelled' ? t('chat.stoppedNext') : task.issue?.action
         || (task.recovered ? t('view.recoveredNext') : ['failed', 'blocked'].includes(status) ? t('view.failedNext') : '')
       const isRoot = Boolean(rootTask && rootTask.id === task.id)
       const detail = route ? `${route.provider} / ${route.model}` : t('plans.modelUnknown')
+      const auditRoute = task.audit?.modelRoute?.actual ?? task.audit?.modelRoute?.resolved ?? task.audit?.modelRoute?.requested
+      const fact = (label, value, note, kind) => h('div', { 'data-fact': kind }, h('dt', null, t(label)), h('dd', null, value,
+        note ? h('span', { className: 'ddf-board-fact-note' }, note) : null))
       return h('article', { className: 'ddf-board-task', 'data-task-id': task.id, 'data-status': status,
         'data-root': isRoot ? 'true' : 'false', 'data-affected': affected ? 'true' : 'false' },
         h('div', { className: 'ddf-board-task-head' },
           h('div', { className: 'ddf-board-task-title-wrap' },
             h('h3', { className: 'ddf-board-task-title' }, task.title || task.id),
             h('div', { className: 'ddf-board-task-meta' },
-              h('span', null, task.modelRoute?.role ? t('models.' + task.modelRoute.role) + ' → ' + detail
-                + ' · ' + fill(t('plans.taskComplexity'), { complexity: t('models.' + (task.complexity || 'routine')) })
-                : fill(t('plans.taskComplexity'), { complexity: t('models.' + (task.complexity || 'routine')) }) + ' → ' + detail),
-              h('span', null, t(modelStatusKey(task))),
-              h('span', null, t('plans.modelReason') + '：' + (task.complexityReason || t('plans.modelReasonUnknown'))),
               isRoot ? h('span', { className: 'ddf-board-task-tag' }, t('view.boardRootCause')) : null,
               affected ? h('span', { className: 'ddf-board-task-tag' }, t('view.boardAffected')) : null)),
           h('span', { className: 'ddf-board-task-status' }, t('status.' + status))),
-        h('p', { className: 'ddf-board-task-line' }, h('strong', null, t('view.boardActivity') + '：'), activity),
+        h('dl', { className: 'ddf-board-task-facts' },
+          fact('view.taskModel', h('strong', { title: detail }, route?.model || t('plans.modelUnknown')),
+            h('span', { className: 'ddf-board-model-check', 'data-state': modelStatusKey(task) },
+              t(modelStatusKey(task) === 'plans.modelVerified' ? 'view.requestConsistent' : modelStatusKey(task))), 'model'),
+          fact('view.taskComplexity', task.complexity === 'complex' ? t('view.taskComplex') : task.complexity === 'routine' ? t('view.taskRoutine') : t('cfg.unknown'), null, 'complexity'),
+          fact('view.taskAudit', auditRoute?.model || t(task.complexity === 'complex' ? 'view.auditRequired' : 'view.auditOptional'),
+            task.audit ? t('audit.' + task.audit.status) : null, 'audit'),
+          fact('view.taskAcceptance', t(status === 'accepted' ? 'status.accepted' : status === 'cancelled' ? 'view.acceptanceStopped' : status === 'review' ? 'view.acceptanceReview' : 'view.acceptancePending'), null, 'acceptance')),
+        h('p', { className: 'ddf-board-task-line', 'data-current-activity': true }, h('strong', null, t('view.currentAction') + '：'), activity),
+        h('p', { className: 'ddf-board-task-line' }, h('strong', null, t('plans.modelReason') + '：'), task.complexityReason || t('plans.modelReasonUnknown')),
+        task.supervision || task.audit?.supervision ? h('details', { className: 'ddf-board-execution-diagnostics' },
+          h('summary', null, t('view.executionDiagnostics')), h(SupervisionDetails, { t, task: current })) : null,
         reason ? h('p', { className: 'ddf-board-task-line', 'data-kind': status === 'cancelled' || affected ? undefined : 'error' }, h('strong', null, t('view.boardReason') + '：'), reason) : null,
         next ? h('p', { className: 'ddf-board-task-line', 'data-kind': 'next' }, h('strong', null, t('view.boardNext') + '：'), next) : null,
         task.audit ? h('p', { className: 'ddf-board-task-line' }, h('strong', null, t('audit.title') + '：'),
@@ -1636,7 +1852,8 @@ window.__ModuleLoader__.load({
       const blockers = plan ? blockersOf(plan) : []
       const modelBlock = blockers.find(task => task.issue?.code === 'MODEL_CONFIG_INVALID')
       const route = plan?.routing || state?.sessions?.find(item => item.sessionId === sessionId)?.route
-      const next = plan?.completion ? t('completion.next') : plan ? dashboardNextText(t, status, tasks, modelBlock, rootTask) : ''
+      const session = state?.sessions?.find(item => item.sessionId === sessionId)
+      const next = plan?.completion ? completionNext(t, plan, state) : plan ? dashboardNextText(t, status, tasks, modelBlock, rootTask) : ''
       const links = (state ? ['chat', 'fleet', 'share'] : ['chat']).map(id => {
         const enabled = enabledView(id)
         return h('button', { key: id, type: 'button', className: 'ddf-board-action', disabled: !enabled,
@@ -1647,7 +1864,7 @@ window.__ModuleLoader__.load({
         h('strong', { className: 'ddf-board-metric-value' }, value),
         note ? h('span', { className: 'ddf-board-metric-note' }, note) : null)
       const progress = tasks.length ? Math.round((accepted / tasks.length) * 100) : 0
-      return h('div', { className: 'ddf-board-root' },
+      return h('div', { className: 'ddf-board-root', 'data-ddf-acceptance': '', 'data-conversation-composer-overlay': '' },
         h('style', null, DASHBOARD_STYLES),
         h('main', { className: 'ddf-board', 'data-status': status },
           h('header', { className: 'ddf-board-header' },
@@ -1661,11 +1878,11 @@ window.__ModuleLoader__.load({
           state && !plan ? h('section', { className: 'ddf-board-empty', role: 'status' }, h('h2', null, t('view.boardNoPlan')), h('p', null, t('view.boardNoPlanHint'))) : null,
           plan ? h('section', { className: 'ddf-board-hero' },
             h('div', null, h('p', { className: 'ddf-board-hero-label' }, t('view.boardRequest')),
-              h('p', { className: 'ddf-board-goal' }, plan.goal || plan.source?.text || t('view.unknownSource')),
-              route ? h('p', { className: 'ddf-board-route' }, h('b', null, t('plans.route') + '：'), routeLabel(t, route), ' · ', routeReasonsText(t, route),
-                plan.routingWarnings?.length ? h('span', null, ' · ' + fill(t('plans.routeWarnings'), { warnings: plan.routingWarnings.join('；') })) : null) : null),
+              h('p', { className: 'ddf-board-goal' }, plan.goal || plan.source?.text || t('view.unknownSource'))),
             h('span', { className: 'ddf-board-status', 'data-status': status, role: 'status' }, statusLabel)) : null,
-          h(CompletionReceipt, { t, plan }),
+          session || route ? h(BoardDecision, { t, session, plan, status, running }) : null,
+          plan?.routingWarnings?.length ? h('p', { className: 'ddf-board-inline-notice' }, fill(t('plans.routeWarnings'), { warnings: plan.routingWarnings.join('；') })) : null,
+          h(CompletionReceipt, { t, plan, state }),
           plan ? h('section', { className: 'ddf-board-metrics', 'aria-label': t('view.boardProgress') },
             metric('boardReturned', `${returned} / ${tasks.length}`), metric('boardAccepted', `${accepted} / ${tasks.length}`),
             metric('boardRunning', String(running)), metric('boardWaiting', String(waiting)),
@@ -1683,12 +1900,12 @@ window.__ModuleLoader__.load({
             plan.dispatchWait?.message && !['accepted', 'cancelled'].includes(status) ? h('p', null, t('plans.dispatchWaiting') + plan.dispatchWait.message) : null,
             plan.autoDispatch === false && blockers.length && status !== 'cancelled' ? h('p', null, t('plans.autoPaused')) : null,
             modelBlock && status !== 'cancelled' ? h('button', { type: 'button', className: 'ddf-board-action', onClick: () => onFix(modelBlock.issue.tier) }, t('plans.fixModel')) : null) : null,
-          plan ? h('section', null,
+          plan ? h('section', { 'data-task-list': '' },
             h('div', { className: 'ddf-board-section-head' }, h('h2', { className: 'ddf-board-section-title' }, t('view.boardTasks')),
               h('span', { className: 'ddf-board-section-note' }, fill(t('view.boardTaskCount'), { count: tasks.length }))),
             h('div', { className: 'ddf-board-task-list' }, ...orderedTasks.map(task => h(DashboardTaskCard, { key: task.id, t, task, plan, rootTask, onFix })))) : null,
           state?.legacyHost ? h('p', { className: 'ddf-board-inline-notice', role: 'status' }, t('view.legacyHost')) : null,
-          state?.sessions?.length ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.diagnostics')), h(StateCard, { t, state })) : null,
+          session ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.diagnostics')), h(StateCard, { t, state: { sessions: [session] } })) : null,
           state?.archiveWarning ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.archiveWarning')),
             h('p', { className: 'ddf-board-inline-notice' }, state.archiveWarning)) : null))
     }

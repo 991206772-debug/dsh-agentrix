@@ -8,7 +8,7 @@ const assetDirectory = process.argv[2]
 if (!assetDirectory) throw new Error('Provide a directory containing react.js and react-dom.js')
 const invalid = process.argv.includes('--invalid')
 const loadError = process.argv.includes('--load-error')
-let config = { ok: true, modelRouting: 'roles', mode: 'auto', threshold: 2, maxParallel: 2, maxAttempts: 2, maxActivations: 8, taskTimeoutMinutes: 15, locked: false,
+let config = { ok: true, modelRouting: 'roles', mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS, locked: false,
   models: { worker: { provider: invalid ? 'retired-demo' : 'demo', model: 'routine-model' }, reviewer: { provider: 'demo', model: 'design-model' } }, file: 'C:/isolated-test/delegation-first/default.json',
   defaults: { mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS }, ranges: { threshold: { min: 0, max: 20 }, ...OPTION_RANGES },
   revision: 'preview-1', updatedAt: Date.now(), source: { kind: 'file', profile: 'default', environmentValue: null } }
@@ -76,16 +76,39 @@ window.__ModuleLoader__ = {load({factory}) {
   const root = ReactDOM.createRoot(document.getElementById('root'));
   const navRoot = ReactDOM.createRoot(document.getElementById('sidebar'));
   const overlayRoot = ReactDOM.createRoot(document.getElementById('overlay'));
-  const entries = new Map(); let dictionaries, selected='session-demo-login';
+  const entries = new Map(); let dictionaries, selected='session-demo-login', panel=${process.argv.includes('--config') ? "'dsh-delegation-first'" : 'null'}, activeView='delegation-acceptance', pending='';
+  const drafts = new Map();
   const state = {status:'ready', value:${JSON.stringify(catalog)}, error:null};
   const listeners = new Set();
   const directory = {store:{getSnapshot:()=>state, subscribe:fn=>{listeners.add(fn);return ()=>listeners.delete(fn)}},
     load:async()=>state.value, refresh(){for(const fn of listeners)fn();}};
-  const renderView=()=>root.render(React.createElement(entries.get('conversation.view').component, {
-    sessionId:selected, openView:id=>root.render(React.createElement('p',null,'隔离导航验证：'+selected+' → '+id))
-  }));
+  const openView = id => { activeView=id; renderView(); };
+  function Composer() {
+    return React.createElement('div', {'data-composer-seat':'', 'data-conversation-region':'composer', className:'preview-composer'},
+      pending ? React.createElement('section', {['data-'+pending+'-key']:'fixture', role:'status'}, '隔离交互：'+pending,
+        React.createElement('button', {type:'button', onClick:()=>{pending='';renderView()}}, '结束测试交互')) : React.createElement(React.Fragment,null,
+        React.createElement('div', {className:'preview-task-dock'}, '任务 · 1 进行中 · 4 待处理'),
+        React.createElement('textarea', {key:selected, 'aria-label':'测试聊天草稿', placeholder:'发消息或创建任务',
+          defaultValue:drafts.get(selected)||'', onChange:event=>drafts.set(selected,event.target.value)})));
+  }
+  function ConversationShell() {
+    const acceptance = entries.get('conversation.view');
+    const content = activeView==='delegation-acceptance' ? React.createElement(acceptance.component,{sessionId:selected,openView})
+      : React.createElement('div', {className:'preview-other-view', 'data-fixture-view':activeView,
+          ...(activeView==='trajectory'?{'data-conversation-composer-overlay':''}:{})},
+          React.createElement('h2',null,activeView==='chat'?'对话':activeView==='trajectory'?'轨迹':activeView==='context'?'上下文':activeView),
+          React.createElement('p',null,'隔离宿主页签：'+selected));
+    return React.createElement('section', {className:'preview-conversation', 'data-phase':'active'},
+      React.createElement('nav', {className:'preview-tabs', 'aria-label':'会话页签'},
+        ...[['chat','对话'],['trajectory','轨迹'],['context','上下文'],['delegation-acceptance','任务验收']].map(([id,label])=>
+          React.createElement('button',{key:id,type:'button','aria-current':activeView===id?'page':undefined,onClick:()=>openView(id)},label))),
+      React.createElement('div', {'data-conversation-scroll':'', className:'preview-scroll'},
+        React.createElement('div', {'data-slot':'conversation.session',style:{display:'contents'}},
+          React.createElement('div',{className:'preview-view-area'},content)),React.createElement(Composer)));
+  }
+  const renderView=()=>root.render(panel===null?React.createElement(ConversationShell):React.createElement(entries.get('main').component));
   plugin.apply({effect:fn=>fn(), modelDirectories:{catalog:directory},
-    layout:{selectPanel:()=>root.render(React.createElement(entries.get('main').component))},
+    layout:{selectPanel:id=>{panel=id;renderView()}},
     locale:{register:(ns,d)=>{dictionaries=d}, bind:()=>key=>dictionaries.zh[key]??key},
     slots:{inject:(name,fn)=>fn(), entries:name=>name==='conversation.view'
       ? [{options:{id:'fleet'}},{options:{id:'share'}},{options:{id:'chat'}},entries.get(name)] : [],
@@ -93,19 +116,23 @@ window.__ModuleLoader__ = {load({factory}) {
         entries.set(options.name,{options,component});
         if(options.name==='shell.overlay')overlayRoot.render(React.createElement(component));
         if(options.name==='sidebar.panellist')navRoot.render(React.createElement('button',{
-          type:'button',onClick:()=>root.render(React.createElement(entries.get('main').component))
+          type:'button',onClick:()=>{panel='dsh-delegation-first';renderView()}
         },React.createElement(component),options.label()));
         return ()=>{};
       }}});
-  document.querySelectorAll('[data-session]').forEach(button=>button.onclick=()=>{selected=button.dataset.session;renderView()});
-  ${process.argv.includes('--config') ? "root.render(React.createElement(entries.get('main').component));" : 'renderView();'}
+  document.querySelectorAll('[data-session]').forEach(button=>button.onclick=()=>{selected=button.dataset.session;panel=null;renderView()});
+  document.querySelectorAll('[data-pending]').forEach(button=>button.onclick=()=>{pending=button.dataset.pending;renderView()});
+  document.querySelector('[data-return-conversation]').onclick=()=>{panel=null;renderView()};
+  renderView();
 }};`
-const html = `<!doctype html><html lang="zh"><meta charset="utf-8"><title>委派优先 · 隔离界面验证</title>
-<style>html,body{margin:0;height:100%;font-family:Arial,"Microsoft YaHei",sans-serif}.layout{height:calc(100% - 76px);display:grid;grid-template-columns:230px 1fr}#root{height:100%;overflow:auto}#sidebar{padding:16px;background:#f5f6f7}#sidebar button{display:flex;align-items:center;gap:10px;padding:12px;font:inherit}.notice{padding:8px 16px;font-size:12px;background:#fff6df;color:#765b16}.sessions{display:flex;gap:8px;padding:8px 16px}.sessions button{padding:6px 12px;cursor:pointer}
+const html = `<!doctype html><html lang="zh"><meta charset="utf-8"><title>DSH Agentrix · 隔离界面验证</title>
+<style>html,body{margin:0;height:100%;font-family:Arial,"Microsoft YaHei",sans-serif}body{display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-2,#f5f6f7);color:var(--dsw-alias-label-primary,#1f2329)}.layout{flex:1;min-height:0;display:grid;grid-template-columns:230px minmax(0,1fr)}#root{height:100%;min-height:0;overflow:hidden}#sidebar{padding:16px;background:#f5f6f7}#sidebar button{display:flex;align-items:center;gap:10px;padding:12px;font:inherit}.notice{padding:8px 16px;font-size:12px;background:#fff6df;color:#765b16}.sessions{display:flex;flex-wrap:wrap;gap:8px;padding:8px 16px}.sessions button{padding:6px 12px;cursor:pointer}
+.preview-conversation{height:100%;display:flex;flex-direction:column;overflow:hidden}.preview-tabs{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px;border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb);flex:none}.preview-tabs button{font:inherit;color:inherit;background:transparent;border:0;padding:6px;cursor:pointer}.preview-tabs button[aria-current=page]{color:var(--dsw-alias-state-business-primary,#4f6ef7);box-shadow:0 2px currentColor}.preview-scroll{--dsh-composer-height:160px;display:flex;flex:1;min-height:0;flex-direction:column;overflow-y:auto;position:relative}.preview-view-area{display:flex;flex-direction:column;flex:1 0 auto;min-height:auto}.preview-composer{box-sizing:border-box;flex:none;position:sticky;bottom:0;z-index:9;margin-top:auto;padding:16px;background:linear-gradient(transparent,var(--dsw-alias-bg-layer-2,#f5f6f7) 24px)}.preview-task-dock{background:var(--dsw-alias-bg-layer-1,#fff);padding:8px;border-radius:8px;margin-bottom:8px;font-size:13px}.preview-composer textarea{box-sizing:border-box;width:100%;height:80px;padding:12px;resize:none;border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:12px;color:inherit;background:var(--dsw-alias-bg-layer-1,#fff);font:14px/1.6 inherit}.preview-composer section{padding:20px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l1,#ddd);border-radius:8px}.preview-other-view{flex:1;padding:24px}.preview-scroll:has([data-conversation-composer-overlay]){overflow:hidden auto}.preview-scroll:has([data-conversation-composer-overlay])>[data-slot="conversation.session"]>.preview-view-area{flex:1 1 0;min-height:0;overflow:hidden}.preview-scroll:has([data-conversation-composer-overlay])>.preview-composer{position:absolute;left:0;right:0;bottom:0}.preview-scroll:has([data-fixture-view=context])>.preview-composer:not(:has([data-approval-key],[data-question-key],[data-plan-review-key])){display:none}@media(max-width:720px){.layout{grid-template-columns:1fr}#sidebar{display:none}.notice,.sessions{padding:6px 12px}.sessions button{font-size:12px;padding:4px}}
 ${process.argv.includes('--dark') ? ':root{--dsw-alias-bg-layer-1:#141414;--dsw-alias-bg-layer-2:#232323;--dsw-alias-label-primary:#f3f3f3;--dsw-alias-label-secondary:#a1a1a1;--dsw-alias-border-l1:#303030;--dsw-alias-button-primary-fill:#4d6bfe}body{background:#141414;color:#f3f3f3}#sidebar{background:#1d1d1d}#sidebar button,.sessions button{background:#232323;color:#f3f3f3;border:1px solid #303030}' : ''}
 ${process.argv.includes('--fidelity') ? 'body{background:#e9ebef}.notice,.sessions,#sidebar{display:none}.layout{display:block;width:980px;max-width:100%;height:760px;margin:24px auto;background:#fff;border:1px solid #d8dce2;border-radius:14px;box-shadow:0 18px 48px rgba(24,32,44,.13);overflow:hidden;box-sizing:border-box}#root{height:100%;overflow:hidden}@media(max-width:1040px){.layout{height:720px}}' : ''}</style>
 <div class="notice">隔离界面验证 · 全部为测试数据 · 未连接 DSH</div>
 <nav class="sessions" aria-label="测试会话"><button data-session="session-demo-login">登录需求</button><button data-session="session-demo-research">调研需求</button><button data-session="session-empty-preview">空会话</button>${process.argv.includes('--receipts') ? '<button data-session="session-stopped-preview">停止回执</button>' : ''}</nav>
+<nav class="sessions" aria-label="宿主交互测试"><button data-pending="approval">审批测试</button><button data-pending="question">提问测试</button><button data-pending="plan-review">计划确认测试</button><button data-return-conversation>返回测试会话</button></nav>
 <div class="layout"><nav id="sidebar"></nav><div id="root"></div></div><div id="overlay"></div>
 <script src="/react.js"></script><script src="/react-dom.js"></script><script>${bootstrap}</script><script src="/client.js"></script></html>`
 const server = http.createServer(async (request, response) => {
@@ -113,7 +140,9 @@ const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost')
     if (url.pathname === '/') { response.setHeader('content-type', 'text/html; charset=utf-8'); response.end(html); return }
     if (url.pathname === '/client.js') { response.setHeader('content-type', 'text/javascript'); response.end(await readFile(new URL('../client.js', import.meta.url))); return }
-    if (['/react.js', '/react-dom.js'].includes(url.pathname)) { response.setHeader('content-type', 'text/javascript'); response.end(await readFile(path.join(assetDirectory, url.pathname.slice(1)))); return }
+    if (['/react.js', '/react-dom.js'].includes(url.pathname)) { response.setHeader('content-type', 'text/javascript');
+      const name = url.pathname.slice(1)
+      response.end(await readFile(path.join(assetDirectory, name)).catch(() => readFile(path.join(assetDirectory, name.replace('.js', '.production.min.js'))))); return }
     response.setHeader('content-type', 'application/json; charset=utf-8')
     if (url.pathname.endsWith('/api/config')) {
       if (process.argv.includes('--config-read-error')) { response.statusCode = 503; response.end(JSON.stringify({ ok: false, error: '配置服务暂不可用（隔离测试）' })); return }
