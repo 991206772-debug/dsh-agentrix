@@ -34,6 +34,11 @@ export function taskSummary(plan) {
       incompleteReason(task))) : '全部子任务已验收。',
     '', '本档案提供继续处理所需的记录；重新加载后，活动子任务须先清理，再按现有规则重试。']
   if (plan.completion) lines.push('', '## 程序交付回执', '', completionText(plan.completion))
+  const usage = plan.usage
+  lines.push('', '## 本次需求用量', '', usage?.complete && usage.roles.every(row => row.responses >= row.requests)
+    ? '已记录全部已返回请求；输入、缓存和输出沿用宿主原始口径，不估算费用。' : '统计不完整；历史或缺失数据不补造。')
+  const token = value => Number.isFinite(value) ? value : '未提供'
+  for (const row of usage?.roles ?? []) lines.push(`- ${{ coordinator: '主控', worker: '执行者', reviewer: '独立审查' }[row.role]} · ${row.model ?? '未记录模型'} · 执行次数 ${row.attempt} · 模型请求 ${row.requests} · 输入 ${token(row.inputTokens)} · 缓存读取 ${token(row.cacheReadTokens)} · 缓存写入 ${token(row.cacheWriteTokens)} · 输出 ${token(row.outputTokens)}`)
   for (const task of plan.tasks) {
     lines.push('', '## ' + task.id + ' · ' + task.title, '',
       '- 状态：' + labels[task.status], '- 执行次数：' + task.attempts,
@@ -55,8 +60,10 @@ export function taskSummary(plan) {
     if (task.supervision) {
       const state = task.supervision, metrics = state.metrics, limits = state.limits
       lines.push('', '### 过程监督', '', `- 主控纠偏：${state.used}/${state.limit}`,
-        '- 本次截止时间：' + time(state.deadlineAt),
-        ...(metrics && limits ? [`- 模型调用：${metrics.requests}/${limits.requests}；输出 Token：${metrics.outputTokens}${Number.isFinite(limits.outputTokens) ? '/' + limits.outputTokens : '（仅统计，不设插件上限）'}；最近上下文 Token：${metrics.contextTokens}`] : []),
+        (state.remindAt ? '- 运行时间提醒：' + time(state.remindAt) : '- 历史截止时间：' + time(state.deadlineAt)),
+        ...(metrics && limits ? [`- 本次执行模型调用：${metrics.requests}${Number.isFinite(limits.requests) ? '/' + limits.requests : ''}；输出 Token：${metrics.outputTokens}${Number.isFinite(limits.outputTokens) ? '/' + limits.outputTokens : '（仅统计，不设插件上限）'}；最近上下文 Token：${metrics.contextTokens}`] : []),
+        ...(state.notices?.REQUEST_VOLUME ? ['- 调用次数提醒已记录；原代理继续执行。'] : []),
+        ...(state.notices?.ELAPSED_TIME ? ['- 运行时间提醒已记录；任务继续执行。'] : []),
         ...(state.pending ? ['- 需要主控处理：' + state.pending.reason] : []),
         ...(state.lastCorrection ? ['- 最近主控纠正：' + state.lastCorrection.message] : []),
         ...(state.wrapUpRequestedAt ? ['- 已提醒原子代理收尾：' + time(state.wrapUpRequestedAt)] : []),

@@ -5,6 +5,52 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('routing advice alone never claims delegation or completion', async () => {
+  for (const route of ['direct', 'delegate_parallel']) {
+    const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true,
+      json: async () => ({ ok: true, sessionId: 'session-current', plans: [],
+        sessions: [{ sessionId: 'session-current', route: { route, reasons: [] } }] }) }) })
+    const action = f.mountAction('session-current')
+    try {
+      await action.flush()
+      assert.match(action.text(), /未启动子代理/)
+      assert.ok(!action.nodes('span').some(node => node.props?.['data-status'] === 'completed'))
+    } finally { action.close(); f.close() }
+  }
+})
+
+test('acceptance shows runtime policy and separate request usage even without a delegated plan', async () => {
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true,
+    json: async () => ({ ok: true, sessionId: 'session-current', plans: [], sessions: [], runtimePolicyVersion: 2,
+      requestUsage: [{ sessionId: 'session-current', requestId: 'r1', complete: true, roles: [
+        { role: 'coordinator', model: 'main-model', attempt: 0, requests: 1, responses: 1, inputTokens: 100, cacheReadTokens: 200, cacheWriteTokens: null, outputTokens: 10 },
+      ] }] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    assert.match(view.text(), /持续执行策略已生效/)
+    assert.match(view.text(), /本次需求用量/)
+    assert.match(view.text(), /main-model/)
+    assert.match(view.text(), /缓存读取.*200/)
+    assert.match(view.text(), /输入.*100/)
+  } finally { view.close(); f.close() }
+})
+
+test('an activity inquiry is shown as a reminder rather than mandatory correction or a blocked task', async () => {
+  const body = { ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current', status: 'running', goal: '核查执行活动',
+    tasks: [{ id: 'a', title: '等待命令返回', status: 'running', dependsOn: [], outputs: [], writes: [], criteria: [], checks: [],
+      supervision: { used: 0, limit: 2, startedAt: Date.now(), pending: { advisory: true, reason: '请核对命令是否仍在执行。' } } }] }], sessions: [] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => body }) })
+  const action = f.mountAction('session-current'), notice = f.mountNotice('session-current'), view = f.mountView('session-current')
+  try {
+    await action.flush(); await notice.flush(); await view.flush()
+    assert.match(action.text(), /需核对活动/)
+    assert.match(notice.text(), /活动核对提醒/)
+    assert.doesNotMatch(notice.text(), /等待主控纠偏|已阻塞/)
+    assert.match(view.text(), /活动核对提醒/)
+  } finally { action.close(); notice.close(); view.close(); f.close() }
+})
+
 test('acceptance uses the native full-height conversation surface and hides only its ordinary composer', async () => {
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true,
     json: async () => ({ ok: true, sessionId: 'session-current', plans: [], sessions: [] }) }) })
@@ -1150,7 +1196,7 @@ test('running supervision is visible in chat and task details with evidence, ela
     task.supervision.limits.outputTokens = null
     task.supervision.metrics.outputTokens = 50000
     await view.tick()
-    assert.match(view.text(), /累计输出 50000 Token.*仅统计/)
+    assert.match(view.text(), /输出 50000 Token.*本次执行统计/)
     assert.doesNotMatch(view.text(), /50000\/(?:null|undefined|40000)/)
   } finally { view.close(); action.close(); notice.close(); f.close() }
 })

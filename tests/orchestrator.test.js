@@ -18,6 +18,127 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('request and elapsed reminders keep the same worker running without waking the coordinator', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+  const f = await fixture({ taskTimeoutMinutes: 1 })
+  await f.plan([card('continuous')]); await f.execute('delegation_run')
+  const childId = f.children[0].id
+  for (let i = 0; i < 85; i++) f.emit('llm/stream', { sessionId: childId, provider: 'local', model: 'cheap' }, () => {})
+  t.mock.timers.tick(70_000)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.snapshot().tasks[0].childId, childId)
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.parent.injected.length, 0)
+  assert.equal(f.snapshot().tasks[0].supervision.used, 0)
+  assert.equal(f.snapshot().tasks[0].supervision.metrics.requests, 85)
+  assert.ok(f.snapshot().tasks[0].supervision.notices.REQUEST_VOLUME)
+  assert.ok(f.snapshot().tasks[0].supervision.notices.ELAPSED_TIME)
+  t.mock.timers.reset()
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+})
+
+test('model-facing status omits long reports while scoped details and stored evidence remain complete', async () => {
+  const f = await fixture(); await f.plan([card('compact')]); await f.execute('delegation_run')
+  const report = '完整交付证据'.repeat(3000)
+  await f.complete(0, { stopReason: 'completed', output: [{ type: 'text', text: report }] })
+  const status = await f.execute('delegation_status')
+  const rendered = f.render('delegation_status', {}, status)
+  assert.ok(rendered.length < JSON.stringify(status).length * 0.3)
+  assert.ok(!rendered.includes(report))
+  const detail = await f.execute('delegation_status', { taskId: 'compact', detail: 'full' })
+  assert.equal(detail.task.report, report)
+  await assert.rejects(f.execute('delegation_status', { detail: 'full' }), /taskId|任务/)
+  assert.equal(JSON.parse(await readFile(f.file, 'utf8')).plans[0].tasks[0].report, report)
+})
+
+test('request usage includes preparation, both child roles and retries, deduplicates messages and survives reload', async () => {
+  const f = await fixture()
+  const message = (agent, seq, usage) => f.emit('session/event', agent, { type: 'assistant/message', seq, data: { usage } })
+  f.emit('llm/stream', { sessionId: 'parent', provider: 'local', model: 'parent' }, () => {})
+  message(f.parent, 1, { inputTokens: 100, cacheReadTokens: 200, outputTokens: 10 })
+  assert.equal(f.engine.requestUsage('parent').roles[0].inputTokens, 100)
+  await f.plan([card('usage', { complexity: 'complex' })]); await f.execute('delegation_run')
+  const child = f.children[0]
+  f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => {})
+  message(child, 2, { inputTokens: 300, cacheReadTokens: 400, outputTokens: 20 })
+  message(child, 2, { inputTokens: 300, cacheReadTokens: 400, outputTokens: 20 })
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const audit = f.children[1]
+  f.emit('llm/stream', { sessionId: audit.id, provider: 'local', model: 'deep' }, () => {})
+  message(audit, 3, { inputTokens: 500, outputTokens: 30 })
+  await f.finishAudit(1, { specVerdict: 'pass', qualityVerdict: 'pass', issues: [] })
+  const usage = f.snapshot().usage
+  assert.deepEqual(usage.roles.map(row => [row.role, row.inputTokens, row.cacheReadTokens, row.outputTokens]),
+    [['coordinator', 100, 200, 10], ['worker', 300, 400, 20], ['reviewer', 500, null, 30]])
+  assert.equal(usage.roles[1].responses, 1)
+  const markdown = await readFile(f.snapshot().archive.summaryPath, 'utf8')
+  assert.match(markdown, /本次需求用量/)
+  assert.match(markdown, /缓存读取.*200/)
+  await f.reload()
+  assert.deepEqual(f.snapshot().usage, usage)
+  const reread = f.engine.requestUsage('parent')
+  message(f.parent, 1, { inputTokens: 100, cacheReadTokens: 200, outputTokens: 10 })
+  assert.deepEqual(f.engine.requestUsage('parent'), reread)
+  const proof = await f.execute('delegation_verify', { taskId: 'usage', checkIndex: 0 })
+  await f.execute('delegation_review', { taskId: 'usage', verdict: 'rework', issues: [
+    { criterion: 0, severity: 'important', finding: '需要补充原要求', evidence: [proof.callId] },
+  ] })
+  await f.execute('delegation_run')
+  const retry = f.children.at(-1)
+  f.emit('llm/stream', { sessionId: retry.id, provider: 'local', model: 'cheap' }, () => {})
+  message(retry, 4, { inputTokens: 50, outputTokens: 5 })
+  assert.deepEqual(f.snapshot().usage.roles.filter(row => row.role === 'worker').map(row => [row.attempt, row.inputTokens]), [[1, 300], [2, 50]])
+})
+
+test('direct usage follows the actual request model across selector changes and reload without creating a plan', async () => {
+  const options = { source: { messageId: 'direct-one', text: '小修直接完成' } }
+  const f = await fixture(options)
+  f.emit('llm/stream', { sessionId: 'parent', provider: 'local', model: 'parent' }, () => {})
+  f.parent.options.model = 'new-selection'
+  f.emit('session/event', f.parent, { type: 'assistant/message', seq: 1, data: { usage: { inputTokens: 12, cacheReadTokens: 8, outputTokens: 3 } } })
+  const first = f.engine.requestUsage('parent')
+  assert.equal(first.roles[0].model, 'parent')
+  assert.equal(first.roles[0].inputTokens, 12)
+  assert.equal(f.snapshot(), undefined)
+  assert.equal(f.calls.length, 0)
+  await f.reload()
+  assert.deepEqual(f.engine.requestUsage('parent'), first)
+  options.source = { messageId: 'direct-two', text: '另一个小需求' }
+  f.emit('llm/stream', { sessionId: 'parent', provider: 'local', model: 'new-selection' }, () => {})
+  f.emit('session/event', f.parent, { type: 'assistant/message', seq: 2, data: {} })
+  const next = f.engine.requestUsage('parent')
+  assert.equal(next.requestId, 'direct-two')
+  assert.equal(next.complete, false)
+  assert.equal(next.roles[0].inputTokens, null)
+  assert.equal(next.roles[0].requests, 1)
+  assert.equal(f.calls.length, 0)
+})
+
+test('read-only reviewers keep working and may checkpoint their evidence without spending correction allowance', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+  const f = await fixture({ taskTimeoutMinutes: 1 })
+  await f.plan([card('a', { complexity: 'complex' })]); await f.execute('delegation_run')
+  t.mock.timers.reset()
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const audit = f.children[1]
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+  for (let i = 0; i < 7; i++) {
+    f.engine.observe({ agent: audit, name: 'read', arguments: { file_path: `part-${i}.js` }, callId: `part-${i}` }, { isError: false, content: [] })
+    t.mock.timers.tick(5 * 60_000)
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  assert.equal(f.engine.guardChild({ agent: audit, name: 'delegation_checkpoint' }), undefined)
+  await f.checkpoint(1, { phase: 'verification', summary: '已核对七份交付物。', nextStep: '提交审查报告。', evidence: ['part-6'] })
+  assert.equal(f.snapshot().tasks[0].audit.status, 'running')
+  assert.equal(f.snapshot().tasks[0].audit.supervision.used, 0)
+  assert.equal(f.snapshot().tasks[0].audit.supervision.pending, null)
+  assert.equal(f.parent.injected.filter(message => message.source.kind === 'delegation-supervision').length, 0)
+  assert.equal(f.calls.length, 2)
+})
+
 test('default execution limits dispatch four tasks and retain the expanded plan and time budgets', async () => {
   const f = await fixture()
   await f.plan(['a', 'b', 'c', 'd', 'e'].map(id => card(id)))
@@ -27,7 +148,7 @@ test('default execution limits dispatch four tasks and retain the expanded plan 
   assert.equal(plan.tasks[4].status, 'queued')
   assert.equal(plan.activationBudget.limit, 64)
   for (const task of plan.tasks.slice(0, 4)) {
-    assert.equal(task.supervision.deadlineAt - task.supervision.startedAt, 120 * 60_000)
+    assert.equal(task.supervision.remindAt - task.supervision.startedAt, 120 * 60_000)
   }
 })
 
@@ -513,7 +634,7 @@ test('routine rework closes findings only with fresh coordinator evidence', asyn
   assert.equal(f.calls.length, 2)
 })
 
-test('review timeout and reload do not restart reviewers or dispose them twice', async t => {
+test('review reminders do not stop reviewers and reload still releases them exactly once', async t => {
   const f = await fixture({ taskTimeoutMinutes: 1 })
   await f.plan([card('a', { complexity: 'complex' })]); await f.execute('delegation_run')
   await f.complete(0, { stopReason: 'completed', output: [] })
@@ -531,9 +652,9 @@ test('review timeout and reload do not restart reviewers or dispose them twice',
   for (let i = 0; i < 100 && timed.snapshot().tasks[0].audit.status !== 'failed'; i++) await new Promise(resolve => setImmediate(resolve))
   await timed.execute('delegation_audit', { taskId: 'b', message: '链路已恢复' })
   t.mock.timers.tick(60_000)
-  for (let i = 0; i < 200 && timed.snapshot().tasks[0].audit.status !== 'failed'; i++) await new Promise(resolve => setImmediate(resolve))
-  assert.match(timed.snapshot().tasks[0].audit.error, /超过 1 分钟/)
-  assert.equal(timed.pending[2].receipt.disposeCount, 1)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(timed.snapshot().tasks[0].audit.status, 'running')
+  assert.equal(timed.pending[2].receipt.disposeCount, undefined)
   assert.equal(timed.calls.length, 3)
 })
 
@@ -730,7 +851,8 @@ async function fixture(options = {}) {
   const execute = (name, args = {}) => invoke(name, args, parent)
   const plan = tasks => execute('delegation_plan', { goal: '完成任务并由主控验收', tasks })
   const snapshot = () => engine.snapshot()[0]
-  return { engine, ctx, calls, pending, config, execute, plan, snapshot, directory, file, parent, conclusions,
+  return { get engine() { return engine }, ctx, calls, pending, config, execute, plan, snapshot, directory, file, parent, conclusions,
+    render: (name, args, value) => tools.get(name).output.render(args, value).map(block => block.text).join('\n'),
     get children() { return [...children.values()] },
     endTurn: (index, signal = new AbortController().signal) => events.get('agent/turn-stopping')?.({ agent: index === undefined ? parent : children.get(pending[index].receipt.childId), signal }),
     report: (index, args) => invoke('delegation_report', args, children.get(pending[index].receipt.childId)),
@@ -1234,24 +1356,22 @@ test('stage checkpoints keep current-task evidence and unfinished work without c
   assert.equal(f.snapshot().tasks[0].supervision.checkpoint.nextStep, args.nextStep)
 })
 
-test('no stage progress requests supervision and a near deadline asks the same worker to report before the hard timeout', async t => {
+test('no activity is an advisory once, does not consume correction allowance and never becomes a timeout', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
   const f = await fixture({ taskTimeoutMinutes: 1 }); await f.plan([card('a')]); await f.execute('delegation_run')
-  t.mock.timers.tick(30_000)
-  for (let i = 0; i < 50 && !f.snapshot().tasks[0].supervision.pending; i++) await new Promise(resolve => setImmediate(resolve))
-  assert.equal(f.snapshot().tasks[0].supervision.pending?.code, 'NO_STAGE_PROGRESS')
+  t.mock.timers.tick(10 * 60_000)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.snapshot().tasks[0].supervision.pending?.code, 'NO_ACTIVITY')
+  await f.engine.history()
+  await f.execute('delegation_control', { taskId: 'a', action: 'steer', message: '工具仍在执行，继续等待结果。' })
+  t.mock.timers.tick(30 * 60_000)
+  await new Promise(resolve => setImmediate(resolve))
   assert.equal(f.snapshot().tasks[0].status, 'running')
-  await f.execute('delegation_control', { taskId: 'a', action: 'steer', message: '结束调查，按已确认方案修改指定文件。' })
-  t.mock.timers.tick(18_000)
-  for (let i = 0; i < 50 && !f.calls.some(call => Array.isArray(call) && /delegation_report/.test(call[2][0].text)); i++) await new Promise(resolve => setImmediate(resolve))
-  assert.ok(f.calls.some(call => Array.isArray(call) && call[1] === f.pending[0].receipt.childId && /delegation_report/.test(call[2][0].text)))
-  assert.equal(f.snapshot().tasks[0].status, 'running')
-  t.mock.timers.tick(12_000)
-  for (let i = 0; i < 50 && f.snapshot().tasks[0].status === 'running'; i++) await new Promise(resolve => setImmediate(resolve))
-  assert.equal(f.snapshot().tasks[0].status, 'failed')
-  assert.equal(f.pending[0].receipt.disposeCount, 1)
-  assert.equal(f.pending.length, 1)
+  assert.equal(f.snapshot().tasks[0].supervision.used, 0)
+  assert.equal(f.parent.injected.length, 1)
+  assert.equal(f.pending[0].receipt.disposeCount, undefined)
 })
+
 
 test('token usage is observed without imposing generation or cumulative token limits', async () => {
   const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
@@ -1403,47 +1523,37 @@ test('changed files break a repeated-failure streak and cancellation suppresses 
   assert.equal(f.pending[0].receipt.disposeCount, 1)
 })
 
-test('execution budget automatically continues a task that has real progress', async () => {
+test('crossing the request reminder keeps checkpoints, context and the same activation', async () => {
   const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
   const child = f.children[0]
   f.engine.observe({ agent: child, name: 'read', callId: 'read-proof' }, { isError: false, content: [] })
-  await f.checkpoint(0, { phase: 'investigation', summary: '已有调查结论，尚未实现。', nextStep: '主控补充接口方案。', evidence: ['read-proof'] })
-  for (let i = 0; i < 80; i++) f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => {})
+  await f.checkpoint(0, { phase: 'investigation', summary: '已有调查结论，尚未实现。', nextStep: '按原方案继续。', evidence: ['read-proof'] })
   let sent = 0
-  assert.throws(() => f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => { sent++ }), /预算/)
-  await waitFor(() => f.calls.length === 2 && f.snapshot().tasks[0].status === 'running')
-  assert.equal(sent, 0)
+  for (let i = 0; i < 81; i++) f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => { sent++ })
+  assert.equal(sent, 81)
   assert.equal(f.snapshot().tasks[0].supervision.checkpoint.summary, '已有调查结论，尚未实现。')
-  assert.equal(f.pending[0].receipt.disposeCount, 1)
-  assert.equal(f.snapshot().tasks[0].continuation.used, 1)
-  assert.equal(f.snapshot().tasks[0].attempts, 1, 'a budget continuation is the same logical attempt')
-  assert.equal(f.snapshot().activationBudget.used, 2)
-  await f.complete(1, { stopReason: 'completed', output: [] })
+  assert.equal(f.pending[0].receipt.disposeCount, undefined)
+  assert.equal(f.snapshot().tasks[0].attempts, 1)
+  assert.equal(f.snapshot().activationBudget.used, 1)
+  await f.complete(0, { stopReason: 'completed', output: [] })
   assert.equal(f.snapshot().tasks[0].status, 'review')
 })
 
-test('execution budget blocks when no progress or activation slot remains', async () => {
-  const noProgress = await fixture()
-  await noProgress.plan([card('a')]); await noProgress.execute('delegation_run')
-  const child = noProgress.children[0]
-  for (let i = 0; i < 80; i++) noProgress.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => {})
-  assert.throws(() => noProgress.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap' }, () => {}), /预算/)
-  await waitFor(() => noProgress.snapshot().tasks[0].status === 'blocked')
-  assert.equal(noProgress.snapshot().tasks[0].continuation, undefined)
-  assert.equal(noProgress.calls.length, 1)
 
-  const exhausted = await fixture({ maxActivations: 1 })
-  await exhausted.plan([card('b')]); await exhausted.execute('delegation_run')
-  const exhaustedChild = exhausted.children[0]
-  exhausted.engine.observe({ agent: exhaustedChild, name: 'pwsh', callId: 'progress-proof' }, { isError: false, value: { exitCode: 0 }, content: [] })
-  for (let i = 0; i < 80; i++) exhausted.emit('llm/stream', { sessionId: exhaustedChild.id, provider: 'local', model: 'cheap' }, () => {})
-  assert.throws(() => exhausted.emit('llm/stream', { sessionId: exhaustedChild.id, provider: 'local', model: 'cheap' }, () => {}), /预算/)
-  await waitFor(() => exhausted.snapshot().tasks[0].status === 'blocked')
-  assert.equal(exhausted.calls.length, 1)
-  assert.equal(exhausted.snapshot().activationBudget.used, 1)
+test('request counts never interrupt an admitted worker even when no activation slot remains', async () => {
+  for (const maxActivations of [1, 3]) {
+    const f = await fixture({ maxActivations })
+    await f.plan([card('a')]); await f.execute('delegation_run')
+    for (let i = 0; i < 100; i++) f.emit('llm/stream', { sessionId: f.children[0].id, provider: 'local', model: 'cheap' }, () => {})
+    assert.equal(f.snapshot().tasks[0].status, 'running')
+    assert.equal(f.calls.length, 1)
+    assert.equal(f.snapshot().activationBudget.used, 1)
+    assert.equal(f.parent.injected.length, 0)
+  }
 })
 
-test('a persisted budget block resumes the same plan after plugin reload when progress remains', async () => {
+
+test('a historical budget block stays recorded and is not automatically relaunched', async () => {
   const f = await fixture({ maxActivations: 3 })
   await f.plan([card('a')]); await f.execute('delegation_run')
   await f.reload(async file => {
@@ -1459,17 +1569,16 @@ test('a persisted budget block resumes the same plan after plugin reload when pr
     await writeFile(file, JSON.stringify(stored))
   })
   const result = await f.execute('delegation_run')
-  await waitFor(() => f.calls.length === 2 && f.snapshot().tasks[0].status === 'running')
-  assert.equal(result.plan.status, 'running')
-  assert.equal(f.snapshot().tasks[0].continuation.used, 1)
+  assert.equal(result.plan.status, 'blocked')
+  assert.equal(f.calls.length, 1)
   assert.equal(f.snapshot().tasks[0].attempts, 1)
-  assert.equal(f.snapshot().activationBudget.used, 2)
+  assert.equal(f.snapshot().tasks[0].issue.code, 'EXECUTION_BUDGET_EXHAUSTED')
 })
 
-test('a report already in the real result pipeline gets a bounded confirmation window at the deadline', async t => {
+test('elapsed reminders never interrupt a report being confirmed in the real result pipeline', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
   const entered = Promise.withResolvers(), release = Promise.withResolvers()
-  const f = await fixture({ taskTimeoutMinutes: 1, beforeResult: async exec => {
+  const f = await fixture({ taskTimeoutMinutes: 1, autoConclude: true, beforeResult: async exec => {
     if (exec.name === 'delegation_report') { entered.resolve(); await release.promise }
   } })
   await f.plan([card('a')]); await f.execute('delegation_run')
@@ -1485,13 +1594,15 @@ test('a report already in the real result pipeline gets a bounded confirmation w
   assert.equal(f.snapshot().completion, null)
 })
 
-test('task timeout requests native cleanup without retrying', async t => {
+test('elapsed reminders preserve the worker until explicit cancellation cleans it once', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
   const f = await fixture({ taskTimeoutMinutes: 1 })
-  t.mock.timers.enable({ apis: ['setTimeout'] })
   await f.plan([card('a')]); await f.execute('delegation_run')
   t.mock.timers.tick(60_000)
-  for (let i = 0; i < 50 && f.snapshot().tasks[0].status !== 'failed'; i++) await new Promise(resolve => setImmediate(resolve))
-  assert.equal(f.pending[0].receipt.disposed, true)
-  assert.match(f.snapshot().tasks[0].error, /超过 1 分钟/)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.pending[0].receipt.disposed, undefined)
+  await f.execute('delegation_cancel', { reason: '用户明确取消' })
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
   assert.equal(f.calls.length, 1)
 })

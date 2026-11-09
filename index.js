@@ -34,26 +34,12 @@ const MAX_BODY_BYTES = 64 * 1024
  * `delegation-first` skill and is loaded only when the task calls for it.
  */
 const DISCIPLINE = [
-  '## DSH Agentrix：主控职责',
-  '结合前文、实际文件和执行步骤判断工作量。评分只是起点，短句和低分不能作为不委派的理由；范围明确的小修改直接完成，中等或复杂工作主动拆分，不等用户提醒。',
-  '- 先读相关文件，调用 delegation_plan 提交任务卡：目标、说明、边界、交付物、可修改路径、依赖、验收标准和主控验证步骤。',
-  '- 准备阶段用 read/grep/glob 读取；目录和 Git 基线用 delegation_inspect。计划、发现、进度用 delegation_note 保存，不占业务修改额度；不要用 shell 或 write 绕写业务文件。',
-  '- 主控使用对话框选择的模型做规划与最终验收；先确定复杂需求的方案、接口和验收标准，再拆为执行者能完成的任务。普通任务选 complexity=routine，复杂任务选 complex，并用 complexityReason 说明依据；复杂度不决定执行模型。',
-  '- 所有执行者固定使用用户配置的 worker 模型，独立审查固定使用 reviewer 模型（未指定审查模型时明确跟随主控）。执行模型未选则暂停，不静默继承；不根据模型名称或价格猜测强弱。执行者报告缺上下文或能力不足时，主控补方案或重新拆分，不让它反复猜测或自动升级模型。',
-  '- 自动派单只用 delegation_plan/run；直接调用 subagent、subagent_fork、spawn_teammate 会绕过执行/审查角色的模型配置，因此主控不可走这些入口。',
-  '- 调用 delegation_run 后独立任务按全局并发上限自动派单；依赖任务必须等前置任务验收。若状态返回 dispatchWait，表示正在等待其他会话释放名额或写入冲突结束，等待即可，不要反复调用 delegation_run，也不要绕过闸门直接修改。',
-  '- 插件在重复失败、阶段停滞、预算预警或正式报告返回时通知原主控。收到 delegation-supervision 后立即读取 delegation_status，核对证据和阶段结论，用 delegation_control(action:steer) 向原子代理给出具体纠正；失败或超时后不要无原因调用 delegation_cancel，插件会沿用原计划恢复可重试任务；只有用户明确取消时才传 reason 终止计划。监督每任务最多两次，不能靠重复 run、重载或新建代理刷新预算。等待用事件，不轮询模型，不代做执行者实现。',
-  '- 主控可依据状态里的 route / reasons 判断是否应 direct、delegate 或 delegate_parallel；路由依据必须在任务卡中落地，不能只凭感觉开子 Agent。',
-  '- 计划显示“已派发 / 上限 / 剩余”预算；达到上限或失败熔断后不要重复调用 delegation_run，先处理原因或新建计划。',
-  '- 模型配置失效时，说明哪个模型不可用，提示用户在“DSH Agentrix”重新选择并保存；配置未更新前暂停派单，不重试，也不猜测磁盘或权限问题。',
-  '- 子任务通过 delegation_report 提交 DONE/DONE_WITH_CONCERNS/NEEDS_CONTEXT/BLOCKED 及完整报告，工具确认后自动结束；不通过 send_message 交成果，提交后不能继续修改。缺上下文先补资料，阻塞先处理原因，不原样重试；有疑点先说明处理意见。',
-  '- complex 任务自动安排一个独立只读审查者，同时检查需求与代码质量；启动计入同一预算和并发，固定使用审查模型。普通任务由主控实际验证、验收，也可按风险调用 delegation_audit 使用审查模型，不固定增加代理。审查失败不自动重开，处理原因后用 delegation_audit({taskId,message}) 只重试审查。',
-  '- 主控调用 delegation_verify 运行任务卡中的验证（严格模式也允许），再逐条读取证据用 delegation_review 验收。测试通过不能替代需求达标；页面还原需原稿与同尺寸实际截图，运行问题需原场景证据。',
-  '- 返工只提交明确问题：引用已有 issueIds，或用 issues 给出 criterion、severity、finding 和本次验证 callId。minor 仅记录，不开新代理；复查只判断原问题及修复引入的回归，达到上限即停止。routine 返工后用 resolutions 逐条引用新验证证据确认解决。',
-  '- stop 仅表示取消，必须提供 reason，不能用来成功收尾。报告返回后插件自动释放资源；已验收任务重复清理保持原结果。',
-  '- 完成结论以插件回执为准；最后一次 delegation_review 验收通过后自动生成交付回执并结束回合，无需另写完成总结。测试有结果但未验收不能称为完成。提前结束时插件最多两次在原代理补齐缺失流程，不新开代理；用户取消优先。',
-  '- 聊天、任务验收页和导出读取同一份程序回执，包含交付文件、真实验证证据和未完成原因；协作过程看 Fleet，完整记录通过“分享会话”导出。',
-  '- 完整任务卡示例见 delegation-first skill。',
+  "## DSH Agentrix：主控职责",
+  "自动模式的评分仅作建议。结合实际范围、风险和可并行工作判断：小任务直接完成并验证；执行工作较多时先定方案，再用 delegation_plan/run 委派；复杂任务增加独立审查。不要为几步操作建立完整委派流程。",
+  "主控使用聊天模型，执行者用配置的 worker，独立审查用 reviewer；不走原生派单绕过配置。托管计划中主控不重复实现，读取和准备可继续，实际验证用 delegation_verify，逐条引用证据调用 delegation_review 验收。",
+  "状态默认只读摘要，详情按 taskId 获取。普通任务不固定加审查；独立审查核对需求与代码，主控验证并最终验收。仅重要具体问题返工，minor 只记录，复查不扩大范围。",
+  "模型错配、真实重复失败需处理原因；次数、Token 和运行时间提醒不停止任务、不换代理。等待用事件，不轮询。短任务只交最终 delegation_report；长调查或阻塞再记 checkpoint。报告确认后自动结束、释放。",
+  "stop/cancel 仅用于取消，用户取消须传原因；沿用现有失败恢复约定。完成以程序回执为准，最后一次验收后自动结束，无需另写总结。详细参数和例子见 delegation-first 手册。"
 ].join('\n')
 
 // ---------------------------------------------------------------------------
@@ -170,8 +156,8 @@ function scoreTask(text) {
 const LEVEL_LABEL = { simple: '简单', medium: '中等', complex: '复杂' }
 const LEVEL_ADVICE = {
   simple: '可先处理范围明确的小事；发现多文件或多步骤时重新判断并委派。',
-  medium: '可先做 1 步试探，随后必须派单。',
-  complex: '先拆解、先派单，再动手。',
+  medium: '结合实际范围与执行成本判断是否委派；评分仅作建议。',
+  complex: '建议明确方案、拆分执行并独立审查；最终由主控判断。',
 }
 
 const ROUTE_LABEL = { direct: 'direct', delegate: 'delegate', delegate_parallel: 'delegate_parallel' }
@@ -234,40 +220,18 @@ function routingLine(route) {
   return `> 自动路由建议：${route.route}；依据：${reasons}；预计 ${route.estimatedSteps ?? '—'} 步，${route.parallelTasks ?? 1} 个并行任务，置信度 ${Math.round((route.confidence ?? 0) * 100)}%。`
 }
 
-/**
- * How tight the gate is for one difficulty level.
- *
- * `simple` keeps the post-delegation budget and asks for no delegation up front;
- * `medium` buys exactly one probing step; `complex` keeps the "delegate first"
- * rule, so the hardest turns are gated as before. Explicit environment modes
- * override the judgement: `strict` never allows hands-on work in an undelegated
- * turn, and a bare number always allows n calls without delegating.
- */
+/** Automatic routing is advisory; explicit modes retain their operation gates. */
 function policyFor(level, config) {
   if (config.mode === 'strict') return { requireFirst: true, budget: 0 }
   if (config.mode === 'fixed') return { requireFirst: false, budget: config.threshold }
-  switch (level) {
-    case 'simple':
-      return { requireFirst: false, budget: null }
-    case 'complex':
-      return { requireFirst: true, budget: config.threshold }
-    case 'medium':
-    default:
-      return { requireFirst: false, budget: 1 }
-  }
+  return { requireFirst: false, budget: null }
 }
 
-/**
- * The gate as it behaved before difficulty existed.
- *
- * Used when no judgement exists yet (the plugin activated mid-turn) or when
- * scoring failed: requiring delegation first is the safe side of an unknown
- * turn, which is also what "do not let a scoring failure disarm the gate" means.
- */
+/** Preserve the selected mode when no turn assessment is available. */
 function legacyPolicy(config) {
   if (config.mode === 'strict') return { requireFirst: true, budget: 0 }
   if (config.mode === 'fixed') return { requireFirst: false, budget: config.threshold }
-  return { requireFirst: config.requireDelegateFirst, budget: config.threshold }
+  return { requireFirst: false, budget: null }
 }
 
 /**
@@ -323,9 +287,7 @@ function readConfig() {
     enabled: true,
     mode: 'auto',
     threshold: 2,
-    // Only the fallback used before a turn is judged (and by `strict`): the gate
-    // still asks for delegation first when no judgement is available.
-    requireDelegateFirst: true,
+    requireDelegateFirst: false,
     gatedTools: GATED_TOOLS,
     delegationTools: DELEGATION_TOOLS,
     ...orchestrationOptions(),
@@ -336,7 +298,7 @@ function readConfig() {
   if (raw === 'off' || raw === 'false' || raw === '0') {
     return { ...config, enabled: false, mode: 'off' }
   }
-  if (raw === 'strict') return { ...config, mode: 'strict', threshold: 0 }
+  if (raw === 'strict') return { ...config, mode: 'strict', threshold: 0, requireDelegateFirst: true }
   const budget = Number(raw)
   if (Number.isFinite(budget) && budget >= 0) {
     return { ...config, mode: 'fixed', threshold: budget, requireDelegateFirst: false }
@@ -443,10 +405,7 @@ function applyStored(base, stored) {
     mode,
     threshold: threshold === undefined ? base.threshold : threshold,
     enabled: mode !== 'off',
-    // The pre-difficulty fallback: `strict` asks for delegation first, a fixed
-    // budget never does, and `auto` keeps the conservative default.
-    requireDelegateFirst:
-      mode === 'strict' ? true : mode === 'fixed' ? false : base.requireDelegateFirst,
+    requireDelegateFirst: mode === 'strict',
     ...orchestrationOptions(stored),
   }
 }
@@ -766,11 +725,6 @@ export function apply(ctx) {
         state.route = routeFor(state.difficulty, state.taskText)
         state.policy = policyFor('complex', current)
       }
-      if (work.exhausted && state.delegated === 0 && !READ_ONLY_TOOLS.includes(name)) {
-        state.denied++; state.turnDenied++
-        state.last = { tool: name, kind: 'delegate-first', at: Date.now() }
-        return denialMessage(name, state, current, 'delegate-first', state.policy)
-      }
     }
     const verdict = evaluate(name, state, current)
     if (verdict.countsAsDelegation) {
@@ -927,6 +881,8 @@ export function apply(ctx) {
       archiveWarning: orchestration.archiveWarningFor(selectedId),
       limits: orchestrationOptions(current),
       supervisionPolicy: orchestration.supervisionPolicy,
+      runtimePolicyVersion: 2,
+      requestUsage: orchestration.requestUsages(selectedId),
       // No execution here, so this is the global view only — a status probe, not
       // the gate's own decision.
       canDelegate: (() => {

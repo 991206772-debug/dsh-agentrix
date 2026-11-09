@@ -1,16 +1,15 @@
 // Observed execution facts only. The coordinator decides whether the work is correct.
 export const SUPERVISION_LIMIT = 2
 export const REPEATED_ERROR_LIMIT = 3
-export const EXECUTION_BUDGET = Object.freeze({ requests: 80, outputTokens: null, contextTokens: null, maxOutputTokens: null })
-export const SUPERVISION_POLICY = Object.freeze({ correctionLimit: SUPERVISION_LIMIT, repeatedErrorLimit: REPEATED_ERROR_LIMIT, ...EXECUTION_BUDGET })
+export const EXECUTION_BUDGET = Object.freeze({ requests: null, requestNotice: 80, outputTokens: null, contextTokens: null, maxOutputTokens: null })
+export const SUPERVISION_POLICY = Object.freeze({ correctionLimit: SUPERVISION_LIMIT, repeatedErrorLimit: REPEATED_ERROR_LIMIT, version: 2, timeMode: 'notice', ...EXECUTION_BUDGET })
 
-export function startSupervision(task, now, timeoutMs, preserveCheckpoint = false) {
+export function startSupervision(task, now, timeoutMs) {
   const previous = task.supervision
   task.supervision = { used: 0, attempt: task.attempts, limit: SUPERVISION_LIMIT, pending: null,
-    lastCorrection: previous?.lastCorrection ?? null, startedAt: now, deadlineAt: now + timeoutMs,
-    idleMs: Math.min(10 * 60_000, timeoutMs / 2), wrapUpAt: now + timeoutMs - Math.min(5 * 60_000, timeoutMs / 5),
-    wrapUpRequestedAt: null,
-    lastProgressAt: now, failure: null, checkpoint: preserveCheckpoint ? previous?.checkpoint ?? null : null, activity: { kind: 'waiting_model', at: now },
+    lastCorrection: previous?.lastCorrection ?? null, startedAt: now, deadlineAt: null, remindAt: now + timeoutMs, lastActivityAt: now,
+    idleMs: 10 * 60_000,
+    lastProgressAt: now, failure: null, checkpoint: null, activity: { kind: 'waiting_model', at: now },
     limits: { ...EXECUTION_BUDGET }, notices: {},
     metrics: { requests: 0, inputTokens: 0, outputTokens: 0, contextTokens: 0 }, evidence: [] }
   return task.supervision
@@ -31,6 +30,7 @@ export function observeUsage(task, event, now) {
   state.metrics.inputTokens += input
   state.metrics.outputTokens += tokens(usage.outputTokens)
   state.metrics.contextTokens = input
+  state.lastActivityAt = now
   state.activity = { kind: 'waiting_tool', at: now }
   return null
 }
@@ -39,16 +39,12 @@ export function observeRequest(task, now) {
   const state = task.supervision
   if (!state) return null
   state.metrics.requests++
+  state.lastActivityAt = now
   state.activity = { kind: 'waiting_model_response', at: now }
-  return state.metrics.requests >= state.limits.requests * 0.75
-    ? once(state, 'REQUEST_BUDGET', '模型调用次数即将达到本次执行预算，请检查有效成果，纠正方向或准备正式报告。', now) : null
+  return state.metrics.requests >= state.limits.requestNotice
+    ? once(state, 'REQUEST_VOLUME', '模型调用已达到 80 次；仅提醒，原代理继续执行。', now) : null
 }
 
-export function budgetExceeded(task) {
-  const state = task.supervision
-  if (!state) return false
-  return state.metrics.requests >= state.limits.requests
-}
 
 export function observeTool(task, exec, result, now) {
   const state = task.supervision
@@ -57,6 +53,7 @@ export function observeTool(task, exec, result, now) {
   const text = (result.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')
   const exitCode = result.value?.exitCode ?? Number(text.match(/\[exit code: (\d+)\]/)?.[1] ?? 0)
   const failed = Boolean(result.isError || exitCode !== 0)
+  state.lastActivityAt = now
   state.activity = { kind: 'waiting_model', at: now, tool: exec.name }
   const evidence = { callId: exec.callId, tool: exec.name, at: now, failed }
   if (typeof exec.callId === 'string') state.evidence = [...state.evidence, evidence].slice(-16)

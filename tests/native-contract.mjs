@@ -74,6 +74,9 @@ try {
   let response
   await routes.get('/dsh-delegation-first/api/state')({ method: 'GET' }, { writeHead() {}, end(body) { response = JSON.parse(body) } })
   assert.equal(response.ok, true)
+  assert.equal(response.runtimePolicyVersion, 2)
+  assert.equal(response.supervisionPolicy.requests, null)
+  assert.equal(response.supervisionPolicy.timeMode, 'notice')
   for (const [key, value] of Object.entries({ maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120 })) {
     assert.equal(response.limits[key], value, key + ' installed default')
   }
@@ -120,7 +123,8 @@ try {
   }] })
   await checked('delegation_run')
   assert.equal(children.length, 1)
-  await checked('delegation_report', { status: 'DONE', summary: '隔离产物已返回', report: 'fixture done' }, childAgents.get(children[0].childId))
+  const longReport = 'fixture evidence '.repeat(1000).trim()
+  await checked('delegation_report', { status: 'DONE', summary: '隔离产物已返回', report: longReport }, childAgents.get(children[0].childId))
   outputs[0].resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'fixture done' }] })
   for (let i = 0; i < 100; i++) {
     const result = await checked('delegation_status')
@@ -128,6 +132,11 @@ try {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   assert.equal((await call('pwsh')).isError, true)
+  const compact = await call('delegation_status')
+  assert.ok(JSON.stringify(compact.content).length < JSON.stringify(compact.value).length * 0.3)
+  assert.equal((await checked('delegation_status', { taskId: 'a', detail: 'full' })).task.report, longReport)
+  assert.equal((await call('delegation_status', { detail: 'full' })).isError, true)
+  assert.ok(sections.every(section => section.text().split('\n\n')[0].length <= 600))
   const evidence = await checked('delegation_verify', { taskId: 'a', checkIndex: 0 })
   assert.equal(evidence.passed, true)
   const review = await checked('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '原生工具执行管线返回退出码 0', evidence: [evidence.callId] }] })

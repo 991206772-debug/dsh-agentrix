@@ -22,6 +22,10 @@ const { SubagentRuntime } = await native('dsh-subagent')
 const Spawn = await native('dsh-subagent-spawn-in-process')
 const directory = await mkdtemp(path.join(os.tmpdir(), 'dsh-completion-native-'))
 const truncateOutput = process.argv.includes('--truncate-output')
+const continuous = process.argv.includes('--continuous')
+const benchmark = process.argv.includes('--benchmark')
+const baseline = process.argv.includes('--benchmark-baseline')
+const workerReport = '读取 result.txt 可验证 verified，等待主控实际验收。' + (benchmark ? '\n证据：result.txt 包含 verified。'.repeat(500) : '')
 process.env.DSH_HOME = directory
 delete process.env.DSH_DELEGATION_FIRST
 const ctx = new Context(), routes = new Map(), requests = [], events = [], phases = new Map()
@@ -44,7 +48,7 @@ async function until(predicate, label) {
 let parent, handle, nextCall = 0
 class ScriptedAdapter extends LlmAdapter {
   async *stream(request) {
-    requests.push({ sessionId: request.sessionId, model: request.model })
+    requests.push({ sessionId: request.sessionId, model: request.model, inputCharacters: JSON.stringify(request.messages ?? []).length })
     const phase = phases.get(request.sessionId) ?? 0
     phases.set(request.sessionId, phase + 1)
     let block
@@ -57,13 +61,16 @@ class ScriptedAdapter extends LlmAdapter {
       else if (task.status === 'review') block = tool('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '实际文件包含 verified', evidence: [task.checks[0].result.callId] }] })
       else if (truncateOutput && task.status === 'running') block = { type: 'text', text: '等待原子代理报告和独立审查返回。' }
       else throw new Error('Unexpected coordinator request after terminal tool: ' + task.status)
-    } else if (truncateOutput && phase < 3) block = { type: 'text', text: '本段输出被模型截断，继续检查已有产物。' }
+    } else if (continuous && request.model === 'low-worker' && phase < 85) block = tool('read', { path: path.join(directory, 'result.txt') })
+    else if (continuous && request.model === 'low-worker') block = tool('delegation_report', { status: 'DONE', summary: '隔离产物已检查', report: workerReport })
+    else if (truncateOutput && phase < 3) block = { type: 'text', text: '本段输出被模型截断，继续检查已有产物。' }
     else if (request.model === 'high-reviewer' && phase === (truncateOutput ? 3 : 0)) block = tool('delegation_report', { status: 'DONE', summary: '需求与质量均通过', report: '已核对隔离产物与任务要求，等待主控实际验证。', specVerdict: 'pass', qualityVerdict: 'pass', issues: [] })
     else if (request.model === 'low-worker' && phase === 0) block = { type: 'text', text: '工作已完成，但这次故意漏交正式报告。' }
-    else if (phase === (truncateOutput ? 3 : 1)) block = tool('delegation_report', { status: 'DONE', summary: '隔离产物已检查', report: '读取 result.txt 可验证 verified，等待主控实际验收。' })
+    else if (phase === (truncateOutput ? 3 : 1)) block = tool('delegation_report', { status: 'DONE', summary: '隔离产物已检查', report: workerReport })
     else throw new Error('Unexpected child request after report')
     yield { type: 'block-start', index: 0, blockType: block.type }
     yield { type: 'block-end', index: 0, block }
+    yield { type: 'usage', usage: { inputTokens: 100, cacheReadTokens: 200, outputTokens: 10 } }
     const truncated = truncateOutput && (request.sessionId === parent?.id ? phase >= 2 && phase < 5 : phase < 3)
     yield { type: 'finish', reason: { kind: block.type === 'tool-call' ? 'tool-calls' : truncated ? 'max-tokens' : 'stop' } }
   }
@@ -98,7 +105,7 @@ try {
   const plan = (await state()).plans[0]
   assert.equal(plan.completion?.outcome, 'completed', JSON.stringify(plan))
   assert.equal(plan.tasks[0].execution.commitState, 'committed')
-  assert.equal(plan.tasks[0].recovery.used, truncateOutput ? 0 : 1)
+  assert.equal(plan.tasks[0].recovery.used, truncateOutput || continuous ? 0 : 1)
   assert.equal(plan.tasks[0].release.status, 'released')
   assert.equal(plan.tasks[0].modelRoute.role, 'worker')
   assert.equal(plan.tasks[0].modelRoute.actual.model, 'low-worker')
@@ -106,14 +113,32 @@ try {
   assert.equal(plan.tasks[0].audit.modelRoute.actual.model, 'high-reviewer')
   assert.equal(plan.tasks[0].audit.release.status, 'released')
   assert.equal(new Set(requests.filter(request => request.sessionId !== 'root').map(request => request.sessionId)).size, 2)
-  assert.equal(requests.filter(request => request.model === 'low-worker').length, truncateOutput ? 4 : 2)
+  assert.equal(requests.filter(request => request.model === 'low-worker').length, continuous ? 86 : truncateOutput ? 4 : 2)
   assert.equal(requests.filter(request => request.model === 'high-reviewer').length, truncateOutput ? 4 : 1)
   assert.ok(requests.filter(request => request.sessionId === 'root').every(request => request.model === 'coordinator'))
+  if (!baseline) {
+    assert.equal((await state()).runtimePolicyVersion, 2)
+    assert.equal(plan.usage.roles.reduce((sum, row) => sum + row.requests, 0), requests.length)
+    for (const row of plan.usage.roles) {
+      assert.equal(row.inputTokens, row.responses * 100)
+      assert.equal(row.cacheReadTokens, row.responses * 200)
+      assert.equal(row.outputTokens, row.responses * 10)
+    }
+  }
+  console.log('METRICS ' + JSON.stringify({ requests: requests.length,
+    byModel: Object.fromEntries([...new Set(requests.map(request => request.model))].map(model => [model, requests.filter(request => request.model === model).length])),
+    inputCharacters: requests.reduce((sum, request) => sum + request.inputCharacters, 0) }))
   const coordinatorCalls = requests.filter(request => request.sessionId === 'root').length
   if (truncateOutput) assert.ok(coordinatorCalls >= 7 && coordinatorCalls <= 8, 'the original coordinator resumes each truncated output and may wait once for the child')
   else assert.equal(coordinatorCalls, 5)
   if (truncateOutput) assert.equal(plan.tasks[0].audit.recovery.used, 0)
   if (truncateOutput) console.log('PASS: three max-tokens responses per role continue on the same coordinator, worker and reviewer; accepted receipt generated with no replacement child or report-recovery consumption')
+  if (continuous) {
+    assert.ok(plan.tasks[0].supervision.notices.REQUEST_VOLUME)
+    assert.equal(plan.tasks[0].attempts, 1)
+    assert.equal(plan.activationBudget.used, 2)
+    console.log('PASS: 86 worker requests on one native child; request reminder adds no coordinator call, replacement agent or correction')
+  }
   assert.ok(events.some(event => event.id !== 'root' && event.type === 'turn/end'))
   console.log('PASS: real AgentLoop + ToolRuntime + SubagentRuntime: distinct coordinator / execution / review models, same-child report recovery, caller delivery, actual verification, acceptance, generated receipt and exact cleanup without an extra model summary')
 } finally {

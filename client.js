@@ -264,7 +264,7 @@ window.__ModuleLoader__.load({
 
     Object.assign(zh, {
       'limits.title': '执行限制', 'limits.maxParallel': '全局同时执行', 'limits.maxAttempts': '每任务最多执行',
-      'limits.maxActivations': '每个计划最多派发', 'limits.maxActivationsHint': '首次派发、返工和独立审查都计入；达到上限后停止自动开新子 Agent。', 'limits.taskTimeoutMinutes': '单任务时限（分钟）', 'models.title': '子任务模型',
+      'limits.maxActivations': '每个计划最多派发', 'limits.maxActivationsHint': '首次派发、返工和独立审查都计入；达到上限后停止自动开新子 Agent。', 'limits.taskTimeoutMinutes': '运行时间提醒（分钟）', 'models.title': '子任务模型',
       'models.routine': '普通执行任务', 'models.complex': '设计与复杂问题',
       'models.hint': '直接读取 DSH 已配置的模型，与主界面的模型选择器共用列表。按执行、审查角色配置；修改只作用于之后启动的任务，运行中的任务保持启动快照。',
       'models.reasoningEffort': '思考强度（可选）',
@@ -355,9 +355,9 @@ window.__ModuleLoader__.load({
       'chat.stoppedNext': '如需继续，请让主 Agent 重新安排未完成的任务。',
       'chat.recoveredReason': '插件重新加载，旧子任务需要先清理。',
       'chat.affected': '共 {count} 项任务受影响，完整记录见任务验收。',
-      'chat.noPlan': '等待主 Agent 建立任务卡', 'chat.reason': '依据：{reasons}', 'chat.budget': '启动尝试 {used}/{limit}',
+      'chat.noPlan': '未启动子代理，由主控判断是否委派', 'chat.reason': '依据：{reasons}', 'chat.budget': '启动尝试 {used}/{limit}',
       'chat.details': '查看任务进度', 'chat.running': '进行中', 'chat.waiting': '等待中', 'chat.review': '待验收',
-      'chat.completed': '已完成', 'chat.failed': '有失败', 'chat.blocked': '已阻塞', 'chat.direct': '直接执行',
+      'chat.completed': '已完成', 'chat.failed': '有失败', 'chat.blocked': '已阻塞', 'chat.direct': '直接执行 · 未启动子代理',
       'chat.taskStatus': '{title} · {status}', 'chat.lastActivity': '最近活动：{value}', 'chat.waitReason': '等待：{value}',
       'chat.syncing': '同步中…', 'chat.unavailable': '暂时无法读取任务状态',
       'status.queued': '待派单', 'status.starting': '正在派单', 'status.running': '执行中', 'status.review': '待主 Agent 验收',
@@ -367,7 +367,7 @@ window.__ModuleLoader__.load({
     Object.assign(en, {
       'limits.title': 'Execution limits', 'limits.maxParallel': 'Concurrent tasks across conversations', 'limits.maxAttempts': 'Maximum attempts per task',
       'limits.maxActivations': 'Maximum dispatches per plan', 'limits.maxActivationsHint': 'Counts first runs, retries and independent reviews; no new agent starts after the limit.',
-      'limits.taskTimeoutMinutes': 'Task timeout (minutes)', 'models.title': 'Worker models',
+      'limits.taskTimeoutMinutes': 'Elapsed-time reminder (minutes)', 'models.title': 'Worker models',
       'models.routine': 'Routine execution', 'models.complex': 'Design and difficult work',
       'models.hint': 'Uses the configured DSH catalog for execution and review roles. Changes apply to newly started tasks; running tasks retain their model snapshots.',
       'models.reasoningEffort': 'Reasoning effort (optional)',
@@ -459,10 +459,10 @@ window.__ModuleLoader__.load({
       'chat.stoppedNext': 'To continue, ask the coordinator to make a new plan for the unfinished tasks.',
       'chat.recoveredReason': 'The plugin reloaded. Previous workers need cleanup first.',
       'chat.affected': '{count} tasks are affected. See Task acceptance for the complete record.',
-      'chat.noPlan': 'Waiting for the coordinator to create the task card', 'chat.reason': 'Reasons: {reasons}',
+      'chat.noPlan': 'No worker started; coordinator decides whether to delegate', 'chat.reason': 'Reasons: {reasons}',
       'chat.budget': 'Startup attempts {used}/{limit}', 'chat.details': 'View task progress', 'chat.running': 'running',
       'chat.waiting': 'waiting', 'chat.review': 'awaiting review', 'chat.completed': 'completed', 'chat.failed': 'failed',
-      'chat.blocked': 'blocked', 'chat.direct': 'direct execution', 'chat.taskStatus': '{title} · {status}',
+      'chat.blocked': 'blocked', 'chat.direct': 'direct execution; no worker started', 'chat.taskStatus': '{title} · {status}',
       'chat.lastActivity': 'Last activity: {value}', 'chat.waitReason': 'Waiting: {value}', 'chat.syncing': 'Syncing…',
       'chat.unavailable': 'Task status is temporarily unavailable',
       'status.queued': 'Queued', 'status.starting': 'Starting', 'status.running': 'Running', 'status.review': 'Awaiting coordinator acceptance',
@@ -534,7 +534,7 @@ window.__ModuleLoader__.load({
       'supervision.title': '过程监督', 'supervision.waiting': '等待主控纠偏', 'supervision.count': '待主控纠偏 {count} 项',
       'supervision.elapsed': '已执行 {minutes} 分钟', 'supervision.corrections': '主控纠偏 {used}/{limit}',
       'supervision.budget': '模型调用 {requests}/{requestLimit} · 输出 {output}/{outputLimit} Token',
-      'supervision.usage': '模型调用 {requests}/{requestLimit} · 累计输出 {output} Token（仅统计，不设插件上限）',
+      'supervision.usage': '模型调用 {requests} · 输出 {output} Token（本次执行统计，不设插件上限）',
       'supervision.context': '最近请求上下文 {tokens} Token', 'supervision.stage': '阶段结论（执行者提交，待核实）',
       'supervision.nextStep': '执行者下一步', 'supervision.corrected': '最近主控纠正',
       'supervision.next': '已通知原主控核对证据并纠正原子代理，已有产物和上下文保留。',
@@ -549,7 +549,7 @@ window.__ModuleLoader__.load({
       'supervision.title': 'Execution supervision', 'supervision.waiting': 'Awaiting coordinator correction', 'supervision.count': '{count} awaiting correction',
       'supervision.elapsed': '{minutes} minutes elapsed', 'supervision.corrections': 'Coordinator corrections {used}/{limit}',
       'supervision.budget': 'Model calls {requests}/{requestLimit} · Output {output}/{outputLimit} tokens',
-      'supervision.usage': 'Model calls {requests}/{requestLimit} · Total output {output} tokens (usage only; no plugin cap)',
+      'supervision.usage': 'Model calls {requests} · Output {output} tokens (this attempt; no plugin cap)',
       'supervision.context': 'Latest request context: {tokens} tokens', 'supervision.stage': 'Stage report (worker supplied, unverified)',
       'supervision.nextStep': 'Worker next step', 'supervision.corrected': 'Latest coordinator correction',
       'supervision.next': 'The original coordinator has been notified to inspect evidence and correct the original worker. Existing work and context are retained.',
@@ -598,22 +598,45 @@ window.__ModuleLoader__.load({
       'view.executionDiagnostics': 'Execution diagnostics and limits', 'view.requestConsistent': 'Request identifier matches',
       'view.diagnostics': 'Full assessment and diagnostics',
     })
+    Object.assign(zh, {
+      'runtime.active': '持续执行策略已生效', 'runtime.pending': '当前进程尚未确认新策略，等待宿主自然重载',
+      'usage.title': '本次需求用量', 'usage.partial': '统计不完整', 'usage.complete': '已记录全部已返回请求',
+      'usage.coordinator': '主控', 'usage.worker': '执行者', 'usage.reviewer': '独立审查', 'usage.unknown': '未提供',
+      'usage.input': '输入', 'usage.cacheRead': '缓存读取', 'usage.cacheWrite': '缓存写入', 'usage.output': '输出',
+      'usage.calls': '模型请求', 'usage.attempt': '执行次数', 'usage.note': '按宿主原始字段分别统计，不合并缓存、不估算费用。',
+      'supervision.requestNotice': '调用次数提醒已记录，原代理继续执行',
+      'supervision.timeNotice': '运行时间提醒已记录，任务继续执行',
+      'supervision.inquiry': '活动核对提醒', 'supervision.inquiryCount': '需核对活动 {count} 项',
+      'view.actualNoPlan': '尚未启动子代理，由主控自主分流',
+    })
+    Object.assign(en, {
+      'runtime.active': 'Continuous-execution policy is loaded', 'runtime.pending': 'New policy not confirmed; awaiting natural host reload',
+      'usage.title': 'Usage for this request', 'usage.partial': 'Incomplete statistics', 'usage.complete': 'All returned requests recorded',
+      'usage.coordinator': 'Coordinator', 'usage.worker': 'Worker', 'usage.reviewer': 'Independent reviewer', 'usage.unknown': 'Not provided',
+      'usage.input': 'Input', 'usage.cacheRead': 'Cache read', 'usage.cacheWrite': 'Cache write', 'usage.output': 'Output',
+      'usage.calls': 'Model requests', 'usage.attempt': 'Attempt', 'usage.note': 'Original host fields are recorded separately; no cache merging or cost estimates.',
+      'supervision.requestNotice': 'Request-count reminder recorded; same agent continues',
+      'supervision.timeNotice': 'Elapsed-time reminder recorded; task continues',
+      'supervision.inquiry': 'Activity inquiry', 'supervision.inquiryCount': '{count} activity inquiries',
+      'view.actualNoPlan': 'No worker started; coordinator decides the route',
+    })
+
     const CONFIG_NUMBERS = ['threshold', 'maxParallel', 'maxAttempts', 'maxActivations', 'taskTimeoutMinutes']
     // Compatibility only; current hosts provide the authoritative defaults and ranges.
     const LEGACY_RANGES = { threshold: { min: 0, max: 20 }, maxParallel: { min: 1, max: 4 }, maxAttempts: { min: 1, max: 3 }, maxActivations: { min: 1, max: 32 }, taskTimeoutMinutes: { min: 1, max: 60 } }
     Object.assign(zh, {
       'cfg.subtitle': '设置自动委派的模式、子任务模型和资源上限。保存后闸门与后续派单立即生效；在跑任务与环境变量锁定项不受影响。',
       'cfg.policy': '委派策略', 'cfg.limits': '执行限制', 'cfg.models': '子任务模型', 'cfg.diagnostics': '生效与诊断',
-      'cfg.policyHint': '控制主控在什么情况下必须派单。保存后下一次工具调用按新策略执行；当前回合已累计的调用次数不重置。',
-      'cfg.limitsHint': '约束并发、返工次数、派发预算与单任务超时。数值由服务端下发的 ranges 校验，不再在前端写死。',
+      'cfg.policyHint': '自动模式由主控结合实际工作决定是否委派；严格和固定模式保留操作限制。保存后应用新策略，当前调用统计不重置。',
+      'cfg.limitsHint': '设置并发、返工、启动次数和运行时间提醒。时间与调用次数仅提醒，不中断原代理。',
       'cfg.diagnosticsHint': '只读。展示当前生效值的来源与各配置项的生效时机，避免“改了没反应”的误判。',
       'cfg.fields': '{count} 项', 'cfg.readonly': '只读', 'cfg.default': '默认 {value}', 'cfg.integer': '必须是 {min}–{max} 的整数', 'cfg.range': '{min}–{max} 的整数',
-      'cfg.budgetContext': '固定预算必填 · 自动模式仅用于复杂档',
+      'cfg.budgetContext': '固定模式必填 · 自动模式由主控判断',
       'cfg.maxParallelRange': '跨会话共享', 'cfg.maxAttemptsRange': '首次计入', 'cfg.maxActivationsRange': '执行与审查计入',
       'cfg.notePolicy': '生效说明', 'cfg.noteLimits': '不随保存变化', 'cfg.noteModels': '生效说明', 'cfg.noteDiagnostics': '验收不在这里',
       'cfg.policyAfter': ' 锁定项必须改变量并重启 Harness。',
       'cfg.modelsHint': '按执行、审查角色选择模型，列表与主界面模型选择器共用。执行模型未配置时暂停；审查模型可明确跟随主控。',
-      'limits.timeoutLabel': '单任务时限',
+      'limits.timeoutLabel': '运行时间提醒',
       'cfg.whenNow': '立即', 'cfg.whenPlan': '新建计划', 'cfg.whenTask': '新任务',
       'cfg.acceptanceNote': '打开需要查看的会话，在「任务验收」页签核对当前需求；协作过程看 Fleet，整理与导出用「分享会话」。',
       'cfg.defaultMode': '默认', 'cfg.times': '次', 'cfg.agents': '个', 'cfg.minutes': '分钟',
@@ -636,7 +659,7 @@ window.__ModuleLoader__.load({
       'cfg.emptyHint': '请先在 DSH 设置中配置模型服务，再刷新目录。执行模型必须选择；审查模型可跟随主控。',
       'cfg.modelImpact': '子任务暂时无法启动', 'cfg.chooseModel': '去选择模型', 'cfg.modelDraft': '所选模型不可用，请在子任务模型分组中重新选择；已保存的配置在保存前保持不变。',
       'cfg.when': '生效时机', 'cfg.explanation': '说明', 'cfg.policyTiming': '模式 / 动手预算', 'cfg.dispatchTiming': '全局同时执行 / 每任务最多执行',
-      'cfg.activationTiming': '每个计划最多派发', 'cfg.taskTiming': '单任务时限 / 子任务模型', 'cfg.restart': '重启 Harness',
+      'cfg.activationTiming': '每个计划最多派发', 'cfg.taskTiming': '运行时间提醒 / 子任务模型', 'cfg.restart': '重启 Harness',
       'cfg.policyExplanation': '下一次工具调用；当前回合计数不重置', 'cfg.dispatchExplanation': '下一次派单、后续返工',
       'cfg.activationExplanation': '已建计划沿用旧上限', 'cfg.taskExplanation': '在跑任务不重设计时器、不换模型', 'cfg.envExplanation': '面板只读，POST 返回 409',
     })
@@ -646,12 +669,12 @@ window.__ModuleLoader__.load({
       'cfg.policyHint': 'Choose when the coordinator must delegate. Changes apply to the next tool call without resetting turn counts.',
       'cfg.limitsHint': 'Limit concurrency, attempts and task duration. First attempts count; concurrency is shared across conversations.', 'cfg.diagnosticsHint': 'Read-only sources and effective times. Draft edits apply only after saving.',
       'cfg.fields': '{count} fields', 'cfg.readonly': 'Read only', 'cfg.default': 'Default {value}', 'cfg.integer': 'Must be an integer from {min} to {max}', 'cfg.range': 'Integer from {min} to {max}',
-      'cfg.budgetContext': 'Required for fixed budgets; applies to complex tasks in automatic mode. Read and preparation tools do not spend this budget.',
+      'cfg.budgetContext': 'Required in fixed mode; automatic routing is advisory.',
       'cfg.maxParallelRange': 'Shared across conversations', 'cfg.maxAttemptsRange': 'Includes the first attempt', 'cfg.maxActivationsRange': 'Includes initial dispatch and rework',
       'cfg.notePolicy': 'Effective time', 'cfg.noteLimits': 'Kept unchanged', 'cfg.noteModels': 'Effective time', 'cfg.noteDiagnostics': 'Acceptance lives in the conversation',
       'cfg.policyAfter': ' must be changed before restarting Harness.',
       'cfg.modelsHint': 'Choose execution and review models from the shared catalog. An unset execution model pauses dispatch; review may explicitly follow the coordinator.',
-      'limits.timeoutLabel': 'Task timeout',
+      'limits.timeoutLabel': 'Elapsed-time reminder',
       'cfg.whenNow': 'Immediately', 'cfg.whenPlan': 'New plans', 'cfg.whenTask': 'New activations',
       'cfg.acceptanceNote': 'Open a conversation and use Task acceptance to inspect the request. Fleet shows collaboration; Share conversation provides exports.',
       'cfg.defaultMode': 'Default', 'cfg.times': 'attempts', 'cfg.agents': 'tasks', 'cfg.minutes': 'minutes', 'cfg.nowTool': 'Next tool call', 'cfg.nextDispatch': 'Next dispatch', 'cfg.nextRework': 'Subsequent rework', 'cfg.newPlan': 'New plans only', 'cfg.newTask': 'New activations only',
@@ -663,7 +686,7 @@ window.__ModuleLoader__.load({
       'cfg.locked': 'DSH_DELEGATION_FIRST locks this page. It pins the mode and budget; resource limits and models still come from the local file. Change the variable and restart Harness to unlock.',
       'cfg.source': 'Configuration source', 'cfg.file': 'Local file', 'cfg.env': 'Environment', 'cfg.defaults': 'Built-in defaults', 'cfg.sourceLoading': 'Reading source', 'cfg.lockState': 'Lock state', 'cfg.unlocked': 'Unlocked', 'cfg.activeMode': 'Effective mode', 'cfg.savedAt': 'Last saved', 'cfg.unknown': 'Not recorded', 'cfg.unset': 'Not set',
       'cfg.catalog': '{services} configured services · {models} models', 'cfg.emptyTitle': 'No configured models', 'cfg.emptyHint': 'Configure a service in DSH settings, then refresh. Choose an execution model; review may follow the coordinator.', 'cfg.modelImpact': 'Child tasks cannot start', 'cfg.chooseModel': 'Choose a model', 'cfg.modelDraft': 'The selected model is unavailable. Choose another in Child models. Saved settings remain active until you save.',
-      'cfg.when': 'Effective time', 'cfg.explanation': 'Details', 'cfg.policyTiming': 'Mode / operation budget', 'cfg.dispatchTiming': 'Concurrency / task attempts', 'cfg.activationTiming': 'Plan activation limit', 'cfg.taskTiming': 'Task timeout / child model', 'cfg.restart': 'Restart Harness',
+      'cfg.when': 'Effective time', 'cfg.explanation': 'Details', 'cfg.policyTiming': 'Mode / operation budget', 'cfg.dispatchTiming': 'Concurrency / task attempts', 'cfg.activationTiming': 'Plan activation limit', 'cfg.taskTiming': 'Elapsed-time reminder / child model', 'cfg.restart': 'Restart Harness',
       'cfg.policyExplanation': 'Next tool call; turn counts are retained', 'cfg.dispatchExplanation': 'Subsequent dispatch and rework; running tasks continue', 'cfg.activationExplanation': 'Existing plans retain their original limit', 'cfg.taskExplanation': 'Running timers and models are unchanged', 'cfg.envExplanation': 'Read-only page; save requests return 409',
     })
     const MODEL_ROLES = ['worker', 'reviewer']
@@ -844,7 +867,7 @@ window.__ModuleLoader__.load({
           entry.result = { sessionId: entry.sessionId, data, error: '', loading: false }
           const plan = data.plans?.find(item => item.sessionId === entry.sessionId)
           const route = plan?.routing ?? data.sessions?.find(item => item.sessionId === entry.sessionId)?.route
-          entry.terminal = Boolean(plan ? plan.protocolVersion >= 2 ? plan.completion : ['accepted', 'cancelled'].includes(plan.status) : route?.route === 'direct')
+          entry.terminal = Boolean(plan && (plan.protocolVersion >= 2 ? plan.completion : ['accepted', 'cancelled'].includes(plan.status)))
           if (entry.terminal) clearTimer(entry)
           else if (entry.timer === null) entry.timer = window.setInterval(() => { void refresh(entry) }, CHAT_POLL_MS)
         } catch (error) {
@@ -957,7 +980,7 @@ window.__ModuleLoader__.load({
       const tasks = plan?.tasks ?? []
       const done = tasks.filter(task => task.status === 'accepted').length
       const running = tasks.filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
-      const status = !plan && route?.route === 'direct' ? 'completed' : chatStatusKey(plan)
+      const status = chatStatusKey(plan)
       const statusText = status === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${status}`)
       const baseSummary = result.error && !data ? t('chat.unavailable') : plan
         ? fill(t(plan.protocolVersion >= 2 || status === 'stopped' ? status === 'running' ? 'chat.activeAcceptedSummary' : 'chat.acceptedSummary'
@@ -970,7 +993,7 @@ window.__ModuleLoader__.load({
           { count: tasks.filter(task => task.audit?.status === 'queued').length, key: 'auditQueuedCount' }])
         .filter(item => item.count > 0).map(item => fill(t('chat.' + item.key), { count: item.count }))
       const supervised = tasks.flatMap(task => [task, ...(task.audit ? [task.audit] : [])]).filter(task => ['starting', 'running'].includes(task.status) && task.supervision?.pending)
-      const summary = [baseSummary, ...counts, ...(supervised.length ? [fill(t('supervision.count'), { count: supervised.length })] : [])].join(' · ')
+      const summary = [baseSummary, ...counts, ...(supervised.length ? [fill(t(supervised.every(task => task.supervision.pending.advisory) ? 'supervision.inquiryCount' : 'supervision.count'), { count: supervised.length })] : [])].join(' · ')
       const canOpen = typeof openView === 'function'
       const hint = canOpen ? t('view.details') : t('chat.navigationUnavailable')
       const label = `${summary} · ${hint}`
@@ -1080,7 +1103,7 @@ window.__ModuleLoader__.load({
         : task?.issue?.action || t(task?.recovered ? 'view.recoveredNext' : 'view.failedNext')
       const done = tasks.filter(task => task.status === 'accepted').length
       const heading = fill(t(problem.kind === 'stopped' || problem.kind === 'supervision' ? 'chat.acceptedSummary' : 'chat.planSummary'), {
-        status: problem.kind === 'supervision' ? t('supervision.waiting') : problem.kind === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${problem.kind}`), done, total: tasks.length })
+        status: problem.kind === 'supervision' ? t(task.supervision.pending.advisory ? 'supervision.inquiry' : 'supervision.waiting') : problem.kind === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${problem.kind}`), done, total: tasks.length })
       const canOpen = typeof openView === 'function'
       return h('section', { className: 'ddf-chat-notice', 'data-kind': problem.kind,
         role: problem.kind === 'stopped' ? 'status' : 'alert', 'aria-label': heading },
@@ -1427,6 +1450,21 @@ window.__ModuleLoader__.load({
     }
 
     /** Full acceptance evidence stays available in the collapsed task record. */
+    function UsageDetails({ t, usage }) {
+      if (!usage) return h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('usage.title') + ' · ' + t('usage.partial')))
+      const value = number => Number.isFinite(number) ? String(number) : t('usage.unknown')
+      const complete = usage.complete && usage.roles.every(row => row.responses >= row.requests && row.inputTokens !== null && row.outputTokens !== null)
+      return h('details', { className: 'ddf-board-diagnostics', 'data-request-usage': usage.requestId },
+        h('summary', null, t('usage.title') + ' · ' + t(complete ? 'usage.complete' : 'usage.partial')),
+        h('p', null, usage.requestId),
+        ...usage.roles.map((row, index) => h('p', { key: index },
+          t('usage.' + row.role) + ' · ' + (row.model || t('usage.unknown')) + ' · ' + t('usage.attempt') + ' ' + row.attempt,
+          ' · ' + t('usage.calls') + ' ' + row.requests,
+          ...[['inputTokens', 'input'], ['cacheReadTokens', 'cacheRead'], ['cacheWriteTokens', 'cacheWrite'], ['outputTokens', 'output']]
+            .map(([key, label]) => ' · ' + t('usage.' + label) + ' ' + value(row[key])))),
+        h('p', null, t('usage.note')))
+    }
+
     function SupervisionDetails({ t, task }) {
       const state = task?.supervision
       if (!state) return null
@@ -1440,7 +1478,9 @@ window.__ModuleLoader__.load({
         task.continuation?.used ? line(fill(t('supervision.continuation'), { segment: task.continuation.used + 1 })) : null,
         state.metrics && state.limits ? line(fill(t(Number.isFinite(state.limits.outputTokens) ? 'supervision.budget' : 'supervision.usage'), { requests: state.metrics.requests, requestLimit: state.limits.requests,
           output: state.metrics.outputTokens, outputLimit: state.limits.outputTokens }), state.metrics.contextTokens ? ' · ' + fill(t('supervision.context'), { tokens: state.metrics.contextTokens }) : '') : null,
-        state.pending ? line(h('strong', null, t(live ? 'supervision.waiting' : 'supervision.title') + '：'), state.pending.reason) : null,
+        state.notices?.REQUEST_VOLUME ? line(t('supervision.requestNotice')) : null,
+        state.notices?.ELAPSED_TIME ? line(t('supervision.timeNotice')) : null,
+        state.pending ? line(h('strong', null, t(live ? state.pending.advisory ? 'supervision.inquiry' : 'supervision.waiting' : 'supervision.title') + '：'), state.pending.reason) : null,
         state.wrapUpRequestedAt ? line(t('supervision.wrapUp')) : null,
         state.checkpoint ? line(h('strong', null, t('supervision.stage') + ' · ' + t('supervision.' + state.checkpoint.phase) + '：'), state.checkpoint.summary,
           ' · ' + t('supervision.nextStep') + '：' + state.checkpoint.nextStep) : null,
@@ -1875,6 +1915,8 @@ window.__ModuleLoader__.load({
             h('div', { className: 'ddf-board-actions' }, ...links)),
           notice,
           state?.storageError ? h('p', { className: 'ddf-board-inline-notice', 'data-kind': 'error', role: 'alert' }, state.storageError) : null,
+          state ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-policy': state.runtimePolicyVersion ?? 'unknown' }, t(state.runtimePolicyVersion >= 2 ? 'runtime.active' : 'runtime.pending')) : null,
+          h(UsageDetails, { t, usage: state?.requestUsage?.find(entry => entry.sessionId === sessionId) ?? plan?.usage }),
           state && !plan ? h('section', { className: 'ddf-board-empty', role: 'status' }, h('h2', null, t('view.boardNoPlan')), h('p', null, t('view.boardNoPlanHint'))) : null,
           plan ? h('section', { className: 'ddf-board-hero' },
             h('div', null, h('p', { className: 'ddf-board-hero-label' }, t('view.boardRequest')),

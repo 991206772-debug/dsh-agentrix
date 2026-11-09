@@ -65,6 +65,22 @@ export async function host() {
 
 const complex = '1. 重构所有模块并且迁移数据\n2. 批量修复接口同时补充测试套件'
 
+test('auto routing is advice and never forces a handoff from keywords or operation counts', async () => {
+  const h = await host(); await h.state()
+  try {
+    for (const text of ['修复这一行的空指针', complex]) {
+      h.turn(text)
+      for (let i = 0; i < 20; i++) {
+        assert.equal(h.call('read', `read-${i}`), undefined)
+        assert.equal(h.call('edit', `edit-${i}`, h.agent, { file_path: `src/${i}.js` }), undefined)
+        assert.equal(h.call('pwsh', `verify-${i}`), undefined)
+      }
+      assert.equal((await h.state()).turnStats.denied, 0)
+    }
+    assert.match(h.call('subagent'), /delegation_plan/)
+  } finally { await h.close() }
+})
+
 test('expanded execution limits are authoritative, persist, and reject values above their ranges', async () => {
   delete process.env.DSH_DELEGATION_FIRST
   process.env.DSH_HOME = path.join(home, 'expanded-limits')
@@ -212,7 +228,7 @@ test('native delegation cannot bypass configured task routing', async () => {
   assert.match(h.call('subagent'), /delegation_plan.*delegation_run/s)
   h.result('subagent', { isError: true, error: { message: 'capacity full' } })
   assert.equal((await h.state()).delegated, 0)
-  assert.match(h.call('edit'), /派/)
+  assert.equal(h.call('edit'), undefined)
   await h.close()
 })
 test('a result from a blocked native delegation cannot count as managed dispatch', async () => {
@@ -226,7 +242,7 @@ test('a result from a blocked native delegation cannot count as managed dispatch
 test('continue preserves the previous complex task', async () => {
   const h = await host(); await h.state(); h.turn(complex); h.turn('继续')
   assert.equal((await h.state()).difficulty.level, 'complex')
-  assert.match(h.call('edit'), /派/)
+  assert.equal(h.call('edit'), undefined)
   await h.close()
 })
 test('a simple change is not blocked by the automatic budget', async () => {
@@ -259,7 +275,7 @@ test('short approvals and follow-up requirements retain task context, while new 
   for (const text of ['可以，开始修复', '继续呢', '发给同事用']) {
     h.turn(text)
     assert.equal((await h.state()).difficulty.level, 'complex', text)
-    assert.match(h.call('edit'), /派/)
+    assert.equal(h.call('edit'), undefined)
   }
   h.turn('你是什么模型')
   assert.equal((await h.state()).difficulty.level, 'simple')
@@ -267,23 +283,23 @@ test('short approvals and follow-up requirements retain task context, while new 
   await h.close()
 })
 
-test('growing execution workload requires delegation before a simple task runs indefinitely', async () => {
+test('growing workload updates routing advice without forcing delegation', async () => {
   const h = await host(); await h.state(); h.turn('修改页面标题')
   for (let i = 0; i < 6; i++) assert.equal(h.call('pwsh', String(i)), undefined)
-  assert.match(h.call('pwsh', 'seventh'), /派/)
+  assert.equal(h.call('pwsh', 'seventh'), undefined)
   const state = await h.state()
   assert.equal(state.difficulty.level, 'complex')
   assert.match(state.difficulty.signals.join(' '), /执行.*6/)
   await h.close()
 })
 
-test('follow-up turns cannot reset a growing execution workload', async () => {
+test('follow-up turns retain workload advice without blocking direct execution', async () => {
   const h = await host(); await h.state(); h.turn('修改页面标题')
   for (let i = 0; i < 4; i++) assert.equal(h.call('edit', String(i)), undefined)
   h.turn('继续呢')
   assert.equal(h.call('edit', 'fifth'), undefined)
   assert.equal(h.call('edit', 'sixth'), undefined)
-  assert.match(h.call('edit', 'seventh'), /派/)
+  assert.equal(h.call('edit', 'seventh'), undefined)
   await h.close()
 })
 
@@ -292,7 +308,7 @@ test('editing several real files upgrades the initial single-file estimate', asy
   for (const file of ['src/a.js', 'src/b.js', 'src/c.js']) {
     assert.equal(h.call('edit', file, h.agent, { file_path: file }), undefined)
   }
-  assert.match(h.call('edit', 'fourth', h.agent, { file_path: 'src/d.js' }), /派/)
+  assert.equal(h.call('edit', 'fourth', h.agent, { file_path: 'src/d.js' }), undefined)
   assert.match((await h.state()).difficulty.signals.join(' '), /3.*文件/)
   await h.close()
 })
@@ -302,7 +318,7 @@ test('read-only context remains available after workload escalation', async () =
   for (let i = 0; i < 12; i++) assert.equal(h.call('read', String(i)), undefined)
   for (let i = 12; i < 40; i++) assert.equal(h.call('read', String(i)), undefined)
   assert.equal((await h.state()).difficulty.level, 'complex', 'reading can strengthen the routing advice without blocking context')
-  assert.match(h.call('edit'), /派/)
+  assert.equal(h.call('edit'), undefined)
   assert.equal(h.call('read', 'after-delegation'), undefined)
   assert.equal(h.call('pwsh', 'worker', { id: 'worker' }), undefined)
   await h.close()
@@ -338,7 +354,7 @@ test('explicit off and fixed modes keep their own execution policy', async () =>
 test('turn counters reset together while cumulative policy interceptions retain their origin', async () => {
   const h = await host(); await h.state(); h.turn(complex)
   try {
-    for (let i = 0; i < 4; i++) assert.match(h.call('edit', String(i)), /派/)
+    for (let i = 0; i < 4; i++) assert.match(h.call('subagent', String(i)), /delegation_plan/)
     const first = await h.state()
     assert.equal(first.turnStats.denied, 4)
     assert.equal(first.sessionStats.denied, 4)
@@ -351,7 +367,8 @@ test('turn counters reset together while cumulative policy interceptions retain 
   } finally { await h.close() }
 })
 
-test('a read-only baseline and three planning notes remain usable after the direct-operation budget is spent', async () => {
+test('a read-only baseline and three planning notes remain usable after an explicit direct-operation budget is spent', async () => {
+  process.env.DSH_DELEGATION_FIRST = '1'
   const h = await host(); await h.state(); h.turn('你评审下代码，看看是否可以优化')
   try {
     assert.equal(h.call('pwsh', 'initial-baseline'), undefined)
