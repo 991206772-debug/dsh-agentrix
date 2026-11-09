@@ -1458,13 +1458,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const recoverable = !args.reason && !hasLive && plan.tasks.filter(task => ['failed', 'blocked'].includes(task.status)
       && !task.recovered && task.attempts < getConfig().maxAttempts)
     if (recoverable.length) {
-      invalidateCompletion(plan)
-      plan.cancelled = false; plan.wakeSuppressed = false; plan.autoDispatch = true
-      for (const task of recoverable) {
-        task.feedback = '上一轮执行失败或超时；沿用原计划继续，先核对已有产物和失败原因，再完成本次任务。'
-        task.status = 'queued'; task.error = null; task.issue = null; delete task.stop
-        remember(plan, 'task.auto_recovery_queued', '无原因取消被识别为失败后的恢复请求，沿用原计划重试', task)
-      }
+      queuePlanRecovery(plan, recoverable, '上一轮执行失败或超时；沿用原计划继续，先核对已有产物和失败原因，再完成本次任务。')
       remember(plan, 'plan.auto_recovery', `无原因取消未终止计划，自动恢复 ${recoverable.length} 个可重试任务`)
       await save(); const failure = await pump(); if (failure) throw failure
       if (service('agents')?.get(parent.id) === parent) parent.inject?.(runtimeMessage(plan,
@@ -1485,7 +1479,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     try { for (const task of plan.tasks) if (task.status !== 'accepted') {
       await control({ taskId: task.id, action: 'stop', reason: '主控明确取消整个计划' }, exec)
     } } finally { cancellingPlans.delete(plan) }
-     remember(plan, 'plan.cancelled', args.reason ? '主 Agent 已停止计划：' + args.reason : '主 Agent 已停止计划，历史记录保留')
+    remember(plan, 'plan.cancelled', args.reason ? '主 Agent 已停止计划：' + args.reason : '主 Agent 已停止计划，历史记录保留')
     finishPlan(plan)
     await save(); return { status: 'cancelled', completion: plan.completion ?? null }
   })

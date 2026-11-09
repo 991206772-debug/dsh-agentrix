@@ -74,6 +74,9 @@ try {
   let response
   await routes.get('/dsh-delegation-first/api/state')({ method: 'GET' }, { writeHead() {}, end(body) { response = JSON.parse(body) } })
   assert.equal(response.ok, true)
+  for (const [key, value] of Object.entries({ maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120 })) {
+    assert.equal(response.limits[key], value, key + ' installed default')
+  }
   const saveConfig = async body => {
     let status, payload
     await routes.get('/dsh-delegation-first/api/config')({ method: 'POST', async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)) } },
@@ -159,7 +162,10 @@ try {
   await routes.get('/dsh-delegation-first/api/state')({ method: 'GET' }, { writeHead() {}, end(body) { response = JSON.parse(body) } })
   assert.equal(response.plans[0].tasks[0].error, failure)
   assert.equal(children.length, 2)
-  await checked('delegation_cancel')
+  const cancelled = await checked('delegation_cancel', { reason: '原生契约测试已验证服务错误，明确结束本场景' })
+  assert.equal(cancelled.status, 'cancelled')
+  assert.equal((await checked('delegation_status')).plan.tasks[0].error, failure)
+  assert.equal(children.length, 2, 'explicit fixture cleanup must not start a recovery child')
   await checked('delegation_plan', { goal: '验证原生 NO_ADAPTER 在派单前返回工具错误', tasks: [{
     id: 'stale', title: '模型已被移除', instructions: '只处理测试数据', scope: '隔离环境', outputs: ['fixture'], writes: [],
     complexity: 'routine', criteria: ['未启动子任务'], checks: [{ tool: 'read', arguments: {} }],
@@ -179,7 +185,7 @@ try {
   await checked('delegation_run')
   assert.equal(children.length, 3)
   assert.equal((await checked('delegation_status')).plan.tasks[0].attempts, 1)
-  await checked('delegation_cancel')
+  await checked('delegation_cancel', { reason: '原生契约测试已验证无效模型恢复，明确结束本场景' })
   const savedModels = await saveConfig({ models: { worker: { provider: 'test', model: 'routine' }, reviewer: { provider: 'test', model: 'complex' } } })
   assert.equal(savedModels.status, 200)
   const modelCard = (id, complexity) => ({ id, title: id, instructions: '只检查隔离数据', scope: '本地测试', outputs: ['fixture'], writes: [],
@@ -199,7 +205,7 @@ try {
   assert.equal(disposed.get(children[3].childId), 1)
   assert.equal(mismatch.autoDispatch, false)
   probeMismatch = false
-  await checked('delegation_cancel')
+  await checked('delegation_cancel', { reason: '原生契约测试已验证模型错配拦截，明确结束本场景' })
   await checked('delegation_plan', { goal: '父子模型独立且实际请求可核对', tasks: [modelCard('routine', 'routine'), modelCard('complex', 'complex')] })
   await checked('delegation_run')
   assert.deepEqual(children.slice(-2).map(child => child.request.agentOptions.model), ['routine', 'routine'])
@@ -211,7 +217,7 @@ try {
   assert.deepEqual(verified.tasks.map(task => task.modelRoute.actual.model), ['routine', 'routine'])
   assert.deepEqual(verified.tasks.map(task => task.modelRoute.role), ['worker', 'worker'])
   assert.equal(adapterDispatches, 2)
-  await checked('delegation_cancel')
+  await checked('delegation_cancel', { reason: '原生契约测试已验证模型独立路由，明确结束本场景' })
   await checked('delegation_plan', { goal: '复杂任务独立审查与身份约束', tasks: [modelCard('audit', 'complex')] })
   await checked('delegation_run')
   const worker = children.at(-1), workerIndex = children.length - 1
