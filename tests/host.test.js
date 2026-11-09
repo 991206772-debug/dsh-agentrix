@@ -65,6 +65,23 @@ export async function host() {
 
 const complex = '1. 重构所有模块并且迁移数据\n2. 批量修复接口同时补充测试套件'
 
+test('obsolete reviewer settings are inert and config saves expose the dispatcher-snapshot policy', async () => {
+  delete process.env.DSH_DELEGATION_FIRST
+  process.env.DSH_HOME = path.join(home, 'automatic-review-model')
+  const h = await host()
+  try {
+    const initial = (await h.request('GET')).payload
+    assert.equal(initial.reviewerModelPolicy, 'dispatcher-snapshot')
+    const saved = await h.request('POST', { models: { worker: { provider: 'local', model: 'worker' },
+      reviewer: { provider: 'retired', model: 'unavailable' }, complex: { invalid: true } } })
+    assert.equal(saved.status, 200, saved.payload.error)
+    assert.deepEqual(saved.payload.models, { worker: { provider: 'local', model: 'worker' }, reviewer: null })
+    const stored = JSON.parse(await readFile(saved.payload.file, 'utf8'))
+    assert.equal(stored.models.reviewer, null)
+    assert.equal(stored.models.complex, undefined)
+  } finally { await h.close() }
+})
+
 test('auto routing is advice and never forces a handoff from keywords or operation counts', async () => {
   const h = await host(); await h.state()
   try {
@@ -124,7 +141,7 @@ test('new defaults preserve explicitly saved lower execution limits without rewr
   } finally { await h.close() }
 })
 
-test('legacy model settings migrate to execution and review roles without rewriting the file on read', async () => {
+test('legacy execution settings migrate and obsolete review overrides are inert without rewriting the file on read', async () => {
   delete process.env.DSH_DELEGATION_FIRST
   const h = await host()
   try {
@@ -136,7 +153,7 @@ test('legacy model settings migrate to execution and review roles without rewrit
     await writeFile(file, old)
     const migrated = await h.request('GET')
     assert.equal(migrated.payload.modelRouting, 'roles')
-    assert.deepEqual(migrated.payload.models, { worker: { provider: 'local', model: 'worker', reasoningEffort: 'high' }, reviewer: { provider: 'local', model: 'reviewer' } })
+    assert.deepEqual(migrated.payload.models, { worker: { provider: 'local', model: 'worker', reasoningEffort: 'high' }, reviewer: null })
     assert.equal(await readFile(file, 'utf8'), old)
     const saved = await h.request('POST', { revision: migrated.payload.revision,
       models: { worker: { provider: 'local', model: 'new-worker' }, reviewer: null,

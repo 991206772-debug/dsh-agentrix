@@ -10,6 +10,7 @@ export const DEFAULT_OPTIONS = Object.freeze({
   maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120,
   models: { worker: null, reviewer: null },
 })
+export const REVIEWER_MODEL_POLICY = 'dispatcher-snapshot'
 const MAX_PLANS = 12
 const MAX_TASKS = 16
 const MIN_ACTIVATIONS = 1
@@ -28,11 +29,21 @@ const clone = value => JSON.parse(JSON.stringify(value))
 const brief = (value, limit = 3000) => String(value ?? '').slice(0, limit)
 const textOf = content => (content ?? []).filter(block => block?.type === 'text').map(block => block.text).join('\n')
 const messageOf = error => brief(error?.message ?? error)
+const isServiceIssue = issue => ['MODEL_SERVICE_QUOTA', 'MODEL_SERVICE_RATE_LIMIT'].includes(issue?.code)
+function modelServiceIssue(error, role, route = {}) {
+  const details = messageOf(error), quota = error?.code === 'QUOTA' || /(?:exceed|insufficient)[^\n]*quota|quota[^\n]*(?:exceed|limit)/i.test(details)
+  if (!quota && !['RATE_LIMIT', 'RATE_LIMITED'].includes(error?.code) && Number(error?.status ?? error?.statusCode) !== 429 && !/\b429\b|rate_limit_error/.test(details)) return null
+  const label = { coordinator: '主控', worker: '执行者', reviewer: '独立审查' }[role]
+  return { code: quota ? 'MODEL_SERVICE_QUOTA' : 'MODEL_SERVICE_RATE_LIMIT', retryable: false, role,
+    provider: route.provider, model: route.model, originalCode: error?.code, details, at: Date.now(),
+    message: `${label}模型服务${quota ? '额度不足' : '请求受限（429）'}；已保留现有交付物、报告和验证证据`,
+    action: `${quota ? '恢复服务商额度' : '等待服务商解除限流'}${role === 'reviewer' ? '，然后明确重试独立审查；审查沿用分发者模型记录' : `，或手动调整${role === 'coordinator' ? '主控模型' : '执行模型配置'}后明确继续${role === 'coordinator' ? '验证验收' : '并重试该任务'}`}；不会自动切换模型或反复新开代理。` }
+}
 
 // Model output is intentionally separate from the full persisted/UI snapshot.
 function compactTask(task) {
   return { id: task.id, title: task.title, status: task.status, attempts: task.attempts,
-    model: task.modelRoute?.actual ?? task.modelRoute?.requested ?? task.model,
+    model: task.modelRoute?.actual ?? task.modelRoute?.requested ?? task.model, issue: task.issue,
     summary: brief(task.execution?.summary, 300), reportPath: task.execution?.reportPath,
     error: task.error ? brief(task.error, 500) : null,
     checks: (task.checks ?? []).map((check, index) => ({ index, passed: check.result?.passed ?? null, callId: check.result?.callId })),
@@ -45,6 +56,8 @@ function compactResult(value) {
   const result = { ...value }
   if (value.plan) result.plan = { sessionId: value.plan.sessionId, goal: brief(value.plan.goal, 300), status: value.plan.status,
     activationBudget: value.plan.activationBudget, dispatchWait: value.plan.dispatchWait,
+    coordinatorIssue: value.plan.coordinatorIssue,
+    inputs: (value.plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)).map(input => ({ id: input.id, text: brief(input.text, 400), status: input.status })),
     tasks: value.plan.tasks.map(compactTask) }
   if (value.task) result.task = compactTask(value.task)
   if (value.audit) result.audit = compactTask(value.audit)
@@ -68,7 +81,9 @@ export async function validateModelRoute(llm, route, tier, signal) {
     const message = noAdapter
       ? `${label}配置已失效：${route.provider} / ${route.model}。当前 DSH 未注册服务“${route.provider}”`
       : `${label}的思考强度“${route.reasoningEffort}”不可用：${route.provider} / ${route.model}`
-    const action = `请打开“DSH Agentrix → 子任务模型 → ${label}”，从当前列表重新选择${tier === 'worker' || tier === 'routine' ? '执行模型' : '审查模型，或明确选择跟随主控'}，然后保存。配置未更新前不要重试`
+    const action = tier === 'worker' || tier === 'routine'
+      ? '请打开“DSH Agentrix → 子任务模型 → 执行模型”，从当前列表重新选择并保存；配置未更新前不要重试'
+      : '审查沿用分发时的主控模型；请恢复该模型服务及思考强度支持后明确重试审查。新执行可在切换主控后重新派发'
     const issue = { code: 'MODEL_CONFIG_INVALID', retryable: false, tier, role: tier, provider: route.provider, model: route.model, message, action, details }
     throw Object.assign(new Error(`${message}。${action}。`), { issue })
   }
@@ -83,8 +98,8 @@ export function orchestrationOptions(input = {}, strict = false) {
       if (strict) throw new Error(`${key} 必须是 ${min}~${max} 的整数`)
     } else result[key] = value
   }
-  for (const tier of ['worker', 'reviewer']) {
-    const legacy = tier === 'worker' ? 'routine' : 'complex'
+  for (const tier of ['worker']) {
+    const legacy = 'routine'
     const route = input.models && Object.hasOwn(input.models, tier) ? input.models[tier] : input.models?.[legacy]
     if (route == null) continue
     if (typeof route.provider !== 'string' || !route.provider.trim() || route.provider.length > 160 ||
@@ -173,6 +188,7 @@ function overlaps(left, right) {
 function planStatus(plan) {
   if (plan.cancelled) return 'cancelled'
   if (plan.tasks.every(task => task.status === 'accepted')) return 'accepted'
+  if (plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt) return 'blocked'
   if (targetsOf(plan).some(task => LIVE.includes(task.status))) return 'running'
   if (targetsOf(plan).some(task => ['failed', 'blocked'].includes(task.status))) return 'blocked'
   if (plan.tasks.some(task => task.status === 'review')) return 'review'
@@ -198,7 +214,6 @@ function routeWarnings(route, tasks) {
   const complex = tasks.filter(task => task.complexity === 'complex').length
   if (route.route === 'delegate_parallel' && tasks.length < 2) warnings.push('路由建议并行，但任务卡只有 1 个任务；请确认是否遗漏可独立工作')
   if (route.route !== 'direct' && complex === 0 && route.reasons?.includes('high_complexity')) warnings.push('路由判断为复杂，但所有任务都标为 routine；请核对任务拆分和独立审查需求')
-  if (route.route === 'direct' && complex > 0) warnings.push('路由判断为直接执行，但任务卡包含 complex 任务；仍使用执行模型，并安排独立审查')
   return warnings
 }
 
@@ -209,6 +224,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const noteRequests = new Map(), noteWrites = new Map()
   const stagedResults = new Map(), pendingTransports = new Map(), committing = new Set()
   const waitingParents = new Map()
+  const inboxes = new Map()
   const cancellingPlans = new Set()
   const records = createTaskRecords(file), pendingRecords = new Map()
   let activityTimer
@@ -246,6 +262,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   }
   function finishPlan(plan, reason) {
     if (!(plan.protocolVersion >= 2) || plan.completion) return plan.completion ?? null
+    if (!reason && !plan.cancelled && unresolvedInputs(plan).length) return null
     const receipt = buildCompletion(plan, reason)
     if (receipt) {
       plan.completion = receipt
@@ -255,6 +272,64 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   }
   function runtimeMessage(plan, text, kind = 'delegation-recovery') {
     return { id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { kind, planId: plan.archive.id } }
+  }
+  const queuedInputs = plan => (plan.inputs ?? []).filter(input => input.status === 'queued')
+  const unresolvedInputs = plan => (plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status))
+  function selectInputs(plan, ids = []) {
+    const selected = strings(ids, '补充消息编号', true)
+    if (new Set(selected).size !== selected.length) throw new Error('补充消息编号重复')
+    return selected.map(id => {
+      const input = unresolvedInputs(plan).find(input => input.id === id)
+      if (!input) throw new Error(`补充消息 ${id} 不存在、已处理或已撤回`)
+      return input
+    })
+  }
+  function additionalCriteria(task, args, inputs) {
+    const criteria = strings(args.additionalCriteria ?? [], '新增验收标准', true)
+    if (inputs.length && !criteria.length) throw new Error('同步补充要求必须通过 additionalCriteria 提供新增验收标准；纯答复使用 acknowledge')
+    if (task.criteria.length + criteria.length > 20) throw new Error('验收标准超过 20 项，请收敛重复要求')
+    return criteria
+  }
+  function forwardInputs(plan, task, inputs, criteria, message, messageId) {
+    task.criteria.push(...criteria.filter(criterion => !task.criteria.includes(criterion)))
+    if (criteria.length) { task.evidence = []; task.review = null; task.checks.forEach(check => { check.result = null }) }
+    for (const input of inputs) Object.assign(input, { status: 'forwarded', taskId: task.id, handledAt: Date.now(), resolution: message, messageId, additionalCriteria: criteria })
+    if (inputs.length) remember(plan, 'plan.input_forwarded', '用户补充已同步至任务 ' + task.id, task, { inputIds: inputs.map(input => input.id) })
+  }
+  function observeInput(session, event) {
+    const plan = plans.get(session?.id)
+    if (!plan || plan.cancelled || planStatus(plan) === 'accepted' || getConfig().enabled === false) return
+    if (event.type === 'user/message') {
+      const message = event.data?.message ?? event.data
+      const input = plan.inputs?.find(input => input.id === message?.id)
+      if (input?.status === 'queued') { input.status = 'received'; input.receivedAt = Date.now(); backgroundSave() }
+      return
+    }
+    if (event.type !== 'agent/inbox/spliced') return
+    const data = event.data, target = data?.target ?? 'next-turn'
+    if (!['next-turn', 'next-step'].includes(target)) return
+    if (!inboxes.has(session.id)) inboxes.set(session.id, { 'next-turn': [], 'next-step': [] })
+    const queue = inboxes.get(session.id)[target], start = data.start ?? queue.length
+    if (queue.length < start) queue.length = start
+    const removed = queue.splice(start, data.removedCount ?? 0, ...(data.inserted ?? []).map(message => message.id))
+    if (data.outcome === 'canceled') for (const id of removed) {
+      const input = plan.inputs?.find(input => input.id === id)
+      if (input?.status === 'queued') input.status = 'withdrawn'
+    }
+    for (const message of data.inserted ?? []) {
+      if (!message.id || message.source?.kind !== 'user' || message.id === plan.source?.messageId) continue
+      const text = textOf(message.content)
+      if (!text.trim()) continue
+      plan.inputs ??= []
+      let input = plan.inputs.find(input => input.id === message.id)
+      if (!input) {
+        input = { id: message.id, text, at: Date.now(), status: 'queued', target }
+        plan.inputs.push(input)
+        remember(plan, 'plan.input_queued', '收到用户补充，等待原主控处理', undefined, { inputId: input.id })
+      } else if (input.status === 'withdrawn') { input.status = 'queued'; input.target = target }
+    }
+    if (queuedInputs(plan).length) waitingParents.get(session.id)?.wake.resolve()
+    backgroundSave()
   }
   function notifyParent(plan, task, handle) {
     if (handle.notified || closed || plan.cancelled || plan.wakeSuppressed || plans.get(plan.sessionId) !== plan) return
@@ -326,13 +401,13 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }, Math.max(1, nextAt - Date.now()))
     handle.watchdog.unref?.()
   }
-  async function waitForWork(handles, signal, plan) {
+  async function waitForWork(handles, signal, plan, wake) {
     let abort
     const cancelled = new Promise(resolve => {
       abort = () => { plan.wakeSuppressed = true; resolve() }
       signal?.addEventListener('abort', abort, { once: true })
     })
-    try { await Promise.race([Promise.all(handles.map(handle => handle.done.promise)), cancelled]) }
+    try { await Promise.race([Promise.all(handles.map(handle => handle.done.promise)), cancelled, wake]) }
     finally { signal?.removeEventListener('abort', abort) }
   }
   const truncatedOutputs = new Set()
@@ -382,14 +457,18 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     waitingParents.set(agent.id, waiter)
     try {
       while (!signal?.aborted) {
+        if (queuedInputs(plan).length) break
         const handles = [...live.values()].filter(handle => handle.planSessionId === agent.id)
         if (!handles.length) break
         if (pendingSupervision(plan).length) break
-        await Promise.race([waitForWork(handles, signal, plan), waiter.wake.promise])
+        const wake = waiter.wake
+        await waitForWork(handles, signal, plan, wake.promise)
+        if (waiter.wake === wake) waiter.wake = Promise.withResolvers()
         if (pendingSupervision(plan).length) break
       }
     } finally { waitingParents.delete(agent.id) }
     if (closed || signal?.aborted || plan.wakeSuppressed) return
+    if (queuedInputs(plan).length) { await save(); return }
     if (deliverSupervision(plan, agent)) { await save(); return }
     if (finishPlan(plan)) { await save(); return }
     plan.recovery ??= { used: 0, limit: RECOVERY_LIMIT }
@@ -566,7 +645,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   function queueAudit(task) {
     task.audit = { id: task.id, role: 'reviewer', title: '独立审查：' + task.title, complexity: task.complexity,
       forAttempt: task.attempts, status: 'queued', attempts: 0, writes: [], checks: [], evidence: [], report: '', execution: null,
-      protocolVersion: task.protocolVersion, model: null, modelRoute: null, childId: null, error: null, progress: null }
+      protocolVersion: task.protocolVersion, dispatcherModel: task.dispatcherModel ? clone(task.dispatcherModel) : null,
+      model: null, modelRoute: null, childId: null, error: null, progress: null }
   }
   function auditPrompt(plan, task) {
     return [
@@ -598,6 +678,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
   }
   function recoverableTasks(plan, includeLegacyCancelled = false) {
+    if (pendingServiceIssue(plan)) return []
     const resumableCancellation = !Object.hasOwn(plan, 'cancelledBy') || plan.cancelledBy === 'implicit'
     return plan.tasks.filter(task => {
       const failed = ['failed', 'blocked'].includes(task.status)
@@ -605,6 +686,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         && resumableCancellation && task.stop?.reason === '主控明确取消整个计划'
       return (failed || legacyCancelled) && !task.recovered && task.attempts < getConfig().maxAttempts
     })
+  }
+  function pendingServiceIssue(plan) {
+    return plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt ? plan.coordinatorIssue : targetsOf(plan).find(task => isServiceIssue(task.issue))?.issue
   }
   function queuePlanRecovery(plan, tasks, message) {
     invalidateCompletion(plan)
@@ -670,6 +754,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       error = Object.assign(new Error('报告确认保存失败：' + messageOf(failure)), { issue: { code: 'REPORT_COMMIT_FAILED', retryable: false } })
     }
     if (handle.failure?.issue || (!error && result?.stopReason === 'error')) error = handle.failure
+    const issue = error && !error.issue && modelServiceIssue(error, modelRole(task), task.modelRoute?.actual ?? task.modelRoute?.resolved)
+    if (issue) error = Object.assign(new Error(messageOf(error)), { issue })
     const releaseError = await releaseChild(handle, task)
     error ??= releaseError
     if (live.get(handle.key) !== handle) { handle.done?.resolve(); return }
@@ -709,18 +795,23 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (task.protocolVersion >= 2) notifyParent(plan, task, handle)
     } finally { handle.done?.resolve() }
   }
+  function coordinatorModel(parent, attempt, source = 'dispatch') {
+    const config = parent.session?.requestHeader?.()?.config ?? parent.options ?? {}
+    if (!config.provider || !config.model) throw new Error('无法确定分发者模型，请检查主控当前模型后继续')
+    return { provider: config.provider, model: config.model, ...(config.reasoningEffort !== undefined ? { reasoningEffort: config.reasoningEffort } : {}),
+      sessionId: parent.id, attempt, at: Date.now(), source }
+  }
   function modelSelection(task, parent) {
-    const role = modelRole(task), route = orchestrationOptions(getConfig()).models[role]
+    const role = modelRole(task), route = role === 'reviewer' ? task.dispatcherModel ?? coordinatorModel(parent, task.forAttempt ?? task.attempts, 'legacy-review')
+      : orchestrationOptions(getConfig()).models.worker
     if (!route && role === 'worker') {
       const message = '执行模型尚未配置，任务未启动；不会自动继承主控模型'
       const action = '请打开“DSH Agentrix → 子任务模型 → 执行模型”，选择用于做事的模型并保存，然后继续原计划'
       throw Object.assign(new Error(message + '。' + action), { issue: { code: 'MODEL_CONFIG_INVALID', retryable: false, tier: role, role, message, action } })
     }
-    const inherited = parent.session?.requestHeader?.()?.config ?? parent.options ?? {}
-    const selected = clone(route ?? { provider: inherited.provider, model: inherited.model,
-      ...(inherited.reasoningEffort ? { reasoningEffort: inherited.reasoningEffort } : {}) })
+    const selected = { provider: route.provider, model: route.model, ...(route.reasoningEffort !== undefined ? { reasoningEffort: route.reasoningEffort } : {}) }
     if (!selected.provider || !selected.model) throw new Error('无法确定子任务模型，请在“DSH Agentrix”中选择模型或检查主 Agent 模型')
-    return { selected, source: route ? 'configured' : 'inherited' }
+    return { selected, source: role === 'reviewer' ? 'dispatcher' : 'configured' }
   }
   function recordModelSelection(task, selected, source, resolved = null) {
     task.modelRoute = { role: modelRole(task), source, requested: clone(selected), resolved: resolved ? clone(resolved) : null, actual: null }
@@ -760,7 +851,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         const resolved = await checked.get(key)
         recordModelSelection(task, selected, source, resolved)
         if (task.protocolVersion && task.complexity === 'complex') {
-          const review = modelSelection({ ...task, role: 'reviewer' }, parent).selected
+          const review = modelSelection({ role: 'reviewer', dispatcherModel: coordinatorModel(parent, task.attempts + 1) }, parent).selected
           const reviewKey = JSON.stringify(['reviewer', review])
           if (!checked.has(reviewKey)) checked.set(reviewKey, validateModelRoute(service('llm'), review, 'reviewer', signal))
           await checked.get(reviewKey)
@@ -791,6 +882,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     remember(plan, 'task.starting', '正在派发子任务', task)
     let modelChecked = false
     try {
+      const dispatcher = reviewer ? owner.dispatcherModel ?? coordinatorModel(parent, owner.attempts, 'legacy-review') : coordinatorModel(parent, task.attempts + 1)
+      if (reviewer) { owner.dispatcherModel ??= dispatcher; task.dispatcherModel ??= clone(owner.dispatcherModel) }
       await save()
       const subagents = service('subagents')
       if (!subagents?.startActivation) throw new Error('DSH subagents 服务不可用；请确认原生子 Agent provider 已加载')
@@ -799,12 +892,21 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const resolved = await validateModelRoute(service('llm'), selected, modelRole(task), handle.controller.signal)
       handle.controller.signal.throwIfAborted()
       recordModelSelection(task, selected, source, resolved)
+      if (!reviewer && task.complexity === 'complex') {
+        await validateModelRoute(service('llm'), modelSelection({ role: 'reviewer', dispatcherModel: dispatcher }, parent).selected, 'reviewer', handle.controller.signal)
+        handle.controller.signal.throwIfAborted()
+      }
       modelChecked = true
       const budget = requireActivationBudget(plan)
       budget.used++
       plan.activationBudget.used = budget.used
       const timeoutMinutes = getConfig().taskTimeoutMinutes
       task.attempts++
+      if (!reviewer) {
+        task.dispatcherModel = dispatcher
+        remember(plan, 'task.dispatcher_model', '已记录分发者模型，后续独立审查沿用：' + dispatcher.provider + ' / ' + dispatcher.model, task,
+          { dispatcherModel: clone(dispatcher) })
+      }
       task.startedAt = Date.now(); task.childId = randomUUID()
       startSupervision(task, task.startedAt, timeoutMinutes * 60_000)
       expectedRoutes.set(task.childId, { plan, task, handle, config: clone(resolved) })
@@ -829,6 +931,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       await save()
     } catch (error) {
       clearTaskTimers(handle)
+      const issue = !error.issue && modelServiceIssue(error, modelRole(task), task.modelRoute?.actual ?? task.modelRoute?.resolved)
+      if (issue) error = Object.assign(new Error(messageOf(error)), { issue })
       const releaseError = await releaseChild(handle, task)
       if (releaseError) error = new Error(`${messageOf(error)}；子 Agent 清理失败：${messageOf(releaseError)}`, { cause: error })
       if (live.get(key) === handle) live.delete(key)
@@ -912,6 +1016,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   // Native local activations return only output + stopReason. Capture the
   // committed error before native cleanup releases the child Agent.
   disposers.push(ctx.on('session/event', (session, event) => {
+    observeInput(session, event)
+    const parentPlan = plans.get(session?.id)
     if (event?.type === 'assistant/message') {
       const expected = expectedRoutes.get(session?.id)
       if (!closed && getConfig().enabled !== false && (expected || service('agents')?.get(session?.id))) {
@@ -922,11 +1028,19 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         if (alert) requestSupervision(expected.plan, expected.task, expected.handle, alert)
         backgroundSave()
       }
+      if (!closed && !parentPlan?.cancelled && parentPlan?.coordinatorIssue && !parentPlan.coordinatorIssue.resolvedAt) {
+        parentPlan.coordinatorIssue.resolvedAt = Date.now()
+        parentPlan.wakeSuppressed = false
+        invalidateCompletion(parentPlan)
+        remember(parentPlan, 'plan.coordinator_resumed', '主控模型已返回响应，继续核对原交付物并验证验收')
+        backgroundSave()
+      }
     }
-    const parentPlan = plans.get(session?.id)
     if (!closed && parentPlan?.protocolVersion >= 2 && planStatus(parentPlan) !== 'accepted' && event?.type === 'turn/end' && ['aborted', 'error'].includes(event.data?.reason?.kind)) {
       const aborted = event.data.reason.kind === 'aborted'
-      const reason = aborted ? '宿主中断当前执行，尚未完成验收' : '主控执行失败：' + messageOf(event.data.reason.error)
+      const issue = !aborted && modelServiceIssue(event.data.reason.error, 'coordinator', usageTarget(session.id))
+      if (issue) parentPlan.coordinatorIssue = issue
+      const reason = aborted ? '宿主中断当前执行，尚未完成验收' : issue ? issue.message + '。' + issue.details : '主控执行失败：' + messageOf(event.data.reason.error)
       parentPlan.wakeSuppressed = true; parentPlan.autoDispatch = false
       invalidateCompletion(parentPlan)
       if (aborted) { parentPlan.cancelled = true; parentPlan.cancelledBy = 'host' }
@@ -934,7 +1048,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         if (aborted) task.stop = { reason, source: 'host', at: Date.now(), previousStatus: task.status }
         else {
           task.error ||= reason
-          task.issue ||= { code: 'COORDINATOR_FAILED', retryable: false, message: reason }
+          task.issue ||= issue || { code: 'COORDINATOR_FAILED', retryable: false, message: reason }
         }
         task.status = aborted ? 'cancelled' : 'blocked'
       }
@@ -975,7 +1089,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (closed || handle.controller.signal.aborted) throw handle.controller.signal.reason ?? new Error('插件已停止')
     const header = service('agents')?.get(request.sessionId)?.session?.requestHeader?.()
     if (!task.modelRoute.actual && config.reasoningEffort === undefined && task.modelRoute.requested.reasoningEffort === undefined &&
-      header?.adapterDefaults?.reasoningEffort === true && header.config?.provider === config.provider && header.config?.model === config.model &&
+      header?.config?.provider === config.provider && header.config?.model === config.model &&
       actual.provider === config.provider && actual.model === config.model && actual.reasoningEffort !== undefined && header.config.reasoningEffort === actual.reasoningEffort) {
       config.reasoningEffort = actual.reasoningEffort
       task.modelRoute.resolved.reasoningEffort = actual.reasoningEffort
@@ -1071,13 +1185,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (task.pendingAcceptance) throw new Error('当前验收正在通过工具管线确认，不能重复提交')
     if (task.checks.some(check => check.verifying)) throw new Error('请等待正在执行的验证完成')
     if (args.verdict === 'rework') {
+      const inputs = selectInputs(plan, args.inputIds), criteria = additionalCriteria(task, args, inputs)
       if (task.audit && ['queued', ...LIVE].includes(task.audit.status)) throw new Error('独立审查尚未结束，请等待结果，避免修改审查中的交付物')
       const issues = validateIssues(args.issues ?? [], task)
       if (!issues.every(issue => issue.evidence.every(id => task.evidence.some(item => item.callId === id && item.attempt === task.attempts)))) throw new Error('主控提出的问题必须引用本次实际验证的 callId；验证失败的证据也可引用')
       const selected = args.issueIds === undefined ? (task.issues ?? []).filter(issue => issue.status === 'open' && issue.severity !== 'minor').map(issue => issue.id) : strings(args.issueIds, '原问题编号', true)
       if (new Set(selected).size !== selected.length || selected.some(id => !(task.issues ?? []).some(issue => issue.id === id && issue.status === 'open' && issue.severity !== 'minor'))) throw new Error('返工问题编号不存在、重复或已解决')
       if ((task.issues ?? []).some(issue => issue.status === 'open' && issue.severity !== 'minor' && !selected.includes(issue.id))) throw new Error('不能遗漏仍未解决的重要问题')
-      if (!selected.length && !issues.some(issue => issue.severity !== 'minor')) {
+      if (!inputs.length && !selected.length && !issues.some(issue => issue.severity !== 'minor')) {
         if (issues.length) {
           appendIssues(task, issues, 'coordinator'); remember(plan, 'task.suggestions', '仅记录可选建议，不开启返工', task)
           await save(); return { status: planStatus(plan), task: clone(task) }
@@ -1090,13 +1205,16 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       }
       appendIssues(task, issues, 'coordinator')
       task.reworkIds = [...selected, ...task.issues.filter(issue => issue.attempt === task.attempts && issue.source === 'coordinator' && issue.status === 'open').map(issue => issue.id)].filter((id, i, all) => all.indexOf(id) === i)
-      const feedback = task.reworkIds.length ? task.issues.filter(issue => task.reworkIds.includes(issue.id)).map(issue => `${issue.id}：${issue.finding}；证据：${issue.evidence.join('、')}`).join('\n') : requireText(args.feedback, '返工原因')
+      const feedback = [task.reworkIds.length ? task.issues.filter(issue => task.reworkIds.includes(issue.id)).map(issue => `${issue.id}：${issue.finding}；证据：${issue.evidence.join('、')}`).join('\n') : requireText(args.feedback, '返工原因'),
+        ...inputs.map(input => '用户补充：' + input.text)].join('\n')
+      forwardInputs(plan, task, inputs, criteria, feedback)
       invalidateCompletion(plan)
       task.feedback = feedback; task.status = 'queued'; task.evidence = []; task.review = null
       task.audit = null
       task.checks.forEach(check => { check.result = null })
       remember(plan, 'task.rework', '主 Agent 要求返工：' + feedback, task)
     } else if (args.verdict === 'accept') {
+      if (unresolvedInputs(plan).length) throw new Error('还有未处理的用户补充消息；先同步新增要求或用 acknowledge 说明纯答复，再验收')
       if (task.protocolVersion && (task.complexity === 'complex' || task.audit) &&
           (task.audit?.forAttempt !== task.attempts || task.audit.status !== 'completed' || task.audit.specVerdict !== 'pass' || task.audit.qualityVerdict !== 'pass')) throw new Error('本次执行的独立审查尚未通过，不能验收；请核对审查状态和具体问题')
       const resolutions = args.resolutions ?? [], openIssues = (task.issues ?? []).filter(issue => issue.status === 'open' && issue.severity !== 'minor')
@@ -1129,6 +1247,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         stagedResults.set(exec, {
           async commit() {
             if (task.status !== 'review' || task.pendingAcceptance !== acceptedReview || plan.cancelled) return
+            if (unresolvedInputs(plan).length) {
+              delete task.pendingAcceptance
+              remember(plan, 'task.acceptance_deferred', '验收期间收到用户补充，原结果尚未验收', task)
+              await save(); return
+            }
             closeIssues(); task.review = acceptedReview; task.status = 'accepted'; delete task.pendingAcceptance
             remember(plan, 'task.accepted', '主 Agent 已逐条验收通过', task, { findings: task.review.findings })
             if (planStatus(plan) === 'accepted') {
@@ -1158,7 +1281,15 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return { status: planStatus(plan), task: clone(task) }
   }
   async function control(args, exec) {
-    const { plan, parent } = ownPlan(exec), task = taskOf(plan, args.taskId)
+    const { plan, parent } = ownPlan(exec)
+    if (args.action === 'acknowledge') {
+      const inputs = selectInputs(plan, args.inputIds), message = requireText(args.message, '补充消息处理说明')
+      if (!inputs.length) throw new Error('acknowledge 必须指定 inputIds')
+      for (const input of inputs) Object.assign(input, { status: 'resolved', handledAt: Date.now(), resolution: message })
+      remember(plan, 'plan.input_resolved', message, undefined, { inputIds: inputs.map(input => input.id) })
+      await save(); return { status: planStatus(plan), inputIds: inputs.map(input => input.id) }
+    }
+    const task = taskOf(plan, args.taskId)
     if (task.status === 'accepted') {
       if (args.action === 'stop') return { task: clone(task), status: planStatus(plan) }
       throw new Error('已验收的任务不能重试；后续需求请建立新计划')
@@ -1166,8 +1297,12 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (args.action === 'steer') {
       const target = task.audit?.status === 'running' ? task.audit : task
       if (target.status !== 'running') throw new Error('只能向正在执行的子任务发送纠偏消息')
-      const message = requireText(args.message, '纠偏内容')
+      if (target.execution || task.pendingAcceptance || task.checks.some(check => check.verifying)) throw new Error('报告或验证正在确认；请等待结果，核对补充要求后再决定返工')
+      const inputs = selectInputs(plan, args.inputIds), criteria = additionalCriteria(task, args, inputs)
+      const message = [requireText(args.message, '纠偏内容'), ...inputs.map(input => '用户补充：' + input.text),
+        ...(criteria.length ? ['新增验收标准：', ...criteria] : [])].join('\n')
       const messageId = await service('subagents').sendMessage(parent, target.childId, [{ type: 'text', text: message }], { signal: exec.signal })
+      forwardInputs(plan, task, inputs, criteria, message, messageId)
       target.progress = { tool: '主控纠偏', at: Date.now(), message: brief(message, 500) }
       if (target.supervision?.pending) {
         const state = target.supervision
@@ -1217,7 +1352,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       plan.wakeSuppressed = false; plan.cancelled = false
       task.feedback = feedback; task.status = 'queued'; task.error = null; task.issue = null; plan.autoDispatch = true
       remember(plan, 'task.retry', '主 Agent 决定重试：' + feedback, task, { ...(task.stop ? { stop: clone(task.stop) } : {}) })
-    } else throw new Error('action 只能是 steer、stop 或 retry')
+    } else throw new Error('action 只能是 steer、stop、retry 或 acknowledge')
     await save(); const failure = await pump(); if (failure) throw failure
     return { task: clone(task), status: planStatus(plan) }
   }
@@ -1436,6 +1571,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (activationBudget(plan, getConfig().maxActivations).remaining <= 0) {
       const message = pauseAtActivationLimit(plan); await save(); throw new Error(message)
     }
+    task.dispatcherModel ??= coordinatorModel(parent, task.attempts, 'legacy-review')
+    if (task.audit) task.audit.dispatcherModel ??= clone(task.dispatcherModel)
     const target = task.audit ?? { ...task, role: 'reviewer' }
     const { selected } = modelSelection(target, parent)
     await validateModelRoute(service('llm'), selected, 'reviewer', exec.signal)
@@ -1448,18 +1585,27 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     await save(); const failure = await pump(); if (failure) throw failure
     return { audit: clone(task.audit) }
   })
-  routeTool('delegation_review', '主控逐条评审。accept 需要所有验证通过且每条 finding 引用实际证据；最后一项验收通过后程序生成交付回执并结束回合。rework 需要具体失败原因，受次数上限约束。', {
+  routeTool('delegation_review', '主控逐条评审。accept 需要验证通过、补充消息已处理且逐条引用证据；最后一项验收后自动生成回执并结束。rework 须提供具体问题及证据，或关联新用户 inputIds、additionalCriteria、feedback；受次数上限约束。', {
     taskId: string, verdict: { type: 'string', enum: ['accept', 'rework'] }, feedback: string, concernsResolution: string, issueIds: array(string),
+    inputIds: array(string), additionalCriteria: array(string),
     issues: array({ ...object({ criterion: { type: 'integer' }, severity: { type: 'string', enum: ['critical', 'important', 'minor'] }, finding: string, evidence: array(string) }), required: ['criterion', 'severity', 'finding', 'evidence'] }),
     resolutions: array({ ...object({ id: string, status: { type: 'string', enum: ['ADDRESSED'] }, evidence: array(string) }), required: ['id', 'status', 'evidence'] }),
     findings: array({ ...object({ criterion: { type: 'integer' }, finding: string, evidence: array(string) }), required: ['criterion', 'finding', 'evidence'] }),
   }, ['taskId', 'verdict'], review)
-  routeTool('delegation_control', '监督单个子任务：steer 发送纠偏消息；stop 仅表示取消，须提供 reason，不能用来成功收尾；retry 在已处理失败原因后重试。返回的子任务自动释放，无需 stop。', {
-    taskId: string, action: { type: 'string', enum: ['steer', 'stop', 'retry'] }, message: string, reason: string,
-  }, ['taskId', 'action'], control)
+  routeTool('delegation_control', 'steer 同步给原代理；用户补充须关联 inputIds 并提供 additionalCriteria。纯答复用 acknowledge(inputIds,message)，无需 taskId。stop 仅取消；retry 须处理真实原因。', {
+    taskId: string, action: { type: 'string', enum: ['steer', 'stop', 'retry', 'acknowledge'] }, message: string, reason: string,
+    inputIds: array(string), additionalCriteria: array(string),
+  }, ['action'], control)
   routeTool('delegation_cancel', '取消整个计划，停止并清理其活动子任务。明确用户取消时传 reason；失败或超时后无原因调用会沿用原计划自动恢复可重试任务，不会把计划误标为已停止。', { reason: string }, [], async (args, exec) => {
     const { plan, parent } = ownPlan(exec)
     if (planStatus(plan) === 'accepted') return { status: 'accepted', completion: plan.completion ?? null }
+    const serviceIssue = pendingServiceIssue(plan)
+    if (!args.reason && serviceIssue) {
+      const message = serviceIssue.message + '。' + serviceIssue.action
+      remember(plan, 'plan.service_recovery_required', message)
+      const completion = plan.completion ?? finishPlan(plan, message)
+      await save(); return { status: 'blocked', issue: clone(serviceIssue), completion }
+    }
     const hasLive = targetsOf(plan).some(task => LIVE.includes(task.status))
     const recoverable = !args.reason && !hasLive && plan.tasks.filter(task => ['failed', 'blocked'].includes(task.status)
       && !task.recovered && task.attempts < getConfig().maxAttempts)
@@ -1520,14 +1666,18 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     archiveWarningFor(sessionId) { return sessionId === null || archiveFailure?.sessionId === sessionId ? archiveFailure?.message ?? null : null },
     summary(sessionId) {
       const plan = plans.get(sessionId)
-      if (!plan) return ''
+      const source = getSource(sessionId)
+      if (!plan || source?.messageId && source.messageId !== plan.source?.messageId) return ''
       const failures = targetsOf(plan).filter(task => task.error).map(task => `${task.id}${task.role === 'reviewer' ? '（独立审查）' : ''}：${brief(task.error, 600)}`)
       const paused = !plan.cancelled && !plan.autoDispatch && targetsOf(plan).some(task => ['failed', 'blocked'].includes(task.status))
         ? '自动派单已暂停；处理失败原因后，执行任务用 delegation_control retry，独立审查用 delegation_audit({taskId,message}) 明确重试。' : ''
       const waiting = plan.dispatchWait ? `正在等待：${plan.dispatchWait.message}` : ''
       const budget = activationBudget(plan, getConfig().maxActivations)
-      const route = plan.routing?.route ? `路由：${plan.routing.route}；依据：${(plan.routing.reasonLabels || plan.routing.reasons || []).join('、') || '未记录'}。` : ''
-      return [`当前计划：${brief(plan.goal, 200)}\n状态：${planStatus(plan)}；${plan.tasks.map(task => `${task.id}=${task.status}${task.audit ? '（独立审查=' + task.audit.status + '）' : ''}`).join('，')}。启动预算：${budget.used}/${budget.limit}，剩余 ${budget.remaining}（含独立审查）。调用 delegation_status 获取证据并继续监督；最终交付结论以程序回执为准，最后一次验收后自动结束，不用 stop 清理。`, plan.completion ? completionText(plan.completion) : '', route, waiting, paused,
+      const issue = pendingServiceIssue(plan)
+      const inputs = unresolvedInputs(plan)
+      const pending = inputs.length ? '待处理用户补充：\n' + inputs.map(input => `${input.id}（${input.status}）：${brief(input.text, 400)}`).join('\n') +
+        '\n先说明理解与影响；执行变更用 delegation_control steer(inputIds,additionalCriteria,message) 同步原代理；结果已返回则核对后 delegation_review rework。纯答复用 acknowledge(inputIds,message) 记录，不改变交付标准。未处理前不能验收。' : ''
+      return [`当前计划：${brief(plan.goal, 200)}\n状态：${planStatus(plan)}；${plan.tasks.map(task => `${task.id}=${task.status}${task.audit ? '（独立审查=' + task.audit.status + '）' : ''}`).join('，')}。启动预算：${budget.used}/${budget.limit}，剩余 ${budget.remaining}（含独立审查）。调用 delegation_status 获取证据并继续监督；最终交付结论以程序回执为准，最后一次验收后自动结束，不用 stop 清理。`, plan.completion ? completionText(plan.completion) : '', issue ? issue.message + '。' + issue.action : '', pending, waiting, paused,
         failures.length ? `失败原因：\n${failures.join('\n')}` : ''].filter(Boolean).join('\n')
     },
     hasPending: sessionId => { const plan = plans.get(sessionId); return Boolean(plan && !['accepted', 'cancelled'].includes(planStatus(plan))) },
@@ -1554,7 +1704,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       await pumping
       await Promise.allSettled([...noteWrites.values()])
       for (const dispose of disposers.reverse()) dispose?.()
-      live.clear(); expectedRoutes.clear(); permits.clear(); waitingParents.clear(); if (!recoveryFailed) await save()
+      live.clear(); expectedRoutes.clear(); permits.clear(); waitingParents.clear(); inboxes.clear(); if (!recoveryFailed) await save()
     },
   }
 }

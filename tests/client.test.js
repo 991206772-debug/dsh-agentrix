@@ -5,6 +5,96 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('the input dock shows worker activity before a turn tail or assistant actions exist and updates without a reply', async () => {
+  const now = Date.now(), request = { messageId: 'live-request', text: '调整工作台参数' }
+  const task = { id: 'parameters', title: '实现双接口与参数自动生成', status: 'running',
+    progress: { tool: 'read', at: now - 2000 }, supervision: { startedAt: now - 180000, lastActivityAt: now - 1000,
+      activity: { kind: 'tool', tool: 'edit', at: now - 1000 } } }
+  const body = { ok: true, sessionId: 'session-current', sessions: [{ sessionId: 'session-current', source: request }],
+    plans: [{ sessionId: 'session-current', protocolVersion: 2, source: request, status: 'running', tasks: [task] }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  // A running host turn has no turn-tail node. Only the persistent input dock is mounted.
+  const tail = f.mountDock('session-current')
+  try {
+    await tail.flush()
+    assert.match(tail.text(), /实现双接口与参数自动生成/)
+    assert.match(tail.text(), /当前.*修改文件/)
+    assert.match(tail.text(), /最近.*读取文件/)
+    assert.match(tail.text(), /已执行 3 分钟/)
+    assert.ok(!tail.nodes('section').some(node => node.props?.role === 'alert'))
+    task.supervision.activity = { kind: 'model', at: now }
+    task.progress = { tool: 'edit', at: now }
+    await tail.tick()
+    assert.match(tail.text(), /模型正在生成/)
+    assert.match(tail.text(), /最近.*修改文件/)
+    assert.doesNotMatch(tail.text(), /当前.*工具正在执行/)
+    task.progress.failed = true
+    await tail.tick()
+    assert.match(tail.text(), /最近.*修改文件.*该步骤失败/)
+    task.status = 'review'; body.plans[0].status = 'review'
+    task.execution = { status: 'DONE', summary: '实现已返回，等待实际验证' }
+    await tail.tick()
+    assert.match(tail.text(), /等待主控.*验证/)
+    assert.doesNotMatch(tail.text(), /当前.*模型正在生成/)
+    body.plans[0].completion = { id: 'done', outcome: 'completed', accepted: 1, total: 1, deliverables: [], evidence: [], remaining: [] }
+    await tail.tick()
+    assert.equal(tail.text(), '', 'the dock must not duplicate the final receipt')
+  } finally { tail.close(); f.close() }
+})
+
+test('a new request in the same session never inherits the previous task or its receipt in current surfaces', async () => {
+  const previous = { sessionId: 'session-current', protocolVersion: 2, status: 'accepted', goal: '交付可视化工作台',
+    source: { messageId: 'request-old', text: '开发调试页面' },
+    completion: { id: 'old-receipt', outcome: 'completed', accepted: 1, total: 1, deliverables: [], evidence: [], remaining: [] },
+    tasks: [{ id: 'old-ui', title: '开发工作台', status: 'accepted', complexity: 'routine', checks: [], criteria: [] }] }
+  const body = { ok: true, sessionId: 'session-current', plans: [previous], requestUsage: [{ sessionId: 'session-current', requestId: 'request-old', complete: true,
+    roles: [{ role: 'worker', model: 'previous-request-model', attempt: 1, requests: 1, responses: 1, outputTokens: 999 }] }], sessions: [{ sessionId: 'session-current',
+    source: { messageId: 'request-new', text: '检查密码服务代码实际调用的接口' }, route: { route: 'direct', reasons: [] } }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const view = f.mountView('session-current'), action = f.mountAction('session-current'), notice = f.mountNotice('session-current')
+  try {
+    await view.flush(); await action.flush(); await notice.flush()
+    const hero = view.nodes('section').find(node => node.props?.className === 'ddf-board-hero')
+    assert.match(JSON.stringify(hero), /检查密码服务代码实际调用的接口/)
+    assert.doesNotMatch(JSON.stringify(hero), /交付可视化工作台|已验收/)
+    assert.match(view.text(), /其他需求的托管记录/)
+    assert.match(view.text(), /交付可视化工作台/)
+    assert.equal(view.nodes('section').filter(node => node.props?.['data-task-list'] === '').length, 0)
+    assert.match(action.text(), /未启动子代理/)
+    assert.doesNotMatch(action.text(), /已验收|已完成/)
+    assert.equal(notice.text(), '')
+    assert.doesNotMatch(view.text(), /previous-request-model/)
+    body.plans = [{ sessionId: 'session-current', status: 'running', goal: '核查密码接口', source: body.sessions[0].source,
+      tasks: [{ id: 'new-api', title: '核查实际调用', status: 'running', complexity: 'routine' }] }]
+    await action.tick(); await view.tick(); await notice.tick()
+    assert.match(action.text(), /进行中 1/)
+    assert.match(view.text(), /核查实际调用/)
+    assert.doesNotMatch(view.text(), /交付可视化工作台/)
+  } finally { view.close(); action.close(); notice.close(); f.close() }
+})
+
+test('the confirmed plan takes precedence over an initial zero-score direct suggestion and tracks supplements', async () => {
+  const body = { ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current', status: 'running', goal: '开发可视化调试页面',
+    routing: { route: 'direct', reasons: ['scope_small'] }, inputs: [
+      { id: 'input-one', text: '交付人员需要操作引导', status: 'received' },
+      { id: 'input-two', text: '默认配置便于使用', status: 'forwarded', taskId: 'ui', resolution: '已同步执行者', additionalCriteria: ['提供默认配置'] },
+    ], tasks: [{ id: 'ui', title: '开发页面', status: 'running', complexity: 'complex', complexityReason: '重构页面并适配接口，需编译验证', dependsOn: [] }] }],
+    sessions: [{ sessionId: 'session-current', difficulty: { score: 0, level: 'simple', signals: [] }, route: { route: 'direct', reasons: ['scope_small'] } }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const view = f.mountView('session-current'), action = f.mountAction('session-current')
+  try {
+    await view.flush(); await action.flush()
+    const main = view.nodes('div').find(node => node.props?.className === 'ddf-board-decision-main')
+    assert.match(JSON.stringify(main), /主控已确认.*复杂.*重构页面/)
+    assert.match(JSON.stringify(main), /已安排子代理.*独立审查/)
+    assert.doesNotMatch(JSON.stringify(main), /评分|直接执行|系统建议/)
+    assert.match(view.text(), /初始规则判断.*评分 0.*直接执行/)
+    assert.match(view.text(), /补充信息.*待主控处理 1 条.*交付人员需要操作引导/)
+    assert.match(view.text(), /已同步至任务.*ui.*提供默认配置/)
+    assert.match(action.text(), /待处理补充 1 条/)
+  } finally { view.close(); action.close(); f.close() }
+})
+
 test('routing advice alone never claims delegation or completion', async () => {
   for (const route of ['direct', 'delegate_parallel']) {
     const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true,
@@ -17,6 +107,27 @@ test('routing advice alone never claims delegation or completion', async () => {
       assert.ok(!action.nodes('span').some(node => node.props?.['data-status'] === 'completed'))
     } finally { action.close(); f.close() }
   }
+})
+
+test('a coordinator quota problem shows the service recovery action without mislabeling returned work as failed', async () => {
+  const plan = { sessionId: 'session-current', status: 'blocked', goal: '核对已有交付物', coordinatorIssue: {
+    code: 'MODEL_SERVICE_QUOTA', model: 'main-model', message: '主控模型服务额度不足，已有报告保留', details: '429: exceed quota limit',
+    action: '恢复服务商额度或手动调整主控模型后明确继续验证验收，不要重开执行者',
+  }, tasks: [{ id: 'a', title: '原执行任务', status: 'review', complexity: 'routine', attempts: 5, report: '原执行报告', checks: [] }],
+    completion: { id: 'receipt', outcome: 'blocked', accepted: 0, total: 1, deliverables: [], evidence: [], remaining: [{ taskId: 'a', title: '原执行任务', status: 'review', reason: '尚未验收' }] } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true, sessionId: 'session-current', plans: [structuredClone(plan)], sessions: [], limits: { maxAttempts: 5 } }) }) })
+  const view = f.mountView('session-current'), notice = f.mountDock('session-current')
+  try {
+    await view.flush(); await notice.flush()
+    for (const text of [view.text(), notice.text()]) {
+      assert.match(text, /主控模型服务额度不足/)
+      assert.match(text, /恢复服务商额度.*明确继续验证验收/)
+      assert.doesNotMatch(text, /提高 maxAttempts|提高每任务执行/)
+    }
+    plan.completion = null
+    await notice.tick()
+    assert.match(notice.text(), /主控模型服务额度不足.*429/s)
+  } finally { view.close(); notice.close(); f.close() }
 })
 
 test('acceptance shows runtime policy and separate request usage even without a delegated plan', async () => {
@@ -41,7 +152,7 @@ test('an activity inquiry is shown as a reminder rather than mandatory correctio
     tasks: [{ id: 'a', title: '等待命令返回', status: 'running', dependsOn: [], outputs: [], writes: [], criteria: [], checks: [],
       supervision: { used: 0, limit: 2, startedAt: Date.now(), pending: { advisory: true, reason: '请核对命令是否仍在执行。' } } }] }], sessions: [] }
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => body }) })
-  const action = f.mountAction('session-current'), notice = f.mountNotice('session-current'), view = f.mountView('session-current')
+  const action = f.mountAction('session-current'), notice = f.mountDock('session-current'), view = f.mountView('session-current')
   try {
     await action.flush(); await notice.flush(); await view.flush()
     assert.match(action.text(), /需核对活动/)
@@ -100,12 +211,12 @@ test('Agentrix branding is consistent in plugin metadata, navigation and configu
   }
 })
 
-test('model configuration separates execution from review and saves role keys without changing the layout', async () => {
+test('model configuration only selects execution and shows automatic review without honoring obsolete choices', async () => {
   const f = await sidebarFixture({ status: 'ready', value: { groups: [{ id: 'demo', name: 'Demo', models: [
-    { id: 'low', name: '低模型' }, { id: 'high', name: '高模型' },
+    { id: 'low', name: '低模型' }, { id: 'other-low', name: '另一执行模型' },
   ] }], failures: [] } })
   await f.setConfig({ ...designConfig(), modelRouting: 'roles', models: {
-    worker: { provider: 'demo', model: 'low' }, reviewer: { provider: 'demo', model: 'high' },
+    worker: { provider: 'demo', model: 'low' }, reviewer: { provider: 'retired', model: 'obsolete-reviewer' },
   } })
   const panel = f.mountPanel()
   try {
@@ -113,19 +224,33 @@ test('model configuration separates execution from review and saves role keys wi
     assert.equal(panel.nodes('button').filter(node => node.props.role === 'tab').length, 4)
     const worker = panel.nodes('select').find(node => node.props.id === 'ddf-model-worker')
     const reviewer = panel.nodes('select').find(node => node.props.id === 'ddf-model-reviewer')
-    assert.ok(worker); assert.ok(reviewer)
+    assert.ok(worker); assert.equal(reviewer, undefined)
     assert.equal(worker.props.value, JSON.stringify(['demo', 'low']))
-    assert.equal(reviewer.props.value, JSON.stringify(['demo', 'high']))
+    assert.equal(panel.nodes('select').find(node => node.props.id === 'ddf-effort-reviewer'), undefined)
     assert.match(panel.text(), /主控.*对话框/)
-    assert.match(panel.text(), /执行模型/); assert.match(panel.text(), /审查模型/)
-    reviewer.props.onChange({ target: { value: '' } }); await panel.flush()
+    assert.match(panel.text(), /执行模型/); assert.match(panel.text(), /审查.*分发时.*主控模型/)
+    assert.doesNotMatch(panel.text(), /obsolete-reviewer|审查模型不可用/)
+    worker.props.onChange({ target: { value: JSON.stringify(['demo', 'other-low']) } }); await panel.flush()
     panel.button('保存').props.onClick(); await panel.flush()
-    assert.deepEqual(f.posted().at(-1).models, { worker: { provider: 'demo', model: 'low' }, reviewer: null })
+    assert.deepEqual(f.posted().at(-1).models, { worker: { provider: 'demo', model: 'other-low' }, reviewer: null })
+  } finally { panel.close(); f.close() }
+})
+
+test('a client with automatic review cannot save against a host that still honors separate review configuration', async () => {
+  const f = await sidebarFixture()
+  const config = designConfig(); delete config.reviewerModelPolicy
+  await f.setConfig(config)
+  const panel = f.mountPanel()
+  try {
+    await panel.flush()
+    assert.match(panel.text(), /尚未载入自动审查选模/)
+    assert.equal(panel.button('保存').props.disabled, true)
   } finally { panel.close(); f.close() }
 })
 
 test('task details display execution and review models separately from task complexity', async () => {
   const task = { id: 'a', title: '复杂接口实现', status: 'review', complexity: 'complex', criteria: [], checks: [],
+    dispatcherModel: { provider: 'demo', model: 'high-reviewer', reasoningEffort: 'high', source: 'dispatch', attempt: 1 },
     modelRoute: { role: 'worker', source: 'configured', requested: { provider: 'demo', model: 'low-worker' }, actual: { provider: 'demo', model: 'low-worker' } },
     audit: { status: 'completed', specVerdict: 'pass', qualityVerdict: 'pass', modelRoute: { role: 'reviewer', requested: { provider: 'demo', model: 'high-reviewer' }, actual: { provider: 'demo', model: 'high-reviewer' } } } }
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true, sessions: [],
@@ -136,6 +261,7 @@ test('task details display execution and review models separately from task comp
     assert.match(view.text(), /执行模型\s+low-worker/)
     assert.ok(view.nodes('strong').some(node => node.props?.title === 'demo / low-worker'))
     assert.match(view.text(), /审查模型：demo \/ high-reviewer/)
+    assert.match(view.text(), /审查沿用主控模型：demo \/ high-reviewer.*high/)
     assert.match(view.text(), /任务复杂度\s+复杂/)
   } finally { view.close(); f.close() }
 })
@@ -152,7 +278,7 @@ test('an older model-routing backend cannot overwrite role settings from the new
   } finally { panel.close(); f.close() }
 })
 
-test('a role-model conflict keeps the edited worker and the latest unedited reviewer', async () => {
+test('a model conflict keeps the edited worker while ignoring obsolete reviewer changes', async () => {
   const f = await sidebarFixture({ status: 'ready', value: { groups: [{ id: 'demo', name: 'Demo', models:
     ['worker-a', 'worker-b', 'review-a', 'review-b'].map(id => ({ id, name: id })) }], failures: [] } })
   const initial = { ...designConfig(), models: { worker: { provider: 'demo', model: 'worker-a' }, reviewer: { provider: 'demo', model: 'review-a' } } }
@@ -165,7 +291,7 @@ test('a role-model conflict keeps the edited worker and the latest unedited revi
     await f.setConfig({ ...initial, revision: 'revision-b', models: { ...initial.models, reviewer: { provider: 'demo', model: 'review-b' } } })
     await panel.flush(); panel.button('保留我的修改').props.onClick(); await panel.flush()
     await panel.button('保存').props.onClick(); await panel.flush()
-    assert.deepEqual(f.posted().at(-1).models, { worker: { provider: 'demo', model: 'worker-b' }, reviewer: { provider: 'demo', model: 'review-b' } })
+    assert.deepEqual(f.posted().at(-1).models, { worker: { provider: 'demo', model: 'worker-b' }, reviewer: null })
   } finally { panel.close(); f.close() }
 })
 
@@ -229,7 +355,7 @@ test('new plans without a final receipt show accepted counts rather than a compl
 test('legacy cancellation is displayed as stopped and unaccepted without inventing a receipt', async () => {
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
     plans: [{ sessionId: 'session-current', status: 'blocked', tasks: [{ id: 'a', title: '响应式布局', status: 'cancelled', error: null }] }], sessions: [] }) }) })
-  const action = f.mountAction('session-current'), notice = f.mountNotice('session-current')
+  const action = f.mountAction('session-current'), notice = f.mountDock('session-current')
   try {
     await action.flush(); await notice.flush()
     assert.match(action.text(), /已停止/)
@@ -409,6 +535,9 @@ async function sidebarFixture(initialCatalog = { status: 'ready', value: { group
       }
     },
     timerCount: () => timers.size,
+    mountDock(sessionId, session = { running: true }) {
+      return this.mountAction(sessionId, undefined, undefined, undefined, { dock: true, session })
+    },
     mountNotice(sessionId, seq = 2, useChat, openView) {
       return this.mountAction(sessionId, 'assistant-current', useChat ?? (selector => selector({ legacy: {
         nodes: [{ kind: 'assistant', seq, messageId: 'assistant-current' }],
@@ -433,7 +562,8 @@ async function sidebarFixture(initialCatalog = { status: 'ready', value: { group
       const render = () => {
         hookRunner = { state, ref, effect }
         position = 0; effectPosition = 0; refPosition = 0
-        const action = entries.get(notice ? 'conversation.chat.turnTail' : 'conversation.chat.assistant-actions')?.render(props)
+        const entry = entries.get(notice?.dock ? 'conversation.input.dock' : notice ? 'conversation.chat.turnTail' : 'conversation.chat.assistant-actions')
+        const action = entry?.render({ ...props, ...(notice?.dock ? entry.options.inject?.(props.sessionId) : {}) })
         tree = action?.type ? action.type(action.props) : action
       }
       render()
@@ -484,7 +614,7 @@ async function sidebarFixture(initialCatalog = { status: 'ready', value: { group
 const designConfig = () => ({ ok: true, mode: 'auto', threshold: 2, maxParallel: 2, maxAttempts: 2, maxActivations: 8, taskTimeoutMinutes: 15,
   revision: 'revision-a', defaults: { mode: 'auto', threshold: 2, maxParallel: 2, maxAttempts: 2, maxActivations: 8, taskTimeoutMinutes: 15 },
   ranges: { threshold: { min: 0, max: 20 }, maxParallel: { min: 1, max: 4 }, maxAttempts: { min: 1, max: 3 }, maxActivations: { min: 1, max: 32 }, taskTimeoutMinutes: { min: 1, max: 60 } },
-  source: { kind: 'file', profile: 'default', environmentValue: null }, modelRouting: 'roles', models: { worker: null, reviewer: null }, locked: false, file: 'C:/test/default.json' })
+  source: { kind: 'file', profile: 'default', environmentValue: null }, modelRouting: 'roles', reviewerModelPolicy: 'dispatcher-snapshot', models: { worker: null, reviewer: null }, locked: false, file: 'C:/test/default.json' })
 
 test('expanded defaults and server ranges work without replacing saved lower limits', async () => {
   const defaults = { maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120 }
@@ -635,19 +765,19 @@ test('an older host response is scoped locally without showing unrelated tasks o
   const view = f.mountView('session-current')
   try {
     await view.flush()
-    assert.match(view.text(), /本会话还没有托管任务/)
+    assert.match(view.text(), /本次需求未启动托管子代理/)
     assert.match(view.text(), /重新加载.*DSH Agentrix/)
     assert.doesNotMatch(view.text(), /读取失败|其他会话的私有需求|其他会话的档案提示/)
   } finally { view.close(); f.close() }
 })
 
-test('a stopped two-of-four plan explains the unfinished tasks below the reply without claiming a failure', async () => {
+test('a stopped two-of-four plan explains the unfinished tasks in the dock without claiming a failure', async () => {
   const body = { ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current', status: 'cancelled', cancelled: true,
     tasks: [{ id: 'a', title: '数据审查', status: 'accepted' }, { id: 'b', title: '认证审查', status: 'accepted' },
       { id: 'c', title: '技术栈核查', status: 'cancelled', error: '主控已停止任务' },
       { id: 'd', title: '汇总报告', status: 'cancelled', error: '主控已停止任务' }] }], sessions: [] }
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => body }) })
-  const action = f.mountAction('session-current'), notice = f.mountNotice('session-current')
+  const action = f.mountAction('session-current'), notice = f.mountDock('session-current')
   try {
     await action.flush(); await notice.flush()
     assert.match(action.text(), /部分完成，其余已停止.*已验收 2\/4/)
@@ -669,7 +799,7 @@ test('failure details identify the source failure while another child is still r
     { id: 'running', title: '仍在审查', status: 'running' },
   ] }], sessions: [] }
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => body }) })
-  const notice = f.mountNotice('session-current')
+  const notice = f.mountDock('session-current')
   try {
     await notice.flush()
     assert.match(notice.text(), /技术栈核查/)
@@ -691,7 +821,7 @@ test('model issues, recovered tasks and missing reasons use the recorded explana
     const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
       sessionId: 'session-current', plans: [{ sessionId: 'session-current', status: 'blocked',
         tasks: [{ id: 'a', title: '受影响任务', status: 'blocked', ...scenario.task }] }], sessions: [] }) }) })
-    const notice = f.mountNotice('session-current')
+    const notice = f.mountDock('session-current')
     try {
       await notice.flush()
       assert.match(notice.text(), scenario.reason)
@@ -701,39 +831,50 @@ test('model issues, recovered tasks and missing reasons use the recorded explana
   })
 })
 
-test('normal progress, dependency waiting and completed plans do not add an issue notice', async t => {
+test('healthy execution and waits show status cards while accepted legacy tasks add no issue notice', async t => {
   for (const status of ['running', 'planned', 'review', 'accepted']) await t.test(status, async () => {
     const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
       sessionId: 'session-current', plans: [{ sessionId: 'session-current', status,
-        dispatchWait: { message: '正在等待其他会话释放名额' }, tasks: [{ id: 'a', status: status === 'accepted' ? 'accepted' : 'queued' }] }], sessions: [] }) }) })
-    const notice = f.mountNotice('session-current')
-    try { await notice.flush(); assert.equal(notice.text(), '') } finally { notice.close(); f.close() }
+        dispatchWait: { message: '正在等待其他会话释放名额' }, tasks: [{ id: 'a', status: status === 'planned' ? 'queued' : status }] }], sessions: [] }) }) })
+    const notice = f.mountDock('session-current')
+    try {
+      await notice.flush()
+      assert.ok(!notice.nodes('section').some(node => node.props?.role === 'alert'))
+      if (status === 'accepted') assert.equal(notice.text(), '')
+      else {
+        assert.match(notice.text(), /协作进度/)
+        assert.ok(notice.nodes('section').some(node => node.props?.['data-kind'] === 'progress' && node.props.role === 'status'))
+        if (status === 'planned') assert.match(notice.text(), /等待其他会话释放名额/)
+        if (status === 'review') assert.match(notice.text(), /等待主控实际验证/)
+      }
+    } finally { notice.close(); f.close() }
   })
 })
 
-test('the progress button and issue notice share one request and timer until the last subscriber leaves', async () => {
+test('the dock, receipt and progress button share one request and timer until the last subscriber leaves', async () => {
   let calls = 0
   const f = await sidebarFixture(undefined, { fetchState: async () => {
     calls++
     return { ok: true, json: async () => ({ ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current',
       status: 'blocked', tasks: [{ id: 'a', title: '核查', status: 'failed', error: 'HTTP 500' }] }], sessions: [] }) }
   } })
-  const baseline = f.timerCount(), action = f.mountAction('session-current'), notice = f.mountNotice('session-current')
+  const baseline = f.timerCount(), action = f.mountAction('session-current'), notice = f.mountNotice('session-current'), dock = f.mountDock('session-current')
   try {
-    await action.flush(); await notice.flush()
+    await action.flush(); await notice.flush(); await dock.flush()
     assert.equal(calls, 1)
     assert.equal(f.timerCount(), baseline + 1)
     await action.tick(); await notice.flush()
     assert.equal(calls, 2)
     action.close()
-    await notice.tick()
-    assert.equal(calls, 3)
     notice.close()
+    await dock.tick()
+    assert.equal(calls, 3)
+    dock.close()
     assert.equal(f.timerCount(), baseline)
-  } finally { action.close(); notice.close(); f.close() }
+  } finally { action.close(); notice.close(); dock.close(); f.close() }
 })
 
-test('old turn tails do not show or subscribe to current issues on the native timeline', async () => {
+test('only the latest turn tail shows and subscribes to the current delivery receipt', async () => {
   let calls = 0
   const snapshot = { timeline: { turnOrder: [1, 2] }, locations: { getTurn: turn => [`tail-${turn}`] }, nodes: new Map([
     ['tail-1', { kind: 'turn-tail', data: { seq: 10, closing: { finalNode: { seq: 10, messageId: 'old' } } } }],
@@ -742,6 +883,8 @@ test('old turn tails do not show or subscribe to current issues on the native ti
   const f = await sidebarFixture(undefined, { fetchState: async () => {
     calls++; return { ok: true, json: async () => ({ ok: true, sessionId: 'session-current', plans: [{
       sessionId: 'session-current', status: 'blocked', tasks: [{ id: 'a', title: '当前任务', status: 'failed', error: '当前错误' }],
+      completion: { id: 'receipt', outcome: 'blocked', accepted: 0, total: 1, deliverables: [], evidence: [],
+        remaining: [{ taskId: 'a', title: '当前任务', reason: '当前错误' }] },
     }], sessions: [] }) }
   } })
   const old = f.mountNotice('session-current', 10, selector => selector(snapshot))
@@ -764,7 +907,7 @@ test('switching sessions clears prior issues and releasing all subscribers abort
     return { ok: true, json: async () => ({ ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current',
       status: 'blocked', tasks: [{ id: 'a', title: '旧任务', status: 'failed', error: '旧错误' }] }], sessions: [] }) }
   } })
-  const notice = f.mountNotice('session-current')
+  const notice = f.mountDock('session-current')
   try {
     await notice.flush()
     assert.match(notice.text(), /旧错误/)
@@ -787,11 +930,11 @@ test('a new turn refreshes a stopped snapshot and a failed refresh retains the r
     return { ok: true, json: async () => ({ ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current', status: phase,
       tasks: [{ id: 'a', title: '核查', status: phase === 'cancelled' ? 'cancelled' : 'failed', error: phase === 'cancelled' ? '主控已停止任务' : '真实执行错误' }] }], sessions: [] }) }
   } })
-  const notice = f.mountNotice('session-current')
+  const notice = f.mountDock('session-current', { running: false })
   try {
     await notice.flush(); assert.match(notice.text(), /已停止/)
     phase = 'blocked'
-    notice.update({ seq: 3, useChat: selector => selector({ legacy: { nodes: [{ kind: 'assistant', seq: 3 }] } }) })
+    notice.update({ session: { running: true } })
     await notice.flush(); assert.match(notice.text(), /真实执行错误/)
     phase = 'offline'; await notice.tick()
     assert.match(notice.text(), /真实执行错误/)
@@ -833,7 +976,7 @@ test('manual retry disables repeated requests and restores the normal view after
     assert.equal(calls, 2)
     finish({ ok: true, json: async () => ({ ok: true, sessionId: 'session-current', plans: [], sessions: [] }) })
     await view.flush()
-    assert.match(view.text(), /本会话还没有托管任务/)
+    assert.match(view.text(), /本次需求未启动托管子代理/)
     assert.doesNotMatch(view.text(), /暂时无法显示|Failed to fetch/)
     assert.ok(view.button('整理与导出'))
   } finally { view.close(); f.close() }
@@ -923,7 +1066,7 @@ test('loading and provider catalog failures do not become stale-model alerts', a
   } finally { f.close() }
 })
 
-test('judgment-first board exposes the current session assessment before tasks and separates the actual dependency order', async () => {
+test('the board exposes the confirmed plan before tasks and keeps initial assessment in diagnostics', async () => {
   const body = { ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current', status: 'running',
     goal: '按接口规范开发工具', routing: { route: 'delegate_parallel', reasons: ['multiple_files'] }, tasks: [
       { id: 'spec', title: '确定接口规范', status: 'running', complexity: 'routine' },
@@ -942,8 +1085,10 @@ test('judgment-first board exposes the current session assessment before tasks a
     const decisionIndex = sections.findIndex(node => node?.props?.className === 'ddf-board-decision')
     assert.ok(decisionIndex >= 0, 'judgment summary must be visible without expanding diagnostics')
     assert.ok(decisionIndex < sections.findIndex(node => node?.props?.['data-task-list'] === ''), 'judgment must precede task cards')
-    assert.match(view.text(), /本轮难度.*中等.*评分 3/)
-    assert.match(view.text(), /系统建议.*并行委派多个子 Agent/)
+    const main = view.nodes('div').find(node => node.props?.className === 'ddf-board-decision-main')
+    assert.match(JSON.stringify(main), /主控已确认.*复杂.*独立审查/)
+    assert.doesNotMatch(JSON.stringify(main), /评分 3|系统建议/)
+    assert.match(view.text(), /初始规则判断.*中等.*评分 3.*并行委派多个子 Agent/)
     assert.match(view.text(), /当前实际安排.*按任务依赖先后执行/)
     assert.match(view.text(), /本轮拦截.*0.*本次载入后累计 4 次/)
     assert.doesNotMatch(view.text(), /其他会话信号|评分 19/)
@@ -959,6 +1104,9 @@ test('judgment summary retains zero scores and never presents cumulative counter
   try {
     await view.flush()
     assert.match(view.text(), /评分 0/)
+    const main = view.nodes('div').find(node => node.props?.className === 'ddf-board-decision-main')
+    assert.match(JSON.stringify(main), /尚未确认/)
+    assert.doesNotMatch(JSON.stringify(main), /简单|评分 0/)
     const counters = view.nodes('div').filter(node => node.props?.className === 'ddf-board-decision-count')
     assert.equal(counters.length, 3)
     assert.ok(counters.every(node => node.children.flat(Infinity).some(child => child?.type === 'strong' && child.children.includes('未记录'))))
@@ -1179,7 +1327,7 @@ test('running supervision is visible in chat and task details with evidence, ela
       lastCorrection: { message: '先使用正确的对象参数。' } } }
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true, sessions: [],
     plans: [{ protocolVersion: 2, sessionId: 'session-current', goal: '验证过程监督', status: 'running', tasks: [task] }] }) }) })
-  const view = f.mountView('session-current'), action = f.mountAction('session-current'), notice = f.mountNotice('session-current')
+  const view = f.mountView('session-current'), action = f.mountAction('session-current'), notice = f.mountDock('session-current')
   try {
     await view.flush(); await action.flush(); await notice.flush()
     assert.match(view.text(), /已执行.*12.*分钟/)

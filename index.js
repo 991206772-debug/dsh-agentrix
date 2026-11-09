@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
-import { createOrchestrator, OPTION_RANGES, orchestrationOptions, validateModelRoute } from './orchestrator.js'
+import { createOrchestrator, OPTION_RANGES, orchestrationOptions, REVIEWER_MODEL_POLICY, validateModelRoute } from './orchestrator.js'
 
 export const inject = ['tools']
 
@@ -35,11 +35,12 @@ const MAX_BODY_BYTES = 64 * 1024
  */
 const DISCIPLINE = [
   "## DSH Agentrix：主控职责",
-  "自动模式的评分仅作建议。结合实际范围、风险和可并行工作判断：小任务直接完成并验证；执行工作较多时先定方案，再用 delegation_plan/run 委派；复杂任务增加独立审查。不要为几步操作建立完整委派流程。",
-  "主控使用聊天模型，执行者用配置的 worker，独立审查用 reviewer；不走原生派单绕过配置。托管计划中主控不重复实现，读取和准备可继续，实际验证用 delegation_verify，逐条引用证据调用 delegation_review 验收。",
-  "状态默认只读摘要，详情按 taskId 获取。普通任务不固定加审查；独立审查核对需求与代码，主控验证并最终验收。仅重要具体问题返工，minor 只记录，复查不扩大范围。",
-  "模型错配、真实重复失败需处理原因；次数、Token 和运行时间提醒不停止任务、不换代理。等待用事件，不轮询。短任务只交最终 delegation_report；长调查或阻塞再记 checkpoint。报告确认后自动结束、释放。",
-  "stop/cancel 仅用于取消，用户取消须传原因；沿用现有失败恢复约定。完成以程序回执为准，最后一次验收后自动结束，无需另写总结。详细参数和例子见 delegation-first 手册。"
+  "自动评分只作建议；主控按范围、风险和并行性分流：小任务直接完成并验证；执行工作多则先定方案再用 delegation_plan/run；复杂任务加独立审查。",
+  "主控定方案，worker执行；审查沿用派发时的主控模型，不走原生派单。托管任务中主控不重复实现；先用 delegation_verify 实际验证，再用 delegation_review 按证据逐条验收。",
+  "默认读摘要，详情指定 taskId。用户补充先答复；变更用 inputIds/additionalCriteria steer 原代理，纯答复用 acknowledge。审查核对需求与代码，主控验证验收；仅重要问题返工，minor 记录，复查不扩围。",
+  "开工、派发、阶段变化、等待或阻塞时，先向用户说清正在做什么和下一步；不能只在思考或工具里留过程，不为进度多调模型。",
+  "模型错配、重复故障先处理原因；次数、Token、时间只提醒，不停止、不换代理。等事件，不轮询。短任务交最终 report；长调查、阶段变化或阻塞才记 checkpoint。报告成功后自动释放。",
+  "stop 只取消且须传原因。完成以程序回执为准；最后验收后自动结束，无需总结。详见 delegation-first 手册。",
 ].join('\n')
 
 // ---------------------------------------------------------------------------
@@ -841,6 +842,7 @@ export function apply(ctx) {
   const configPayload = () => ({
     ok: true,
     modelRouting: 'roles',
+    reviewerModelPolicy: REVIEWER_MODEL_POLICY,
     mode: current.mode,
     threshold: current.threshold,
     locked: pinned,
@@ -882,6 +884,7 @@ export function apply(ctx) {
       limits: orchestrationOptions(current),
       supervisionPolicy: orchestration.supervisionPolicy,
       runtimePolicyVersion: 2,
+      reviewerModelPolicy: REVIEWER_MODEL_POLICY,
       requestUsage: orchestration.requestUsages(selectedId),
       // No execution here, so this is the global view only — a status probe, not
       // the gate's own decision.
@@ -1033,7 +1036,7 @@ export function apply(ctx) {
     }
     if (verdict.stored.mode !== 'off') {
       try {
-        for (const tier of ['worker', 'reviewer']) {
+        for (const tier of ['worker']) {
           const route = verdict.stored.models[tier]
           if (route) await validateModelRoute(ctx.get('llm'), route, tier)
         }
@@ -1260,7 +1263,7 @@ export function apply(ctx) {
             if (!current.enabled) return ''
             const summary = orchestration.summary(agentId)
             const route = states.get(agentId)?.route
-            return [DISCIPLINE, difficulty ? difficultyLine(difficulty) : '', route ? routingLine(route) : '', summary].filter(Boolean).join('\n\n')
+            return [DISCIPLINE, !summary && difficulty ? difficultyLine(difficulty) : '', !summary && route ? routingLine(route) : '', summary].filter(Boolean).join('\n\n')
           } catch {
             return DISCIPLINE
           }

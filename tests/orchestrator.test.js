@@ -18,6 +18,107 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('review uses the dispatching coordinator snapshot across model changes and reload instead of saved review overrides', async () => {
+  const f = await fixture({ models: { worker: { provider: 'local', model: 'cheap' }, reviewer: { provider: 'retired', model: 'obsolete-reviewer' } } })
+  let main = { provider: 'local', model: 'dispatcher-high', reasoningEffort: 'high' }
+  f.parent.session.requestHeader = () => ({ config: main })
+  await f.plan([card('a', { complexity: 'complex' })]); await f.execute('delegation_run')
+  const dispatcher = f.snapshot().tasks[0].dispatcherModel
+  assert.equal(dispatcher.model, 'dispatcher-high')
+  assert.equal(dispatcher.reasoningEffort, 'high')
+  assert.equal(dispatcher.attempt, 1)
+  assert.equal(JSON.parse(await readFile(f.file, 'utf8')).plans[0].tasks[0].dispatcherModel.model, 'dispatcher-high')
+  main = { provider: 'local', model: 'later-selector', reasoningEffort: 'low' }
+  f.config.enabled = false
+  await f.report(0, { status: 'DONE', summary: '执行已返回', report: '等待原分发者模型审查' })
+  f.pending[0].resolve({ stopReason: 'completed', output: [] })
+  await waitFor(() => f.snapshot().tasks[0].status === 'review')
+  await f.reload()
+  f.config.enabled = true
+  await f.execute('delegation_audit', { taskId: 'a' })
+  const audit = f.snapshot().tasks[0].audit
+  assert.deepEqual(f.calls[1].request.agentOptions, { provider: 'local', model: 'dispatcher-high', reasoningEffort: 'high' })
+  assert.equal(audit.modelRoute.source, 'dispatcher')
+  let sent = 0
+  f.emit('llm/stream', { sessionId: audit.childId, provider: 'local', model: 'dispatcher-high', reasoningEffort: 'high' }, () => { sent++ })
+  assert.throws(() => f.emit('llm/stream', { sessionId: audit.childId, provider: 'local', model: 'later-selector', reasoningEffort: 'low' }, () => { sent++ }), /模型请求与任务配置不一致/)
+  assert.equal(sent, 1)
+  assert.equal(f.snapshot().tasks[0].dispatcherModel.model, 'dispatcher-high')
+})
+
+test('review retries keep the original dispatcher and a new worker attempt captures the new coordinator', async () => {
+  const f = await fixture()
+  f.parent.options = { provider: 'local', model: 'first-coordinator', reasoningEffort: 'high' }
+  await f.plan([card('a', { complexity: 'complex' })]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  f.pending[1].reject(new Error('审查服务暂时失败'))
+  await waitFor(() => f.snapshot().tasks[0].audit.status === 'failed')
+  f.parent.options = { provider: 'local', model: 'second-coordinator', reasoningEffort: 'low' }
+  await f.execute('delegation_audit', { taskId: 'a', message: '原服务已恢复，重试审查' })
+  assert.equal(f.calls[2].request.agentOptions.model, 'first-coordinator')
+  assert.equal(f.calls[2].request.agentOptions.reasoningEffort, 'high')
+  await f.finishAudit(2, { specVerdict: 'pass', qualityVerdict: 'pass', issues: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'rework', issues: [
+    { criterion: 0, severity: 'important', finding: '交付缺少约定内容', evidence: [proof.callId] },
+  ] })
+  assert.equal(f.snapshot().tasks[0].dispatcherModel.model, 'second-coordinator')
+  assert.equal(f.snapshot().tasks[0].dispatcherModel.attempt, 2)
+  await f.complete(3, { stopReason: 'completed', output: [] })
+  assert.equal(f.calls[4].request.agentOptions.model, 'second-coordinator')
+  assert.equal(f.calls[4].request.agentOptions.reasoningEffort, 'low')
+  const events = await readFile(path.join(f.snapshot().archive.directory, 'events.jsonl'), 'utf8')
+  assert.ok(events.includes('first-coordinator') && events.includes('second-coordinator'))
+})
+
+test('legacy returned work records a review-time fallback without rewriting its historical model route', async () => {
+  const f = await fixture(); await f.plan([card('legacy')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  await f.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    delete stored.plans[0].tasks[0].dispatcherModel
+    await writeFile(file, JSON.stringify(stored))
+  })
+  const workerRoute = f.snapshot().tasks[0].modelRoute
+  f.parent.options = { provider: 'local', model: 'legacy-review-coordinator' }
+  await f.execute('delegation_audit', { taskId: 'legacy' })
+  assert.deepEqual(f.snapshot().tasks[0].modelRoute, workerRoute)
+  assert.equal(f.snapshot().tasks[0].dispatcherModel.source, 'legacy-review')
+  assert.equal(f.calls[1].request.agentOptions.model, 'legacy-review-coordinator')
+  const saved = await f.engine.readArchive(f.snapshot().archive.id)
+  assert.match(saved.markdown, /旧任务缺少分发快照.*首次审查/s)
+})
+
+test('queued tasks capture the coordinator when actually dispatched rather than when the plan was created', async () => {
+  const f = await fixture({ maxParallel: 1 })
+  f.parent.options.model = 'first-coordinator'
+  await f.plan([card('a'), card('b')]); await f.execute('delegation_run')
+  assert.equal(f.snapshot().tasks[1].dispatcherModel, undefined)
+  f.parent.options.model = 'next-coordinator'
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  await waitFor(() => f.snapshot().tasks[1].status === 'running')
+  assert.equal(f.snapshot().tasks[0].dispatcherModel.model, 'first-coordinator')
+  assert.equal(f.snapshot().tasks[1].dispatcherModel.model, 'next-coordinator')
+})
+
+test('a completed plan remains archived but is not injected as the current plan for a new request', async () => {
+  const options = { source: { messageId: 'request-old', text: '完成第一项交付' } }
+  const f = await fixture(options); await f.plan([card('old-delivery')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'old-delivery', checkIndex: 0 })
+  await f.execute('delegation_review', { taskId: 'old-delivery', verdict: 'accept', findings: [{ criterion: 0, finding: '实际验证完成', evidence: [proof.callId] }] })
+  const old = f.snapshot()
+  assert.match(f.engine.summary('parent'), /old-delivery/)
+  options.source = { messageId: 'request-new', text: '检查另一项代码调用' }
+  assert.equal(f.engine.summary('parent'), '')
+  assert.deepEqual(f.snapshot(), old, 'request selection must not rewrite the old result')
+  assert.equal(f.engine.hasPending('parent'), false)
+  const archive = await f.engine.readArchive(old.archive.id)
+  assert.equal(archive.plan.completion.id, old.completion.id)
+  assert.equal(archive.plan.source.messageId, 'request-old')
+  assert.equal(f.pending.length, 1)
+})
+
 test('request and elapsed reminders keep the same worker running without waking the coordinator', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
   const f = await fixture({ taskTimeoutMinutes: 1 })
@@ -67,7 +168,7 @@ test('request usage includes preparation, both child roles and retries, deduplic
   message(child, 2, { inputTokens: 300, cacheReadTokens: 400, outputTokens: 20 })
   await f.complete(0, { stopReason: 'completed', output: [] })
   const audit = f.children[1]
-  f.emit('llm/stream', { sessionId: audit.id, provider: 'local', model: 'deep' }, () => {})
+  f.emit('llm/stream', { sessionId: audit.id, provider: 'local', model: 'parent' }, () => {})
   message(audit, 3, { inputTokens: 500, outputTokens: 30 })
   await f.finishAudit(1, { specVerdict: 'pass', qualityVerdict: 'pass', issues: [] })
   const usage = f.snapshot().usage
@@ -152,7 +253,7 @@ test('default execution limits dispatch four tasks and retain the expanded plan 
   }
 })
 
-test('execution models depend on role rather than task complexity and both audit paths use the reviewer', async () => {
+test('execution ignores complexity and both independent audit paths use the dispatching coordinator', async () => {
   const f = await fixture({ autoConclude: true, models: {
     worker: { provider: 'local', model: 'low-worker' }, reviewer: { provider: 'local', model: 'high-reviewer' },
   } })
@@ -162,19 +263,19 @@ test('execution models depend on role rather than task complexity and both audit
   assert.deepEqual(f.snapshot().tasks.map(task => task.modelRoute.role), ['worker', 'worker'])
   await f.report(1, { status: 'DONE', summary: '复杂任务已按方案执行', report: '交付物等待高模型核对' })
   await waitFor(() => f.calls.length === 3)
-  assert.equal(f.calls[2].request.agentOptions.model, 'high-reviewer')
+  assert.equal(f.calls[2].request.agentOptions.model, 'parent')
   assert.equal(f.snapshot().tasks[1].audit.modelRoute.role, 'reviewer')
   await f.report(0, { status: 'DONE', summary: '普通任务已执行', report: '交付物等待核对' })
   await waitFor(() => f.snapshot().tasks[0].status === 'review')
   await f.execute('delegation_audit', { taskId: 'routine' })
-  assert.equal(f.calls[3].request.agentOptions.model, 'high-reviewer')
+  assert.equal(f.calls[3].request.agentOptions.model, 'parent')
   assert.equal(f.parent.options.model, 'parent')
   const saved = await f.engine.readArchive(f.snapshot().archive.id)
   assert.match(saved.markdown, /模型角色：执行模型/)
-  assert.match(saved.markdown, /审查模型：local \/ high-reviewer/)
+  assert.match(saved.markdown, /审查模型：local \/ parent/)
 })
 
-test('an unset worker never inherits the coordinator and an explicitly inherited reviewer uses its launch snapshot', async () => {
+test('an unset worker never inherits the coordinator and review uses the saved dispatcher route', async () => {
   const f = await fixture({ autoConclude: true, models: { worker: null, reviewer: null } })
   await f.plan([card('a', { complexity: 'complex' })])
   await assert.rejects(f.execute('delegation_run'), /执行模型尚未配置/)
@@ -188,7 +289,7 @@ test('an unset worker never inherits the coordinator and an explicitly inherited
   await waitFor(() => f.calls.length === 2)
   assert.equal(f.calls[0].request.agentOptions.model, 'low-worker')
   assert.equal(f.calls[1].request.agentOptions.model, 'parent')
-  assert.equal(f.snapshot().tasks[0].audit.modelRoute.source, 'inherited')
+  assert.equal(f.snapshot().tasks[0].audit.modelRoute.source, 'dispatcher')
   f.parent.options.model = 'changed-parent'
   let sent = 0
   const childId = f.snapshot().tasks[0].audit.childId
@@ -197,8 +298,9 @@ test('an unset worker never inherits the coordinator and an explicitly inherited
   assert.equal(f.snapshot().tasks[0].audit.modelRoute.actual.model, 'parent')
 })
 
-test('an unavailable review model blocks complex work before spending a worker activation', async () => {
+test('an unavailable dispatcher service blocks complex work before spending a worker activation', async () => {
   const f = await fixture({ models: { worker: { provider: 'local', model: 'low-worker' }, reviewer: { provider: 'retired', model: 'high-reviewer' } } })
+  f.parent.options = { provider: 'retired', model: 'dispatcher-model' }
   await f.plan([card('a', { complexity: 'complex' })])
   await assert.rejects(f.execute('delegation_run'), /审查模型/)
   assert.equal(f.calls.length, 0)
@@ -494,7 +596,7 @@ test('complex tasks require one independent read-only reviewer with shared budge
   assert.equal(f.snapshot().activationBudget.used, 2)
   const audit = f.snapshot().tasks[0].audit
   assert.equal(audit.status, 'running')
-  assert.equal(audit.modelRoute.resolved.model, 'deep')
+  assert.equal(audit.modelRoute.resolved.model, 'parent')
   assert.notEqual(audit.childId, f.snapshot().tasks[0].childId)
   assert.match(f.calls[1].request.prompt[0].text, /需求.*质量/)
   assert.match(f.calls[1].request.prompt[0].text, /独立|只读/)
@@ -595,7 +697,7 @@ test('reviewers cannot escape the activation budget or first-request model guard
   assert.match(limited.snapshot().tasks[0].audit.error, /预算/)
   let dispatches = 0
   const f = await fixture({ maxParallel: 1, onStart(spec) {
-    if (spec.label.startsWith('独立审查')) f.emit('llm/stream', { sessionId: spec.childId, provider: 'local', model: 'parent' }, () => { dispatches++ })
+    if (spec.label.startsWith('独立审查')) f.emit('llm/stream', { sessionId: spec.childId, provider: 'local', model: 'cheap' }, () => { dispatches++ })
   } })
   await f.plan([card('a', { complexity: 'complex' })]); await f.execute('delegation_run')
   await f.complete(0, { stopReason: 'completed', output: [] })
@@ -1143,6 +1245,51 @@ test('native child errors retain the actual provider failure in state, summary a
   assert.equal(f.calls[0].request.agentOptions.model, 'cheap')
 })
 
+test('a coordinator quota error preserves returned work and requires service recovery rather than automatic redispatch', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [{ type: 'text', text: '已保存的交付结果' }] })
+  await f.emit('session/event', f.parent, { type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'QUOTA', message: '429: exceed quota limit' } } } })
+  const stopped = f.snapshot()
+  assert.equal(stopped.coordinatorIssue.code, 'MODEL_SERVICE_QUOTA')
+  assert.equal(stopped.coordinatorIssue.model, 'parent')
+  assert.equal(stopped.tasks[0].status, 'review')
+  assert.match(stopped.tasks[0].report, /已保存的交付结果/)
+  assert.equal(stopped.completion.outcome, 'blocked')
+  const cancel = await f.execute('delegation_cancel')
+  assert.equal(cancel.status, 'blocked')
+  assert.equal(f.snapshot().cancelled, false)
+  assert.equal(f.pending.length, 1)
+  assert.match(f.engine.summary('parent'), /额度不足.*恢复/s)
+  await f.reload()
+  assert.equal(f.snapshot().coordinatorIssue.details, '429: exceed quota limit')
+  f.emit('session/event', f.parent, { type: 'assistant/message', seq: 51, data: { usage: { outputTokens: 1 } } })
+  assert.ok(f.snapshot().coordinatorIssue.resolvedAt)
+  assert.equal(f.snapshot().completion, null)
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '恢复后核对原交付物', evidence: [proof.callId] }] })
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+  assert.equal(f.pending.length, 1)
+})
+
+test('native child rate limits cannot be retried by an unexplained cancel but allow explicit recovery', async () => {
+  const f = await fixture({ maxParallel: 1 }); await f.plan([card('a'), card('b')]); await f.execute('delegation_run')
+  f.emit('session/event', f.children[0], { type: 'turn/end', data: { reason: { kind: 'error', error: { code: 'RATE_LIMIT', message: 'HTTP 429 Too Many Requests' } } } })
+  f.pending[0].resolve({ stopReason: 'error', output: [] })
+  await waitFor(() => !['starting', 'running'].includes(f.snapshot().tasks[0].status))
+  assert.equal(f.snapshot().tasks[0].issue.code, 'MODEL_SERVICE_RATE_LIMIT')
+  assert.match(f.snapshot().tasks[0].error, /HTTP 429/)
+  const result = await f.execute('delegation_cancel')
+  assert.equal(result.status, 'blocked')
+  assert.equal(f.snapshot().cancelled, false)
+  assert.equal(f.pending.length, 1)
+  await f.execute('delegation_run')
+  assert.equal(f.pending.length, 1)
+  await f.execute('delegation_control', { taskId: 'a', action: 'retry', message: '已等待服务商解除限流，明确重试' })
+  assert.equal(f.pending.length, 2)
+  assert.equal(f.snapshot().tasks[0].attempts, 2)
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+})
+
 test('a child failure pauses queued dispatch until each task is explicitly retried', async () => {
   const f = await fixture({ maxParallel: 1 })
   await f.plan([card('a'), card('b')])
@@ -1338,6 +1485,99 @@ test('repeated child errors wake the waiting original coordinator without reopen
   assert.equal(f.snapshot().tasks[0].supervision.pending, null)
 })
 
+test('a human supplement wakes the waiting coordinator and survives retargeting without replacing the worker', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const stopping = f.endTurn(); await tick()
+  const message = { id: 'supplement-1', source: { kind: 'user' }, content: [{ type: 'text', text: '交付人员不懂技术，需要操作引导。' }] }
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, inserted: [message] } })
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' } })
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', start: 0, inserted: [message] } })
+  const woke = await Promise.race([stopping.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 100))])
+  assert.equal(woke, true, 'queued human input must release the stopping hook before the child finishes')
+  assert.equal(f.snapshot().inputs.length, 1)
+  assert.equal(f.snapshot().inputs[0].status, 'queued')
+  assert.equal(f.snapshot().recovery.used, 0)
+  assert.equal(f.pending.length, 1)
+  assert.equal(f.pending[0].receipt.disposed, undefined)
+  assert.equal(f.parent.injected.length, 0, 'the original queued message is consumed by the host, not injected twice')
+})
+
+test('supplements are explicitly forwarded with acceptance criteria or acknowledged before acceptance', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const message = { id: 'new-requirement', source: { kind: 'user' }, content: [{ type: 'text', text: '操作人员不懂技术，请提供引导。' }] }
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', inserted: [message] } })
+  f.emit('session/event', f.parent, { type: 'user/message', data: message })
+  await assert.rejects(f.execute('delegation_control', { taskId: 'a', action: 'steer', message: '完善交付体验', inputIds: [message.id] }), /验收标准|additionalCriteria/)
+  await f.execute('delegation_control', { taskId: 'a', action: 'steer', message: '增加面向交付人员的操作引导',
+    inputIds: [message.id], additionalCriteria: ['页面提供无需技术背景的操作引导'] })
+  assert.equal(f.calls[1][1], f.children[0].id)
+  assert.match(f.calls[1][2][0].text, /操作人员不懂技术/)
+  assert.equal(f.snapshot().inputs[0].status, 'forwarded')
+  assert.equal(f.snapshot().tasks[0].criteria.length, 2)
+  assert.equal(f.pending.length, 1)
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  const question = { ...message, id: 'progress-question', content: [{ type: 'text', text: '进度怎么样？' }] }
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', inserted: [question] } })
+  const accept = () => f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [0, 1].map(criterion => ({ criterion, finding: '按本次要求实际核对通过', evidence: [proof.callId] })) })
+  await assert.rejects(accept(), /补充|消息/)
+  await f.execute('delegation_control', { action: 'acknowledge', inputIds: [question.id], message: '本条为进度询问，已说明当前验收进展，不改变交付要求。' })
+  await accept()
+  assert.equal(f.snapshot().status, 'accepted')
+})
+
+test('a supplement arriving during acceptance defers the receipt and reaches bounded rework after reload', async () => {
+  const message = { id: 'delivery-guidance', source: { kind: 'user' }, content: [{ type: 'text', text: '交付操作员不懂技术，需要页面引导。' }] }
+  let inserted = false
+  const f = await fixture({ beforeResult(exec) {
+    if (exec.name === 'delegation_review' && !inserted) {
+      inserted = true
+      f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', inserted: [message] } })
+    }
+  } })
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '原标准已验证', evidence: [proof.callId] }] })
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+  assert.equal(f.snapshot().completion, null)
+  assert.equal(f.snapshot().tasks[0].pendingAcceptance, undefined)
+  await f.reload()
+  assert.equal(f.snapshot().inputs[0].text, message.content[0].text)
+  assert.match(f.engine.summary('parent'), /delivery-guidance.*交付操作员/)
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'rework', inputIds: [message.id],
+    additionalCriteria: ['页面提供面向操作员的引导'], feedback: '落实新增交付要求' })
+  await f.execute('delegation_run')
+  const task = f.snapshot().tasks[0]
+  assert.equal(task.attempts, 2)
+  assert.equal(task.checks[0].result, null)
+  assert.equal(task.evidence.length, 0)
+  assert.equal(f.pending.length, 2)
+  assert.match(JSON.stringify(f.calls.filter(call => !Array.isArray(call)).at(-1)), /交付操作员不懂技术/)
+  const saved = await f.engine.readArchive(f.snapshot().archive.id)
+  assert.match(saved.markdown, /用户补充.*delivery-guidance/s)
+  assert.match(saved.markdown, /新增验收标准.*页面提供面向操作员的引导/s)
+})
+
+test('withdrawn input does not prevent acceptance and cancellation ignores later supplements', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const message = { id: 'withdrawn-input', source: { kind: 'user' }, content: [{ type: 'text', text: '暂时不要增加此功能' }] }
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', start: 0, inserted: [message] } })
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' } })
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '已验证', evidence: [proof.callId] }] })
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+  const cancelled = await fixture(); await cancelled.plan([card('b')]); await cancelled.execute('delegation_run')
+  const stopping = cancelled.endTurn(); await tick()
+  await cancelled.execute('delegation_cancel', { reason: '用户明确取消' }); await stopping
+  cancelled.emit('session/event', cancelled.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', inserted: [message] } })
+  assert.equal(cancelled.snapshot().inputs, undefined)
+  assert.equal(cancelled.pending.length, 1)
+  assert.equal(cancelled.pending[0].receipt.disposeCount, 1)
+  assert.equal(cancelled.parent.injected.length, 0)
+})
+
 test('stage checkpoints keep current-task evidence and unfinished work without claiming acceptance or extending the deadline', async () => {
   const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
   const deadline = f.snapshot().tasks[0].supervision.deadlineAt
@@ -1466,6 +1706,19 @@ test('an unspecified reasoning effort accepts only the native recorded default a
   await explicit.plan([card('b')]); await explicit.execute('delegation_run')
   explicit.children[0].session.requestHeader = child.session.requestHeader
   assert.throws(() => explicit.emit('llm/stream', { ...request, sessionId: explicit.children[0].id }, () => { sent++ }), /模型请求与任务配置不一致/)
+  assert.equal(sent, 1)
+})
+
+test('a native default recorded without adapterDefaults does not block the first reviewer request', async () => {
+  const f = await fixture(); await f.plan([card('a', { complexity: 'complex' })]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const child = f.children[1]
+  child.session.requestHeader = () => ({ config: { provider: 'local', model: 'parent', reasoningEffort: 'max' }, tools: [] })
+  let sent = 0
+  f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'parent', reasoningEffort: 'max' }, () => { sent++ })
+  assert.equal(sent, 1)
+  assert.equal(f.snapshot().tasks[0].audit.modelRoute.defaultSource, 'native-request-header')
+  assert.throws(() => f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'wrong', reasoningEffort: 'max' }, () => { sent++ }), /模型请求与任务配置不一致/)
   assert.equal(sent, 1)
 })
 

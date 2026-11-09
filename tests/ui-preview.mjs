@@ -8,8 +8,10 @@ const assetDirectory = process.argv[2]
 if (!assetDirectory) throw new Error('Provide a directory containing react.js and react-dom.js')
 const invalid = process.argv.includes('--invalid')
 const loadError = process.argv.includes('--load-error')
-let config = { ok: true, modelRouting: 'roles', mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS, locked: false,
-  models: { worker: { provider: invalid ? 'retired-demo' : 'demo', model: 'routine-model' }, reviewer: { provider: 'demo', model: 'design-model' } }, file: 'C:/isolated-test/delegation-first/default.json',
+const nextRequest = process.argv.includes('--next-request')
+const liveProgress = process.argv.includes('--live-progress')
+let config = { ok: true, modelRouting: 'roles', reviewerModelPolicy: 'dispatcher-snapshot', mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS, locked: false,
+  models: { worker: { provider: invalid ? 'retired-demo' : 'demo', model: 'routine-model' }, reviewer: null }, file: 'C:/isolated-test/delegation-first/default.json',
   defaults: { mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS }, ranges: { threshold: { min: 0, max: 20 }, ...OPTION_RANGES },
   revision: 'preview-1', updatedAt: Date.now(), source: { kind: 'file', profile: 'default', environmentValue: null } }
 let configRevision = 1
@@ -41,6 +43,35 @@ const plans = [{ sessionId: 'session-demo-login', sessionTitle: '登录失败问
   source: { messageId: 'request-research', text: '整理接口调研结论并导出' }, goal: '接口调研总结', status: 'accepted',
   tasks: [{ ...accepted, title: '核对调研结论' }],
 }]
+if (nextRequest) {
+  Object.assign(plans[0], { protocolVersion: 2, status: 'accepted', goal: '交付可视化调试工作台',
+    source: { messageId: 'request-old', text: '开发便于交付人员操作的调试页面' }, tasks: [accepted] })
+  plans[0].completion = buildCompletion(plans[0])
+}
+if (liveProgress) {
+  const now = Date.now()
+  Object.assign(plans[0], { protocolVersion: 2, status: 'running', goal: '调整双接口并自动生成参数',
+    source: { messageId: 'live-request', text: '工作台保留两个接口，参数自动生成，固定参数改为配置项' },
+    tasks: [{ ...baseTask, id: 'parameters', title: '实现双接口、自动参数与固定配置', status: 'running', report: '',
+      progress: { tool: 'read', at: now - 4000 }, supervision: { startedAt: now - 13 * 60000, lastActivityAt: now,
+        activity: { kind: 'tool', tool: 'edit', at: now } } }],
+  })
+}
+if (process.argv.includes('--supplement')) {
+  Object.assign(plans[0], { protocolVersion: 2, status: 'running', goal: '开发面向交付人员的可视化调试页面',
+    routing: { route: 'direct', reasons: ['scope_small'] },
+    inputs: [{ id: 'demo-input-1', text: '交付人员不懂技术，请提供操作引导。', status: 'received', at: Date.now() },
+      { id: 'demo-input-2', text: '默认配置要便于使用。', status: 'forwarded', taskId: 'ui', resolution: '已同步给原执行者，不新建代理。', additionalCriteria: ['提供可直接使用的默认配置'], at: Date.now() }],
+    tasks: [{ ...baseTask, id: 'ui', title: '开发可视化调试页面', status: 'running', complexity: 'complex',
+      complexityReason: '重构页面并适配接口，需要编译和启动验证', checks: [], report: '', progress: { tool: 'read', at: Date.now() } }],
+  })
+}
+if (process.argv.includes('--coordinator-quota')) {
+  plans[0].coordinatorIssue = { code: 'MODEL_SERVICE_QUOTA', role: 'coordinator', message: '主控模型服务额度不足；已保留执行报告与验证证据',
+    details: '429: exceed quota limit（隔离测试）', action: '恢复服务商额度，或手动调整主控模型后明确继续验证验收；不会自动重开执行者。' }
+  plans[0].status = 'blocked'
+  plans[0].completion = buildCompletion(plans[0], plans[0].coordinatorIssue.message)
+}
 if (invalid) {
   plans[0].status = 'blocked'
   Object.assign(plans[0].tasks[1], { status: 'blocked', attempts: 0, childId: null, report: '',
@@ -76,24 +107,31 @@ window.__ModuleLoader__ = {load({factory}) {
   const root = ReactDOM.createRoot(document.getElementById('root'));
   const navRoot = ReactDOM.createRoot(document.getElementById('sidebar'));
   const overlayRoot = ReactDOM.createRoot(document.getElementById('overlay'));
-  const entries = new Map(); let dictionaries, selected='session-demo-login', panel=${process.argv.includes('--config') ? "'dsh-delegation-first'" : 'null'}, activeView='delegation-acceptance', pending='';
+  const entries = new Map(); let dictionaries, selected='session-demo-login', panel=${process.argv.includes('--config') ? "'dsh-delegation-first'" : 'null'}, activeView='${liveProgress ? 'chat' : 'delegation-acceptance'}', pending='';
   const drafts = new Map();
   const state = {status:'ready', value:${JSON.stringify(catalog)}, error:null};
   const listeners = new Set();
   const directory = {store:{getSnapshot:()=>state, subscribe:fn=>{listeners.add(fn);return ()=>listeners.delete(fn)}},
     load:async()=>state.value, refresh(){for(const fn of listeners)fn();}};
   const openView = id => { activeView=id; renderView(); };
+  function LiveChat() {
+    return React.createElement('div',{className:'preview-other-view','data-fixture-view':'chat'},
+      React.createElement('p',null,'工作台保留两个接口，参数自动生成，固定参数改为配置项'),
+      React.createElement('p',null,'主控正在核对当前方案与执行结果。'));
+  }
   function Composer() {
+    const dock=entries.get('conversation.input.dock');
     return React.createElement('div', {'data-composer-seat':'', 'data-conversation-region':'composer', className:'preview-composer'},
       pending ? React.createElement('section', {['data-'+pending+'-key']:'fixture', role:'status'}, '隔离交互：'+pending,
         React.createElement('button', {type:'button', onClick:()=>{pending='';renderView()}}, '结束测试交互')) : React.createElement(React.Fragment,null,
+        ${liveProgress ? "dock?React.createElement(dock.component,{...dock.options.inject(selected),session:{running:true}}):null," : ''}
         React.createElement('div', {className:'preview-task-dock'}, '任务 · 1 进行中 · 4 待处理'),
         React.createElement('textarea', {key:selected, 'aria-label':'测试聊天草稿', placeholder:'发消息或创建任务',
           defaultValue:drafts.get(selected)||'', onChange:event=>drafts.set(selected,event.target.value)})));
   }
   function ConversationShell() {
     const acceptance = entries.get('conversation.view');
-    const content = activeView==='delegation-acceptance' ? React.createElement(acceptance.component,{sessionId:selected,openView})
+    const content = ${liveProgress} && activeView==='chat' ? React.createElement(LiveChat) : activeView==='delegation-acceptance' ? React.createElement(acceptance.component,{sessionId:selected,openView})
       : React.createElement('div', {className:'preview-other-view', 'data-fixture-view':activeView,
           ...(activeView==='trajectory'?{'data-conversation-composer-overlay':''}:{})},
           React.createElement('h2',null,activeView==='chat'?'对话':activeView==='trajectory'?'轨迹':activeView==='context'?'上下文':activeView),
@@ -161,7 +199,14 @@ const server = http.createServer(async (request, response) => {
       if (loadError) { response.statusCode = 503; response.end(JSON.stringify({ ok: false, error: '本地任务服务暂不可用（隔离测试）' })); return }
       const sessionId = url.searchParams.get('sessionId')
       if (process.argv.includes('--slow') && sessionId === plans[0].sessionId) await new Promise(resolve => setTimeout(resolve, 1500))
-      response.end(JSON.stringify({ ok: true, sessionId, mode: config.mode, plans: plans.filter(plan => plan.sessionId === sessionId), sessions: [], storageError: null })); return
+      response.end(JSON.stringify({ ok: true, sessionId, mode: config.mode, runtimePolicyVersion: nextRequest || liveProgress ? 2 : undefined, plans: plans.filter(plan => plan.sessionId === sessionId), sessions: liveProgress ? [
+        { sessionId: plans[0].sessionId, source: plans[0].source, turnStats: { direct: 0, delegated: 1, denied: 0 } },
+      ] : nextRequest ? [
+        { sessionId: plans[0].sessionId, source: { messageId: 'request-new', text: '核查代码实际调用了哪些密码接口' }, route: { route: 'direct', reasons: ['scope_small'] },
+          turnStats: { direct: 0, delegated: 0, denied: 0 } },
+      ] : process.argv.includes('--supplement') ? [
+        { sessionId: plans[0].sessionId, difficulty: { level: 'simple', score: 0, signals: [] }, route: { route: 'direct', reasons: ['scope_small'] } },
+      ] : [], storageError: null })); return
     }
     response.statusCode = 404; response.end('{}')
   } catch (error) { response.statusCode = 500; response.end(JSON.stringify({ ok: false, error: error.message })) }

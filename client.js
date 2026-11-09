@@ -262,16 +262,22 @@ window.__ModuleLoader__.load({
         archiveWarning: legacyHost ? null : data.archiveWarning }
     }
 
+    function currentPlanOf(data, sessionId) {
+      const plan = data?.plans?.find(item => item.sessionId === sessionId)
+      const source = data?.sessions?.find(item => item.sessionId === sessionId)?.source
+      return source?.messageId && source.messageId !== plan?.source?.messageId ? null : plan
+    }
+
     Object.assign(zh, {
       'limits.title': '执行限制', 'limits.maxParallel': '全局同时执行', 'limits.maxAttempts': '每任务最多执行',
       'limits.maxActivations': '每个计划最多派发', 'limits.maxActivationsHint': '首次派发、返工和独立审查都计入；达到上限后停止自动开新子 Agent。', 'limits.taskTimeoutMinutes': '运行时间提醒（分钟）', 'models.title': '子任务模型',
       'models.routine': '普通执行任务', 'models.complex': '设计与复杂问题',
-      'models.hint': '直接读取 DSH 已配置的模型，与主界面的模型选择器共用列表。按执行、审查角色配置；修改只作用于之后启动的任务，运行中的任务保持启动快照。',
+      'models.hint': '执行模型从 DSH 已配置列表选择；审查自动使用任务分发时的主控模型记录。运行中的任务保持原模型。',
       'models.reasoningEffort': '思考强度（可选）',
-      'models.choose': '模型', 'models.inherit': '跟随主控（审查启动时固定）', 'models.defaultEffort': '使用模型默认值',
+      'models.choose': '模型', 'models.defaultEffort': '使用模型默认值',
       'models.refresh': '刷新已配置模型', 'models.loading': '正在读取已配置模型…',
       'models.empty': '暂无可用模型，请先在 DSH「设置 → 模型」中配置，然后刷新。', 'models.unavailable': '当前不可用',
-      'models.invalid': '{tier}不可用', 'models.invalidHint': '当前选择已失效。请重新选择该角色的模型，然后保存。审查模型也可明确选择跟随主控。',
+      'models.invalid': '{tier}不可用', 'models.invalidHint': '当前执行模型选择已失效，请重新选择并保存。',
       'models.invalidEffort': '当前模型不支持已选的思考强度，请重新选择或使用模型默认值。',
       'models.sameModel': '选择 {provider} 下的同一模型', 'models.saveHint': '调整后请点击“保存”；保存前仍使用原配置。',
       'models.notLoaded': '尚未确认', 'nav.modelInvalid': '模型不可用',
@@ -312,8 +318,8 @@ window.__ModuleLoader__.load({
       'view.boardActivity': '当前进展', 'view.boardReason': '原因', 'view.boardNext': '下一步',
       'view.boardDetails': '查看任务详情', 'view.boardHideDetails': '收起任务详情',
       'view.boardAffected': '受影响', 'view.boardRootCause': '根因', 'view.boardNoActivity': '暂无进展',
-      'view.boardNoReason': '记录中未提供具体原因', 'view.boardNoPlan': '本会话还没有托管任务。',
-      'view.boardNoPlanHint': '主 Agent 建立任务计划后，任务状态和验收信息会显示在这里。',
+      'view.boardNoReason': '记录中未提供具体原因', 'view.boardNoPlan': '本次需求未启动托管子代理。',
+      'view.boardNoPlanHint': '主控可以直接处理需求；需要委派时再建立计划，执行与验收状态会显示在这里。',
       'view.unavailable': '对应页签未启用，可在 DSH 插件设置中检查。', 'view.diagnostics': '查看本会话的判断依据',
       'view.unknownError': '执行失败，旧记录未保存具体原因。请到 Fleet 或聊天核对原始错误。',
       'view.archiveWarning': '辅助记录提示',
@@ -369,12 +375,12 @@ window.__ModuleLoader__.load({
       'limits.maxActivations': 'Maximum dispatches per plan', 'limits.maxActivationsHint': 'Counts first runs, retries and independent reviews; no new agent starts after the limit.',
       'limits.taskTimeoutMinutes': 'Elapsed-time reminder (minutes)', 'models.title': 'Worker models',
       'models.routine': 'Routine execution', 'models.complex': 'Design and difficult work',
-      'models.hint': 'Uses the configured DSH catalog for execution and review roles. Changes apply to newly started tasks; running tasks retain their model snapshots.',
+      'models.hint': 'Select execution from the DSH catalog. Review uses the coordinator recorded at dispatch; running tasks keep their model.',
       'models.reasoningEffort': 'Reasoning effort (optional)',
-      'models.choose': 'model', 'models.inherit': 'Follow coordinator at review launch', 'models.defaultEffort': 'Model default',
+      'models.choose': 'model', 'models.defaultEffort': 'Model default',
       'models.refresh': 'Refresh configured models', 'models.loading': 'Loading configured models…',
       'models.empty': 'No models available. Configure a model in DSH Settings → Models, then refresh.', 'models.unavailable': 'Unavailable',
-      'models.invalid': '{tier} unavailable', 'models.invalidHint': 'This saved choice is unavailable. Choose a current model for the role and save. Review may explicitly follow the coordinator.',
+      'models.invalid': '{tier} unavailable', 'models.invalidHint': 'This execution model is unavailable. Choose a current model and save.',
       'models.invalidEffort': 'The model does not support the saved reasoning effort. Choose a supported effort or use the default.',
       'models.sameModel': 'Select the same model under {provider}', 'models.saveHint': 'Click Save after changing the choice. The saved configuration stays active until then.',
       'models.notLoaded': 'Not confirmed yet', 'nav.modelInvalid': 'Model unavailable',
@@ -416,8 +422,8 @@ window.__ModuleLoader__.load({
       'view.boardActivity': 'Current activity', 'view.boardReason': 'Reason', 'view.boardNext': 'Next step',
       'view.boardDetails': 'View task details', 'view.boardHideDetails': 'Hide task details',
       'view.boardAffected': 'Affected', 'view.boardRootCause': 'Root cause', 'view.boardNoActivity': 'No activity recorded',
-      'view.boardNoReason': 'No specific reason was recorded', 'view.boardNoPlan': 'No managed tasks in this conversation.',
-      'view.boardNoPlanHint': 'The coordinator task plan will show task status and acceptance information here.',
+      'view.boardNoReason': 'No specific reason was recorded', 'view.boardNoPlan': 'No managed child agent for this request.',
+      'view.boardNoPlanHint': 'The coordinator can work directly. If delegation is needed, its plan will show execution and acceptance here.',
       'view.unavailable': 'This view is not enabled. Check DSH plugin settings.', 'view.diagnostics': 'View this conversation’s difficulty assessment',
       'view.unknownError': 'Execution failed. This older record has no detailed cause. Check Fleet or the conversation for the original error.',
       'view.archiveWarning': 'Supporting record warning',
@@ -494,9 +500,13 @@ window.__ModuleLoader__.load({
       'completion.title': '交付回执', 'completion.completed': '已完成', 'completion.cancelled': '已停止，未验收',
       'models.worker': '执行模型', 'models.reviewer': '审查模型', 'models.workerUnset': '未配置（选择后才能派发）',
       'models.clear': '清除失效选择', 'models.missing': '执行模型尚未配置，请选择并保存；不会自动继承主控模型。',
-      'cfg.modelRoles': '主控使用对话框选择的模型，负责拆分和最终验收。执行模型负责做事，审查模型负责独立检查；请为主控和审查选择高模型，为执行选择合适的低模型。复杂度不改变执行模型。',
+      'cfg.modelRoles': '主控使用对话框选择的模型，负责拆分和最终验收。只需选择执行模型；独立审查自动沿用任务分发时记录的主控模型和思考强度，使用独立上下文。复杂度不改变执行模型。',
       'cfg.modelHintWorker': '普通和复杂任务均使用执行模型。未选择时暂停派发，不继承主控模型。',
-      'cfg.modelHintReviewer': '未选择时明确跟随主控，并在每次审查启动时固定模型；只列出模型支持的思考强度。',
+      'cfg.modelHintReviewer': '无需配置。每次派发任务时固定主控模型和思考强度，后续审查使用该记录；中途切换聊天模型不改变已派任务。',
+      'cfg.reviewAutomatic': '审查模型 · 自动使用分发者模型',
+      'cfg.oldReviewPolicy': '当前服务尚未载入自动审查选模，配置暂不可保存；等待宿主自然重载后生效。',
+      'plans.modelSourceDispatcher': '本次执行的分发者模型记录', 'plans.reviewSnapshot': '审查沿用主控模型',
+      'plans.reviewLegacySnapshot': '旧任务缺少分发快照，采用首次审查时的主控模型',
       'cfg.oldModelRouting': '运行中的插件尚未载入按角色分配模型，新配置暂不可保存。请等待插件自然重载；当前仍按旧规则执行。',
       'completion.blocked': '尚未完成，已阻塞', 'completion.partial': '部分完成，其余尚未验收', 'completion.partialStopped': '部分完成，其余已停止',
       'completion.accepted': '已验收 {done}/{total}', 'completion.id': '回执编号', 'completion.deliverables': '已验收交付物',
@@ -513,9 +523,13 @@ window.__ModuleLoader__.load({
       'completion.title': 'Delivery receipt', 'completion.completed': 'Completed', 'completion.cancelled': 'Stopped, not accepted',
       'models.worker': 'Execution model', 'models.reviewer': 'Review model', 'models.workerUnset': 'Not configured (required to dispatch)',
       'models.clear': 'Clear unavailable selection', 'models.missing': 'Choose and save an execution model. Workers will not inherit the coordinator model.',
-      'cfg.modelRoles': 'The coordinator uses the conversation model for planning and final acceptance. Choose a capable coordinator and reviewer, and a suitable lower-cost execution model. Complexity does not change the execution model.',
+      'cfg.modelRoles': 'The coordinator uses the conversation model for planning and acceptance. Select only an execution model. Independent review uses the coordinator model and reasoning effort recorded at task dispatch in a separate context.',
       'cfg.modelHintWorker': 'Routine and complex tasks use this execution model. Dispatch pauses if it is unset.',
-      'cfg.modelHintReviewer': 'An unset review model explicitly follows the coordinator at review launch. Running reviews keep their snapshot.',
+      'cfg.modelHintReviewer': 'No configuration needed. Each dispatch pins the coordinator model and reasoning effort for later review. Changing the chat model does not alter dispatched tasks.',
+      'cfg.reviewAutomatic': 'Review model · Automatically uses dispatcher model',
+      'cfg.oldReviewPolicy': 'Automatic review selection is not loaded. Saving is disabled until natural host reload.',
+      'plans.modelSourceDispatcher': 'Dispatcher model recorded for this attempt', 'plans.reviewSnapshot': 'Review uses coordinator model',
+      'plans.reviewLegacySnapshot': 'Legacy task has no dispatch snapshot; coordinator recorded at first review',
       'cfg.oldModelRouting': 'The running plugin still uses legacy model routing. Saving is disabled until the plugin reloads naturally.',
       'completion.blocked': 'Incomplete, blocked', 'completion.partial': 'Partially completed, remaining work not accepted', 'completion.partialStopped': 'Partially completed, remaining work stopped',
       'completion.accepted': '{done}/{total} accepted', 'completion.id': 'Receipt ID', 'completion.deliverables': 'Accepted deliverables',
@@ -608,6 +622,18 @@ window.__ModuleLoader__.load({
       'supervision.timeNotice': '运行时间提醒已记录，任务继续执行',
       'supervision.inquiry': '活动核对提醒', 'supervision.inquiryCount': '需核对活动 {count} 项',
       'view.actualNoPlan': '尚未启动子代理，由主控自主分流',
+      'view.confirmedDifficulty': '主控已确认的任务复杂度', 'view.confirmedArrangement': '主控已确认的执行安排',
+      'view.initialAssessment': '初始规则判断（仅供参考）', 'view.initialDifficulty': '初步估计', 'view.unconfirmed': '尚未确认',
+      'view.delegationConfirmed': '已安排子代理', 'view.complexAudit': '执行完成后进行独立审查，主控最终验收',
+      'view.routineAcceptance': '执行者提交报告，主控验证验收',
+      'input.title': '补充信息', 'input.pending': '待主控处理 {count} 条', 'input.chatPending': '待处理补充 {count} 条',
+      'input.queued': '待主控接收', 'input.received': '主控已接收，待处理', 'input.forwarded': '已同步至任务', 'input.resolved': '已答复', 'input.withdrawn': '已撤回',
+      'input.history': '查看补充信息处理记录', 'input.criteria': '新增验收标准',
+      'view.otherRequest': '其他需求的托管记录', 'view.recordedRequest': '托管计划对应需求（当前需求关联未确认）',
+      'live.title': '协作进度', 'live.counts': '执行中 {running} · 已返回 {returned}/{total} · 已验收 {accepted}/{total}',
+      'live.current': '当前', 'live.recent': '最近完成的工具', 'live.activityAt': '最近活动', 'live.unknown': '子代理执行中，当前步骤未记录', 'live.toolFailed': '该步骤失败',
+      'live.read': '读取文件', 'live.search': '检索内容', 'live.glob': '查找文件', 'live.edit': '修改文件', 'live.write': '写入文件',
+      'live.command': '执行命令', 'live.report': '提交报告', 'live.checkpoint': '记录阶段结果',
     })
     Object.assign(en, {
       'runtime.active': 'Continuous-execution policy is loaded', 'runtime.pending': 'New policy not confirmed; awaiting natural host reload',
@@ -619,6 +645,18 @@ window.__ModuleLoader__.load({
       'supervision.timeNotice': 'Elapsed-time reminder recorded; task continues',
       'supervision.inquiry': 'Activity inquiry', 'supervision.inquiryCount': '{count} activity inquiries',
       'view.actualNoPlan': 'No worker started; coordinator decides the route',
+      'view.confirmedDifficulty': 'Task complexity confirmed by coordinator', 'view.confirmedArrangement': 'Confirmed execution arrangement',
+      'view.initialAssessment': 'Initial rule-based assessment (advisory)', 'view.initialDifficulty': 'Preliminary estimate', 'view.unconfirmed': 'Not confirmed',
+      'view.delegationConfirmed': 'Child agents assigned', 'view.complexAudit': 'Independent review after execution; coordinator accepts the result',
+      'view.routineAcceptance': 'Worker reports; coordinator verifies and accepts',
+      'input.title': 'Additional input', 'input.pending': '{count} awaiting coordinator handling', 'input.chatPending': '{count} pending supplements',
+      'input.queued': 'Awaiting coordinator receipt', 'input.received': 'Received; awaiting handling', 'input.forwarded': 'Forwarded to task', 'input.resolved': 'Answered', 'input.withdrawn': 'Withdrawn',
+      'input.history': 'Supplement handling history', 'input.criteria': 'Additional acceptance criteria',
+      'view.otherRequest': 'Managed record for another request', 'view.recordedRequest': 'Request for this plan (current request association unconfirmed)',
+      'live.title': 'Collaboration progress', 'live.counts': 'Running {running} · Returned {returned}/{total} · Accepted {accepted}/{total}',
+      'live.current': 'Current', 'live.recent': 'Latest completed tool', 'live.activityAt': 'Latest activity', 'live.unknown': 'Worker running; current step not recorded', 'live.toolFailed': 'This step failed',
+      'live.read': 'Reading a file', 'live.search': 'Searching contents', 'live.glob': 'Finding files', 'live.edit': 'Editing a file', 'live.write': 'Writing a file',
+      'live.command': 'Running a command', 'live.report': 'Submitting a report', 'live.checkpoint': 'Recording stage findings',
     })
 
     const CONFIG_NUMBERS = ['threshold', 'maxParallel', 'maxAttempts', 'maxActivations', 'taskTimeoutMinutes']
@@ -635,7 +673,7 @@ window.__ModuleLoader__.load({
       'cfg.maxParallelRange': '跨会话共享', 'cfg.maxAttemptsRange': '首次计入', 'cfg.maxActivationsRange': '执行与审查计入',
       'cfg.notePolicy': '生效说明', 'cfg.noteLimits': '不随保存变化', 'cfg.noteModels': '生效说明', 'cfg.noteDiagnostics': '验收不在这里',
       'cfg.policyAfter': ' 锁定项必须改变量并重启 Harness。',
-      'cfg.modelsHint': '按执行、审查角色选择模型，列表与主界面模型选择器共用。执行模型未配置时暂停；审查模型可明确跟随主控。',
+      'cfg.modelsHint': '只需选择执行模型和可选思考强度；独立审查自动沿用分发者模型。',
       'limits.timeoutLabel': '运行时间提醒',
       'cfg.whenNow': '立即', 'cfg.whenPlan': '新建计划', 'cfg.whenTask': '新任务',
       'cfg.acceptanceNote': '打开需要查看的会话，在「任务验收」页签核对当前需求；协作过程看 Fleet，整理与导出用「分享会话」。',
@@ -644,7 +682,7 @@ window.__ModuleLoader__.load({
       'cfg.newPlan': '仅新建计划生效', 'cfg.newTask': '仅新启动任务生效',
       'cfg.policyNote': '切换到「关闭」后主控的委派纪律段在下一次 prompt 组装才消失；想完全按新模式运行，需发一轮新消息。环境变量 ',
       'cfg.limitsNote': '已建立的计划沿用创建时的派发上限；在跑子任务的超时计时器不重设；在跑子 Agent 沿用启动时解析的模型。',
-      'cfg.modelsNote': '对待派单、返工与重试任务立即生效；已在运行的子 Agent 不换模型。因模型失效而阻塞的任务，保存后需重新执行 delegation_run。',
+      'cfg.modelsNote': '执行模型修改作用于后续派发与返工；审查沿用各次执行的分发者记录。运行中的任务不换模型。执行模型失效时，保存后需明确继续。',
       'cfg.loading': '正在读取配置…', 'cfg.loadTitle': '暂时无法读取配置', 'cfg.loadHint': '请检查 DSH 是否正常运行，然后重新读取。读取成功前不会保存任何修改。',
       'cfg.retry': '重新读取', 'cfg.loadDetails': '查看错误详情', 'cfg.stale': '本次刷新失败，当前显示上次读取的配置；草稿已保留。',
       'cfg.invalid': '有 {count} 项需要修正', 'cfg.dirty': '有未保存的修改', 'cfg.dirtyHint': '草稿已修改，尚未保存；保存前仍使用原配置。切换分组不会丢失修改。',
@@ -656,7 +694,7 @@ window.__ModuleLoader__.load({
       'cfg.source': '配置来源', 'cfg.file': '本机文件', 'cfg.env': '环境变量', 'cfg.defaults': '内置默认值', 'cfg.sourceLoading': '正在读取来源',
       'cfg.lockState': '锁定状态', 'cfg.unlocked': '未锁定', 'cfg.activeMode': '当前生效模式', 'cfg.savedAt': '最近保存', 'cfg.unknown': '未记录', 'cfg.unset': '未设置',
       'cfg.catalog': '已配置 {services} 个服务 · {models} 个模型', 'cfg.emptyTitle': '暂无可用模型',
-      'cfg.emptyHint': '请先在 DSH 设置中配置模型服务，再刷新目录。执行模型必须选择；审查模型可跟随主控。',
+      'cfg.emptyHint': '请先在 DSH 设置中配置模型服务，再刷新目录并选择执行模型；独立审查无需额外配置。',
       'cfg.modelImpact': '子任务暂时无法启动', 'cfg.chooseModel': '去选择模型', 'cfg.modelDraft': '所选模型不可用，请在子任务模型分组中重新选择；已保存的配置在保存前保持不变。',
       'cfg.when': '生效时机', 'cfg.explanation': '说明', 'cfg.policyTiming': '模式 / 动手预算', 'cfg.dispatchTiming': '全局同时执行 / 每任务最多执行',
       'cfg.activationTiming': '每个计划最多派发', 'cfg.taskTiming': '运行时间提醒 / 子任务模型', 'cfg.restart': '重启 Harness',
@@ -673,13 +711,13 @@ window.__ModuleLoader__.load({
       'cfg.maxParallelRange': 'Shared across conversations', 'cfg.maxAttemptsRange': 'Includes the first attempt', 'cfg.maxActivationsRange': 'Includes initial dispatch and rework',
       'cfg.notePolicy': 'Effective time', 'cfg.noteLimits': 'Kept unchanged', 'cfg.noteModels': 'Effective time', 'cfg.noteDiagnostics': 'Acceptance lives in the conversation',
       'cfg.policyAfter': ' must be changed before restarting Harness.',
-      'cfg.modelsHint': 'Choose execution and review models from the shared catalog. An unset execution model pauses dispatch; review may explicitly follow the coordinator.',
+      'cfg.modelsHint': 'Choose execution and optional reasoning effort. Independent review uses the dispatcher model automatically.',
       'limits.timeoutLabel': 'Elapsed-time reminder',
       'cfg.whenNow': 'Immediately', 'cfg.whenPlan': 'New plans', 'cfg.whenTask': 'New activations',
       'cfg.acceptanceNote': 'Open a conversation and use Task acceptance to inspect the request. Fleet shows collaboration; Share conversation provides exports.',
       'cfg.defaultMode': 'Default', 'cfg.times': 'attempts', 'cfg.agents': 'tasks', 'cfg.minutes': 'minutes', 'cfg.nowTool': 'Next tool call', 'cfg.nextDispatch': 'Next dispatch', 'cfg.nextRework': 'Subsequent rework', 'cfg.newPlan': 'New plans only', 'cfg.newTask': 'New activations only',
       'cfg.policyNote': 'Disabling removes the coordinator discipline at the next prompt assembly. Send a new message to continue under the new mode. Environment overrides require a Harness restart.',
-      'cfg.limitsNote': 'Existing plans retain their activation limit. Running tasks keep their timers and models.', 'cfg.modelsNote': 'Queued tasks, rework and retries use the new selection when started. Running tasks keep their models. Configuration-blocked tasks require explicit continuation.',
+      'cfg.limitsNote': 'Existing plans retain their activation limit. Running tasks keep their timers and models.', 'cfg.modelsNote': 'Execution changes apply to later dispatch and rework. Review keeps the dispatcher record for that attempt; running tasks keep their models.',
       'cfg.loading': 'Reading configuration…', 'cfg.loadTitle': 'Configuration is unavailable', 'cfg.loadHint': 'Check that DSH is running, then retry. Saving is unavailable until configuration is loaded.', 'cfg.retry': 'Retry loading', 'cfg.loadDetails': 'Error details', 'cfg.stale': 'Refresh failed. The last configuration and your draft are retained.',
       'cfg.invalid': '{count} fields need correction', 'cfg.dirty': 'Unsaved changes', 'cfg.dirtyHint': 'Your draft is not saved. The previous configuration remains active; switching tabs retains edits.', 'cfg.clean': 'Configuration is up to date', 'cfg.discard': 'Discard changes', 'cfg.saveUnavailable': 'Saving unavailable', 'cfg.poll': 'Refreshes every 3 seconds', 'cfg.saveEffect': 'Each setting follows its effective time', 'cfg.saveHint': 'Saved. New policy and subsequent dispatches use the new settings. Running tasks are unchanged.',
       'cfg.conflict': 'Configuration changed elsewhere', 'cfg.conflictHint': 'Your draft is retained. Review the differences before resolving this change.', 'cfg.diff': 'Compare changes', 'cfg.server': 'Use latest settings', 'cfg.keep': 'Keep my edits', 'cfg.base': 'When editing began', 'cfg.latest': 'Latest settings', 'cfg.mine': 'My draft', 'cfg.field': 'Setting',
@@ -689,9 +727,8 @@ window.__ModuleLoader__.load({
       'cfg.when': 'Effective time', 'cfg.explanation': 'Details', 'cfg.policyTiming': 'Mode / operation budget', 'cfg.dispatchTiming': 'Concurrency / task attempts', 'cfg.activationTiming': 'Plan activation limit', 'cfg.taskTiming': 'Elapsed-time reminder / child model', 'cfg.restart': 'Restart Harness',
       'cfg.policyExplanation': 'Next tool call; turn counts are retained', 'cfg.dispatchExplanation': 'Subsequent dispatch and rework; running tasks continue', 'cfg.activationExplanation': 'Existing plans retain their original limit', 'cfg.taskExplanation': 'Running timers and models are unchanged', 'cfg.envExplanation': 'Read-only page; save requests return 409',
     })
-    const MODEL_ROLES = ['worker', 'reviewer']
-    const modelRoutes = config => Object.fromEntries(MODEL_ROLES.map(role => [role,
-      config?.models && Object.hasOwn(config.models, role) ? config.models[role] : config?.models?.[role === 'worker' ? 'routine' : 'complex'] ?? null]))
+    const MODEL_ROLES = ['worker']
+    const modelRoutes = config => ({ worker: config?.models && Object.hasOwn(config.models, 'worker') ? config.models.worker : config?.models?.routine ?? null, reviewer: null })
     const draftOf = config => ({ mode: config?.mode ?? 'auto', threshold: config?.threshold ?? 2,
       maxParallel: config?.maxParallel ?? config?.defaults?.maxParallel ?? 2, maxAttempts: config?.maxAttempts ?? config?.defaults?.maxAttempts ?? 2,
       maxActivations: config?.maxActivations ?? config?.defaults?.maxActivations ?? 8, taskTimeoutMinutes: config?.taskTimeoutMinutes ?? config?.defaults?.taskTimeoutMinutes ?? 15,
@@ -851,7 +888,7 @@ window.__ModuleLoader__.load({
 
     const EMPTY_CHAT_RESULT = { sessionId: null, data: null, error: '', loading: true }
 
-    /** Both chat slots share one request and polling timer per visible session. */
+    /** All chat slots share one request and polling timer per visible session. */
     function createChatProgress() {
       const sessions = new Map()
       const clearTimer = entry => { window.clearInterval(entry.timer); entry.timer = null }
@@ -865,7 +902,7 @@ window.__ModuleLoader__.load({
           const data = await getState(AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]), entry.sessionId)
           if (controller.signal.aborted || sessions.get(entry.sessionId) !== entry) return
           entry.result = { sessionId: entry.sessionId, data, error: '', loading: false }
-          const plan = data.plans?.find(item => item.sessionId === entry.sessionId)
+          const plan = currentPlanOf(data, entry.sessionId)
           const route = plan?.routing ?? data.sessions?.find(item => item.sessionId === entry.sessionId)?.route
           entry.terminal = Boolean(plan && (plan.protocolVersion >= 2 ? plan.completion : ['accepted', 'cancelled'].includes(plan.status)))
           if (entry.terminal) clearTimer(entry)
@@ -973,10 +1010,10 @@ window.__ModuleLoader__.load({
 
       if (!latest || !sessionId) return null
       const data = result.data
-      const plan = data?.plans?.find(item => item.sessionId === sessionId)
+      const plan = currentPlanOf(data, sessionId)
       const session = data?.sessions?.find(item => item.sessionId === sessionId)
       const route = plan?.routing ?? session?.route
-      if (!route && !plan && !result.error) return null
+      if (!route && !plan && !session?.source && !result.error) return null
       const tasks = plan?.tasks ?? []
       const done = tasks.filter(task => task.status === 'accepted').length
       const running = tasks.filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
@@ -993,11 +1030,12 @@ window.__ModuleLoader__.load({
           { count: tasks.filter(task => task.audit?.status === 'queued').length, key: 'auditQueuedCount' }])
         .filter(item => item.count > 0).map(item => fill(t('chat.' + item.key), { count: item.count }))
       const supervised = tasks.flatMap(task => [task, ...(task.audit ? [task.audit] : [])]).filter(task => ['starting', 'running'].includes(task.status) && task.supervision?.pending)
-      const summary = [baseSummary, ...counts, ...(supervised.length ? [fill(t(supervised.every(task => task.supervision.pending.advisory) ? 'supervision.inquiryCount' : 'supervision.count'), { count: supervised.length })] : [])].join(' · ')
+      const pendingInputs = plan?.cancelled ? [] : (plan?.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status))
+      const summary = [baseSummary, ...counts, ...(pendingInputs.length ? [fill(t('input.chatPending'), { count: pendingInputs.length })] : []), ...(supervised.length ? [fill(t(supervised.every(task => task.supervision.pending.advisory) ? 'supervision.inquiryCount' : 'supervision.count'), { count: supervised.length })] : [])].join(' · ')
       const canOpen = typeof openView === 'function'
       const hint = canOpen ? t('view.details') : t('chat.navigationUnavailable')
       const label = `${summary} · ${hint}`
-      const title = [plan?.goal || plan?.source?.text?.slice(0, 120), summary, route ? fill(t('chat.routeDecision'), { route: routeLabel(t, route) }) : '',
+      const title = [plan?.goal || session?.source?.text?.slice(0, 120) || plan?.source?.text?.slice(0, 120), summary, route ? fill(t('chat.routeDecision'), { route: routeLabel(t, route) }) : '',
         result.error ? t('chat.unavailable') : '', hint].filter(Boolean).join(' · ')
       return h('span', { className: 'ddf-chat-progress', 'data-status': status, role: 'status', title },
         h('style', null, CHAT_PROGRESS_STYLES),
@@ -1031,6 +1069,12 @@ window.__ModuleLoader__.load({
 .ddf-chat-notice[data-kind="stopped"] .ddf-chat-notice-heading { color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-chat-notice[data-kind="supervision"] { border-left-color:var(--dsw-alias-state-warning-primary,#b7791f); }
 .ddf-chat-notice[data-kind="supervision"] .ddf-chat-notice-heading { color:var(--dsw-alias-state-warning-primary,#b7791f); }
+.ddf-chat-notice[data-kind="progress"] { border-left-color:var(--dsw-alias-brand-primary,#4f6ef7); }
+.ddf-chat-notice[data-kind="progress"] .ddf-chat-notice-heading { color:var(--dsw-alias-brand-primary,#4f6ef7); }
+.ddf-chat-live-task + .ddf-chat-live-task { margin-top:8px; padding-top:8px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-chat-live-meta { color:var(--dsw-alias-label-secondary,#646a73); }
+.ddf-chat-dock { min-width:0; max-height:min(32vh,260px); overflow:auto; }
+.ddf-chat-dock .ddf-chat-notice { margin:0; }
 .ddf-chat-notice p { margin:5px 0; white-space:pre-wrap; }
 .ddf-chat-notice-hint { color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-chat-notice-action { display:inline-block; max-width:100%; margin:4px 0 0; padding:0; border:0; background:transparent; color:var(--dsw-alias-brand-primary,#4f6ef7); font:inherit; text-align:left; overflow-wrap:anywhere; cursor:pointer; }
@@ -1043,9 +1087,25 @@ window.__ModuleLoader__.load({
       return t('completion.' + (stopped ? 'partialStopped' : receipt.outcome))
     }
 
+    function serviceProblem(plan) {
+      if (!plan || plan.cancelled || plan.status === 'cancelled') return null
+      if (plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt) return plan.coordinatorIssue
+      return (plan.tasks ?? []).flatMap(task => task.audit ? [task, task.audit] : [task])
+        .find(task => ['failed', 'blocked'].includes(task.status) && ['MODEL_SERVICE_QUOTA', 'MODEL_SERVICE_RATE_LIMIT'].includes(task.issue?.code))?.issue
+    }
+
+    function ServiceIssueNotice({ t, issue }) {
+      if (!issue) return null
+      return h('section', { className: 'ddf-chat-notice', role: 'alert', 'data-kind': 'service' },
+        h('style', null, CHAT_NOTICE_STYLES), h('strong', null, issue.message),
+        h('p', null, issue.details), h('p', null, t('view.next') + '：' + issue.action))
+    }
+
     function completionNext(t, plan, state) {
       const receipt = plan?.completion
       if (!receipt) return ''
+      const service = serviceProblem(plan)
+      if (service) return service.action
       if (receipt.outcome === 'blocked') {
         const limit = state?.limits?.maxAttempts
         const exhausted = Number.isInteger(limit) && receipt.remaining.some(item => {
@@ -1071,9 +1131,11 @@ window.__ModuleLoader__.load({
     function CompletionReceipt({ t, plan, state }) {
       const receipt = plan?.completion
       if (!receipt) return null
+      const service = serviceProblem(plan)
       return h('section', { className: 'ddf-receipt', 'data-outcome': receipt.outcome, role: 'status' },
         h('style', null, RECEIPT_STYLES),
         h('strong', null, t('completion.title') + ' · ' + completionLabel(t, receipt)),
+        service ? h('p', null, h('strong', null, service.message), ' · ', service.details) : null,
         h('p', null, fill(t('completion.accepted'), { done: receipt.accepted, total: receipt.total })),
         h('p', { className: 'ddf-receipt-next' }, completionNext(t, plan, state)),
         receipt.reason ? h('p', null, t('completion.reason') + '：' + receipt.reason) : null,
@@ -1086,14 +1148,74 @@ window.__ModuleLoader__.load({
         h('small', null, t('completion.id') + '：' + receipt.id))
     }
 
+    function liveToolLabel(t, name) {
+      const key = { read: 'read', grep: 'search', glob: 'glob', edit: 'edit', apply_patch: 'edit', write: 'write',
+        pwsh: 'command', bash: 'command', delegation_report: 'report', delegation_checkpoint: 'checkpoint' }[name]
+      return key ? t('live.' + key) + `（${name}）` : name
+    }
+
+    function ChatLiveProgress({ t, plan, openView, error }) {
+      const tasks = plan?.tasks ?? [], unfinished = tasks.filter(task => task.status !== 'accepted')
+      if (!unfinished.length) return null
+      const live = task => ['starting', 'running'].includes(task.status)
+      const running = tasks.filter(task => live(task) || live(task.audit ?? {})).length
+      const current = task => {
+        const target = live(task.audit ?? {}) ? task.audit : task
+        if (live(target)) {
+          if (target.status === 'starting') return t('status.starting')
+          if (target.execution) return t('supervision.reporting')
+          const activity = target.supervision?.activity
+          return activity?.kind === 'tool' ? liveToolLabel(t, activity.tool)
+            : activity?.kind ? t('supervision.activity.' + activity.kind) : t('live.unknown')
+        }
+        if (task.audit?.status === 'queued') return t('audit.queued')
+        if (task.status === 'review') return t('view.acceptanceReview')
+        if (task.status === 'queued') return plan.dispatchWait?.message || t((task.dependsOn ?? []).some(id => tasks.some(other => other.id === id && other.status !== 'accepted')) ? 'view.actualDependency' : 'view.actualQueued')
+        return t('status.' + task.status)
+      }
+      return h('section', { className: 'ddf-chat-notice ddf-chat-live', 'data-kind': 'progress', role: 'status' },
+        h('style', null, CHAT_NOTICE_STYLES), h('strong', { className: 'ddf-chat-notice-heading' }, t('live.title') + ' · ' + fill(t('live.counts'), {
+          running, returned: tasks.filter(task => ['review', 'accepted'].includes(task.status)).length, accepted: tasks.length - unfinished.length, total: tasks.length })),
+        error ? h('p', { className: 'ddf-chat-live-meta' }, t('view.staleTitle')) : null,
+        ...unfinished.map(task => {
+          const target = live(task.audit ?? {}) ? task.audit : task, state = target.supervision
+          const time = value => new Date(value).toLocaleTimeString()
+          return h('div', { key: task.id, className: 'ddf-chat-live-task' },
+            h('p', null, h('strong', null, task.title || task.id)),
+            h('p', null, t('live.current') + '：', task.audit && live(task.audit) ? t('audit.title') + ' · ' : '', current(task)),
+            live(target) && Number.isFinite(state?.startedAt) ? h('p', { className: 'ddf-chat-live-meta' }, fill(t('supervision.elapsed'), { minutes: Math.max(0, Math.floor((Date.now() - state.startedAt) / 60000)) }),
+              state.lastActivityAt ? ' · ' + t('live.activityAt') + ' ' + time(state.lastActivityAt) : '') : null,
+            target.progress?.tool ? h('p', { className: 'ddf-chat-live-meta' }, t('live.recent') + '：', liveToolLabel(t, target.progress.tool),
+              target.progress.at ? ' · ' + time(target.progress.at) : '', target.progress.failed ? ' · ' + t('live.toolFailed') : '') : null,
+            state?.checkpoint?.summary ? h('p', null, t('supervision.stage') + '：' + state.checkpoint.summary) : null)
+        }),
+        typeof openView === 'function' ? h('button', { type: 'button', className: 'ddf-chat-notice-action',
+          onClick: () => openView(VIEW_ID) }, t('view.details')) : null)
+    }
+
     function ChatIssueNotice({ t, sessionId, seq, useChat, openView, progress }) {
       const latest = useLatestTail(useChat, seq)
       const result = useChatProgress(progress, sessionId, latest, seq)
       if (!latest || !sessionId) return null
-      const plan = result.data?.plans?.find(item => item.sessionId === sessionId)
-      if (plan?.completion) return h(CompletionReceipt, { t, plan, state: result.data })
+      const plan = currentPlanOf(result.data, sessionId)
+      if (!plan?.completion) return null
+      if (plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled) return null
+      return h(CompletionReceipt, { t, plan, state: result.data })
+    }
+
+    function ChatProgressDock({ t, sessionId, session, progress }) {
+      // The host mounts the input dock while a turn is still running. Its running
+      // transition also refreshes a terminal snapshot when the next turn starts.
+      const result = useChatProgress(progress, sessionId, true, session?.running)
+      const plan = currentPlanOf(result.data, sessionId)
+      if (!plan || plan.completion && !(plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled)) return null
+      return h('div', { className: 'ddf-chat-dock' }, h(ChatPlanNotice, { t, plan, error: result.error }))
+    }
+
+    function ChatPlanNotice({ t, plan, openView, error }) {
+      if (plan?.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled) return h(ServiceIssueNotice, { t, issue: plan.coordinatorIssue })
       const problem = chatProblem(plan)
-      if (!problem) return null
+      if (!problem) return h(ChatLiveProgress, { t, plan, openView, error })
       const task = problem.primary, tasks = plan.tasks ?? []
       const recorded = problem.kind === 'supervision' ? task.supervision.pending.reason : task?.stop?.reason || task?.issue?.message || task?.error
       const reason = typeof recorded === 'string' && recorded.trim() && !/^(error|子任务停止原因：error)$/i.test(recorded.trim())
@@ -1109,16 +1231,15 @@ window.__ModuleLoader__.load({
         role: problem.kind === 'stopped' ? 'status' : 'alert', 'aria-label': heading },
         h('style', null, CHAT_NOTICE_STYLES),
         h('strong', { className: 'ddf-chat-notice-heading' }, heading),
-        result.error ? h('p', { className: 'ddf-chat-notice-hint' }, t('view.staleTitle')) : null,
+        error ? h('p', { className: 'ddf-chat-notice-hint' }, t('view.staleTitle')) : null,
         h('p', null, h('strong', null, t('chat.issueTask') + '：'),
           problem.tasks.map(item => item.title || item.id).join('、') || t('chat.unknownTask')),
         h('p', null, h('strong', null, t('chat.issueReason') + '：'), reason),
         h('p', null, h('strong', null, t('view.next') + '：'), next),
         problem.kind !== 'stopped' && problem.affected > 1
           ? h('p', { className: 'ddf-chat-notice-hint' }, fill(t('chat.affected'), { count: problem.affected })) : null,
-        h('button', { type: 'button', className: 'ddf-chat-notice-action', disabled: !canOpen,
-          title: canOpen ? t('view.details') : t('chat.navigationUnavailable'),
-          onClick: canOpen ? () => openView(VIEW_ID) : undefined }, t('view.details')))
+        canOpen ? h('button', { type: 'button', className: 'ddf-chat-notice-action',
+          onClick: () => openView(VIEW_ID) }, t('view.details')) : null)
     }
 
     // -----------------------------------------------------------------------
@@ -1363,7 +1484,7 @@ window.__ModuleLoader__.load({
     function ExecutionConfig({ t, draft, onDraft, catalogState, onRefreshModels, disabled }) {
       const groups = catalogState.value?.groups ?? []
       const routeKey = route => route ? JSON.stringify([route.provider, route.model]) : ''
-      return h('section', { className: 'ddf-card' }, h(ConfigHeading, { t, tab: 'models', count: 4 }),
+      return h('section', { className: 'ddf-card' }, h(ConfigHeading, { t, tab: 'models', count: 2 }),
         h('p', { className: 'ddf-hint' }, t('cfg.modelRoles')),
         h('div', { className: 'ddf-toolbar' }, h('button', { type: 'button', className: 'ddf-btn',
           disabled: catalogState.status === 'loading', onClick: onRefreshModels }, t('models.refresh')),
@@ -1390,7 +1511,7 @@ window.__ModuleLoader__.load({
             h('select', { id: `ddf-model-${tier}`, className: 'ddf-select', value: routeKey(route), disabled,
               'aria-invalid': problem === 'model' ? true : undefined, 'aria-describedby': problem ? warningId : undefined,
               onChange: event => { const value = event.target.value; const [provider, model] = value ? JSON.parse(value) : []; choose(value ? { provider, model } : null) } },
-              h('option', { value: '' }, t(tier === 'worker' ? 'models.workerUnset' : 'models.inherit')),
+              h('option', { value: '' }, t('models.workerUnset')),
               route && !selected ? h('option', { value: routeKey(route), disabled: true }, `${route.provider}/${route.model} · ${t(problem ? 'models.unavailable' : 'models.notLoaded')}`) : null,
               ...groups.map(group => h('optgroup', { key: group.id, label: group.name }, ...group.models.map(model => h('option',
                 { key: model.id, value: routeKey({ provider: group.id, model: model.id }) }, model.name === model.id ? model.name : `${model.name} (${model.id})`))))),
@@ -1399,9 +1520,9 @@ window.__ModuleLoader__.load({
               h('p', null, t(problem === 'effort' ? 'models.invalidEffort' : 'models.invalidHint')),
               h('div', { className: 'ddf-actions' }, candidates.length === 1 ? h('button', { type: 'button', className: 'ddf-btn', disabled,
                 onClick: () => choose({ provider: candidates[0].provider, model: candidates[0].model }) }, fill(t('models.sameModel'), { provider: candidates[0].name })) : null,
-                h('button', { type: 'button', className: 'ddf-btn', disabled, onClick: () => choose(null) }, t(tier === 'worker' ? 'models.clear' : 'models.inherit'))),
+                h('button', { type: 'button', className: 'ddf-btn', disabled, onClick: () => choose(null) }, t('models.clear'))),
               h('p', null, t('models.saveHint'))) : null,
-            tier === 'worker' && !route ? h('p', { className: 'ddf-error', role: 'status' }, t('models.missing')) : null,
+            !route ? h('p', { className: 'ddf-error', role: 'status' }, t('models.missing')) : null,
             h('label', { htmlFor: `ddf-effort-${tier}` }, t('models.reasoningEffort')),
             h('select', { id: `ddf-effort-${tier}`, className: 'ddf-select', value: route?.reasoningEffort ?? '', disabled: disabled || !selected || !efforts.length,
               'aria-invalid': problem === 'effort' ? true : undefined,
@@ -1411,8 +1532,9 @@ window.__ModuleLoader__.load({
               route?.reasoningEffort && !efforts.some(effort => effort.id === route.reasoningEffort)
                 ? h('option', { value: route.reasoningEffort, disabled: true }, `${route.reasoningEffort} · ${t('models.unavailable')}`) : null,
               ...efforts.map(effort => h('option', { key: effort.id, value: effort.id }, effort.name))),
-            h('p', { className: 'ddf-range', style: { margin: '2px 0 0' } }, t(tier === 'worker' ? 'cfg.modelHintWorker' : 'cfg.modelHintReviewer')))
-        })), h(ConfigNote, { title: t('cfg.noteModels') }, t('cfg.modelsNote')))
+            h('p', { className: 'ddf-range', style: { margin: '2px 0 0' } }, t('cfg.modelHintWorker')))
+        }), h('div', { className: 'ddf-model-role', 'data-review-policy': 'dispatcher-snapshot' }, h('h3', null, t('cfg.reviewAutomatic')),
+          h('p', { className: 'ddf-hint' }, t('cfg.modelHintReviewer')))), h(ConfigNote, { title: t('cfg.noteModels') }, t('cfg.modelsNote')))
     }
     function ConfigDiagnostics({ t, config }) {
       const source = config?.source
@@ -1493,7 +1615,7 @@ window.__ModuleLoader__.load({
       const mismatch = task.issue?.code === 'MODEL_ROUTE_MISMATCH' || Boolean(route?.rejected)
       const tier = route?.role ? t('models.' + route.role) : task.complexity === 'complex' ? t('models.complex') : t('models.routine')
       const audit = task.audit
-      const auditSelected = audit?.modelRoute?.actual ?? audit?.modelRoute?.resolved ?? audit?.modelRoute?.requested
+      const auditSelected = audit?.modelRoute?.actual ?? audit?.modelRoute?.resolved ?? audit?.modelRoute?.requested ?? task.dispatcherModel
       const status = value => h('span', { className: 'ddf-status', 'data-status': value }, t('status.' + value))
       return h('details', { className: compact ? 'ddf-board-task-details' : 'ddf-task' },
         compact ? h('summary', null, t('view.boardDetails')) : h('summary', null, h('strong', null, task.title || task.id), status(task.status),
@@ -1504,7 +1626,9 @@ window.__ModuleLoader__.load({
           h('p', { className: 'ddf-hint' }, t('plans.modelReason') + '：' + (task.complexityReason || t('plans.modelReasonUnknown'))),
           route ? h('p', { className: 'ddf-hint' }, t('view.modelIdentifierNote')) : null,
           h('p', { className: 'ddf-hint' }, t('plans.modelSource') + '：' + (route
-            ? t(route.source === 'configured' ? 'plans.modelSourceConfigured' : 'plans.modelSourceInherited') : t('plans.modelUnknown'))),
+            ? t(route.source === 'dispatcher' ? 'plans.modelSourceDispatcher' : route.source === 'configured' ? 'plans.modelSourceConfigured' : 'plans.modelSourceInherited') : t('plans.modelUnknown'))),
+          task.dispatcherModel ? h('p', { className: 'ddf-hint' }, t('plans.reviewSnapshot') + '：' + task.dispatcherModel.provider + ' / ' + task.dispatcherModel.model + ' · ' + t('models.reasoningEffort') + '：' + (task.dispatcherModel.reasoningEffort ?? t('models.defaultEffort')),
+            task.dispatcherModel.source === 'legacy-review' ? ' · ' + t('plans.reviewLegacySnapshot') : '') : null,
           mismatch ? h('p', { className: 'ddf-error' }, task.error || t('plans.modelMismatch')) : null,
           h(SupervisionDetails, { t, task }),
           task.execution ? h('p', { className: 'ddf-hint' }, t('execution.' + task.execution.status) + '：' + task.execution.summary) : null,
@@ -1782,9 +1906,12 @@ window.__ModuleLoader__.load({
     }
 
     function BoardDecision({ t, session, plan, status, running }) {
-      const route = session?.route ?? plan?.routing
+      const route = plan?.routing ?? session?.route
       const difficulty = session?.difficulty, level = levelKey(difficulty)
       const tasks = plan?.tasks ?? []
+      const complex = tasks.some(task => task.complexity === 'complex')
+      const confirmed = complex ? t('view.taskComplex') : tasks.length && tasks.every(task => task.complexity === 'routine') ? t('view.taskRoutine') : t('cfg.unknown')
+      const reasons = tasks.filter(task => task.complexityReason).map(task => `${task.title || task.id}：${task.complexityReason}`).join('；')
       const dependent = tasks.filter(task => ['queued', 'blocked'].includes(task.status)
         && (task.dependsOn ?? []).some(id => tasks.some(item => item.id === id && item.status !== 'accepted')))
       const actual = !plan ? t('view.actualNoPlan')
@@ -1800,26 +1927,39 @@ window.__ModuleLoader__.load({
       return h('section', { className: 'ddf-board-decision', 'aria-label': t('view.decisionTitle') },
         h('div', { className: 'ddf-board-decision-main' },
           h('div', { className: 'ddf-board-decision-difficulty' },
-            h('h2', null, t('view.decisionDifficulty')),
-            h('div', { className: 'ddf-board-decision-level' }, h('strong', null, level ? t('level.' + level) : t('cfg.unknown')),
-              Number.isFinite(difficulty?.score) ? h('span', null, fill(t('difficulty.score'), { score: difficulty.score })) : null),
-            h('p', { className: 'ddf-board-decision-signals' }, signalsText(t, difficulty)),
-            h('p', { className: 'ddf-board-decision-note' }, t('view.decisionHint'))),
+            h('h2', null, t(plan ? 'view.confirmedDifficulty' : 'view.initialDifficulty')),
+            h('div', { className: 'ddf-board-decision-level' }, h('strong', null, plan ? confirmed : level && difficulty?.signals?.length ? t('level.' + level) : t('view.unconfirmed'))),
+            h('p', { className: 'ddf-board-decision-signals' }, plan ? reasons || t('plans.modelReasonUnknown') : signalsText(t, difficulty))),
           h('div', { className: 'ddf-board-decision-routes' },
-            h('div', null, h('h2', null, t('view.suggestedRoute')), h('strong', { className: 'ddf-board-decision-route' }, routeLabel(t, route)),
-              route ? h('p', { className: 'ddf-board-decision-note' }, t(session?.route ? 'view.routeCurrent' : 'view.routeSnapshot')) : null,
-              h('p', { className: 'ddf-board-decision-note' }, routeReasonsText(t, route))),
+            h('div', null, h('h2', null, t(plan ? 'view.confirmedArrangement' : 'view.suggestedRoute')),
+              h('strong', { className: 'ddf-board-decision-route' }, plan ? t('view.delegationConfirmed') : routeLabel(t, route)),
+              h('p', { className: 'ddf-board-decision-note' }, plan ? t(complex || tasks.some(task => task.audit) ? 'view.complexAudit' : 'view.routineAcceptance') : routeReasonsText(t, route))),
             h('div', { className: 'ddf-board-decision-actual' }, h('h2', null, t('view.actualArrangement')), h('strong', null, actual),
               dependent.length ? h('p', { className: 'ddf-board-decision-note' }, fill(t('view.boardDependency'), {
                 tasks: [...new Set(dependent.flatMap(task => task.dependsOn ?? []))].map(id => tasks.find(task => task.id === id))
                   .filter(task => task && task.status !== 'accepted').map(task => task.title || task.id).join('、') })) : null,
               plan?.dispatchWait?.message ? h('p', { className: 'ddf-board-decision-note' }, plan.dispatchWait.message) : null))),
+        difficulty || route ? h('details', { className: 'ddf-board-execution-diagnostics' }, h('summary', null, t('view.initialAssessment')),
+          h('p', null, level ? t('level.' + level) : t('cfg.unknown'), ' · ', Number.isFinite(difficulty?.score) ? fill(t('difficulty.score'), { score: difficulty.score }) : '', ' · ', signalsText(t, difficulty)),
+          h('p', null, t('view.suggestedRoute') + '：', routeLabel(t, route), ' · ', routeReasonsText(t, route)),
+          h('p', { className: 'ddf-board-decision-note' }, t('view.decisionHint'))) : null,
         h('div', { className: 'ddf-board-decision-counters' }, count('direct', 'direct'), count('delegated', 'delegated'), count('denied', 'denied'),
           Number.isFinite(cumulative) ? h('span', { className: 'ddf-board-decision-cumulative' }, fill(t('table.cumulative'), { count: cumulative })) : null,
           session?.last?.tool ? h('details', { className: 'ddf-board-decision-interception' },
             h('summary', null, t('table.last') + '：', h('code', null, session.last.tool)),
             h('p', null, session.last.message || t('last.' + session.last.kind))) : null),
         session && !session.turnStats ? h('p', { className: 'ddf-board-decision-note ddf-board-decision-legacy' }, t('view.countersUnknown')) : null)
+    }
+
+    function InputDetails({ t, plan }) {
+      if (!plan?.inputs?.length) return null
+      const pending = plan.inputs.filter(input => ['queued', 'received'].includes(input.status))
+      const entry = input => h('div', { key: input.id }, h('p', null, t('input.' + input.status), input.taskId ? ' · ' + input.taskId : '', ' · ', input.text),
+        input.resolution ? h('p', null, input.resolution) : null,
+        input.additionalCriteria?.length ? h('p', null, t('input.criteria') + '：' + input.additionalCriteria.join('；')) : null)
+      return h('section', { className: 'ddf-board-next', 'data-inputs': '' },
+        h('strong', null, t('input.title'), pending.length ? ' · ' + fill(t('input.pending'), { count: pending.length }) : ''),
+        ...pending.map(entry), h('details', null, h('summary', null, t('input.history')), ...plan.inputs.filter(input => !pending.includes(input)).map(entry)))
     }
 
     function DashboardTaskCard({ t, task, plan, rootTask, onFix }) {
@@ -1839,7 +1979,7 @@ window.__ModuleLoader__.load({
         || (task.recovered ? t('view.recoveredNext') : ['failed', 'blocked'].includes(status) ? t('view.failedNext') : '')
       const isRoot = Boolean(rootTask && rootTask.id === task.id)
       const detail = route ? `${route.provider} / ${route.model}` : t('plans.modelUnknown')
-      const auditRoute = task.audit?.modelRoute?.actual ?? task.audit?.modelRoute?.resolved ?? task.audit?.modelRoute?.requested
+      const auditRoute = task.audit?.modelRoute?.actual ?? task.audit?.modelRoute?.resolved ?? task.audit?.modelRoute?.requested ?? task.dispatcherModel
       const fact = (label, value, note, kind) => h('div', { 'data-fact': kind }, h('dt', null, t(label)), h('dd', null, value,
         note ? h('span', { className: 'ddf-board-fact-note' }, note) : null))
       return h('article', { className: 'ddf-board-task', 'data-task-id': task.id, 'data-status': status,
@@ -1893,7 +2033,9 @@ window.__ModuleLoader__.load({
       const modelBlock = blockers.find(task => task.issue?.code === 'MODEL_CONFIG_INVALID')
       const route = plan?.routing || state?.sessions?.find(item => item.sessionId === sessionId)?.route
       const session = state?.sessions?.find(item => item.sessionId === sessionId)
-      const next = plan?.completion ? completionNext(t, plan, state) : plan ? dashboardNextText(t, status, tasks, modelBlock, rootTask) : ''
+      const request = session?.source
+      const previous = state?.plans?.find(item => item.sessionId === sessionId && item !== plan)
+      const next = plan?.completion ? completionNext(t, plan, state) : serviceProblem(plan)?.action || (plan ? dashboardNextText(t, status, tasks, modelBlock, rootTask) : '')
       const links = (state ? ['chat', 'fleet', 'share'] : ['chat']).map(id => {
         const enabled = enabledView(id)
         return h('button', { key: id, type: 'button', className: 'ddf-board-action', disabled: !enabled,
@@ -1916,15 +2058,17 @@ window.__ModuleLoader__.load({
           notice,
           state?.storageError ? h('p', { className: 'ddf-board-inline-notice', 'data-kind': 'error', role: 'alert' }, state.storageError) : null,
           state ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-policy': state.runtimePolicyVersion ?? 'unknown' }, t(state.runtimePolicyVersion >= 2 ? 'runtime.active' : 'runtime.pending')) : null,
-          h(UsageDetails, { t, usage: state?.requestUsage?.find(entry => entry.sessionId === sessionId) ?? plan?.usage }),
+          h(UsageDetails, { t, usage: state?.requestUsage?.find(entry => entry.sessionId === sessionId && (!request?.messageId || entry.requestId === request.messageId)) ?? plan?.usage }),
+          plan || request?.text ? h('section', { className: 'ddf-board-hero' },
+            h('div', null, h('p', { className: 'ddf-board-hero-label' }, t(request?.messageId ? 'view.boardRequest' : 'view.recordedRequest')),
+              h('p', { className: 'ddf-board-goal' }, plan?.goal || request?.text || plan?.source?.text || t('view.unknownSource'))),
+            h('span', { className: 'ddf-board-status', 'data-status': status, role: 'status' }, plan ? statusLabel : t('view.actualNoPlan'))) : null,
           state && !plan ? h('section', { className: 'ddf-board-empty', role: 'status' }, h('h2', null, t('view.boardNoPlan')), h('p', null, t('view.boardNoPlanHint'))) : null,
-          plan ? h('section', { className: 'ddf-board-hero' },
-            h('div', null, h('p', { className: 'ddf-board-hero-label' }, t('view.boardRequest')),
-              h('p', { className: 'ddf-board-goal' }, plan.goal || plan.source?.text || t('view.unknownSource'))),
-            h('span', { className: 'ddf-board-status', 'data-status': status, role: 'status' }, statusLabel)) : null,
-          session || route ? h(BoardDecision, { t, session, plan, status, running }) : null,
+          plan || session || route ? h(BoardDecision, { t, session, plan, status, running }) : null,
           plan?.routingWarnings?.length ? h('p', { className: 'ddf-board-inline-notice' }, fill(t('plans.routeWarnings'), { warnings: plan.routingWarnings.join('；') })) : null,
           h(CompletionReceipt, { t, plan, state }),
+          !plan?.completion && plan?.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled ? h(ServiceIssueNotice, { t, issue: plan.coordinatorIssue }) : null,
+          h(InputDetails, { t, plan }),
           plan ? h('section', { className: 'ddf-board-metrics', 'aria-label': t('view.boardProgress') },
             metric('boardReturned', `${returned} / ${tasks.length}`), metric('boardAccepted', `${accepted} / ${tasks.length}`),
             metric('boardRunning', String(running)), metric('boardWaiting', String(waiting)),
@@ -1946,6 +2090,11 @@ window.__ModuleLoader__.load({
             h('div', { className: 'ddf-board-section-head' }, h('h2', { className: 'ddf-board-section-title' }, t('view.boardTasks')),
               h('span', { className: 'ddf-board-section-note' }, fill(t('view.boardTaskCount'), { count: tasks.length }))),
             h('div', { className: 'ddf-board-task-list' }, ...orderedTasks.map(task => h(DashboardTaskCard, { key: task.id, t, task, plan, rootTask, onFix })))) : null,
+          previous ? h('details', { className: 'ddf-board-diagnostics', 'data-previous-request': previous.source?.messageId || 'unknown' },
+            h('summary', null, t('view.otherRequest')),
+            h('p', null, previous.goal, ' · ', previous.completion ? completionLabel(t, previous.completion) : t('status.' + previous.status)),
+            h('p', null, previous.source?.text || t('view.unknownSource')),
+            h('p', null, t('view.message') + '：', previous.source?.messageId || '—')) : null,
           state?.legacyHost ? h('p', { className: 'ddf-board-inline-notice', role: 'status' }, t('view.legacyHost')) : null,
           session ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.diagnostics')), h(StateCard, { t, state: { sessions: [session] } })) : null,
           state?.archiveWarning ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.archiveWarning')),
@@ -1978,7 +2127,7 @@ window.__ModuleLoader__.load({
         return () => { alive = false; refreshRef.current = null; window.clearInterval(timer); inFlight?.abort() }
       }, [sessionId])
       const state = result.data?.sessionId === sessionId ? result.data : null
-      const plan = state?.plans?.find(item => item.sessionId === sessionId)
+      const plan = currentPlanOf(state, sessionId)
       const views = getViews()
       const enabledView = id => typeof openView === 'function' && views.some(view => view.id === id)
       const notice = result.error ? h('section', { className: 'ddf-board-load-issue', 'data-stale': Boolean(state), role: 'status' },
@@ -2107,7 +2256,7 @@ window.__ModuleLoader__.load({
       }
       const errors = configErrors(t, config, draft), errorCount = Object.keys(errors).length
       const invalidModels = MODEL_ROLES.filter(tier => modelProblem(draft.models?.[tier], catalogState))
-      const disabled = !config || config.locked === true || config.modelRouting !== 'roles' || save.status === 'saving'
+      const disabled = !config || config.locked === true || config.modelRouting !== 'roles' || config.reviewerModelPolicy !== 'dispatcher-snapshot' || save.status === 'saving'
       const onSave = async () => {
         if (disabled || saving.current || conflict || errorCount || (!sameValue(draft.mode, 'off') && invalidModels.length)) return
         saving.current = true; setSave({ status: 'saving', error: '' }); inFlight.current?.abort(); inFlight.current = null
@@ -2161,6 +2310,7 @@ window.__ModuleLoader__.load({
               h('tbody', null, ...changedFields.map(key => h('tr', { key }, h('td', null, key === 'mode' ? t('mode.label') : key === 'models' ? t('cfg.models') : configLabel(t, key)),
                 ...[savedDraft[key], latestDraft[key], draft[key]].map((value, i) => h('td', { key: i }, displayValue(value)))))))))) : null,
           ready && config.modelRouting !== 'roles' ? h('div', { className: 'ddf-banner', 'data-kind': 'warn', role: 'status' }, t('cfg.oldModelRouting')) : null,
+          ready && config.modelRouting === 'roles' && config.reviewerModelPolicy !== 'dispatcher-snapshot' ? h('div', { className: 'ddf-banner', 'data-kind': 'warn', role: 'status' }, t('cfg.oldReviewPolicy')) : null,
           ready && errorCount ? h('div', { className: 'ddf-banner', 'data-kind': 'error', role: 'alert' }, h('strong', null, fill(t('cfg.invalid'), { count: errorCount })),
             h('ul', null, ...Object.entries(errors).map(([key, text]) => h('li', { key }, h('button', { className: 'ddf-text-button', type: 'button', onClick: () => setTab(key === 'threshold' ? 'policy' : 'limits') }, text))))) : null,
           ready && config.mode !== 'off' && health.invalid.length ? h('div', { className: 'ddf-banner', 'data-kind': 'error', role: 'alert' }, h('strong', null, t('cfg.modelImpact')), '：', t('reminder.body').replace('{tiers}', health.invalid.map(tier => t('models.' + tier)).join('、')),
@@ -2248,6 +2398,13 @@ window.__ModuleLoader__.load({
           openView: slotProps?.openView,
           onFix: openModelConfig,
           getViews: () => ctx.slots.entries?.('conversation.view').map(entry => ({ id: entry.options.id })) ?? [],
+        })))
+
+        ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+          name: 'conversation.input.dock', id: `${PANEL_ID}-live`, order: 10, locale: NS,
+          inject: sessionId => ({ t, sessionId }),
+        }, ownerProps => h(ChatProgressDock, {
+          t: ownerProps?.t ?? t, sessionId: ownerProps?.sessionId, session: ownerProps?.session, progress,
         })))
 
         ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({

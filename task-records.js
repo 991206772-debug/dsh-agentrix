@@ -22,7 +22,7 @@ export function taskSummary(plan) {
     '- 创建时间：' + time(plan.createdAt), '- 最近更新：' + time(plan.updatedAt),
     '- 工作目录：' + (plan.cwd || '未提供项目目录'), '- 主 Agent：' + plan.sessionId,
     '- 原始需求消息：' + (plan.source?.messageId || '未记录'),
-    plan.routing?.route ? '- 路由：' + plan.routing.route + '（依据：' + ((plan.routing.reasonLabels || plan.routing.reasons || []).join('、') || '未记录') + '）' : '',
+    plan.routing?.route ? '- 初始分流建议（非主控最终决定）：' + plan.routing.route + '（依据：' + ((plan.routing.reasonLabels || plan.routing.reasons || []).join('、') || '未记录') + '）' : '',
     plan.activationBudget ? '- 启动尝试次数：' + plan.activationBudget.used + ' / ' + plan.activationBudget.limit + '（剩余 ' + Math.max(0, plan.activationBudget.limit - plan.activationBudget.used) + '）' : '',
     ...(plan.routingWarnings?.length ? ['- 路由提醒：' + plan.routingWarnings.join('；')] : []),
     '', '## 原始需求', '', plan.source?.text || '历史记录未保存原始需求，请回到来源会话核对。',
@@ -34,6 +34,14 @@ export function taskSummary(plan) {
       incompleteReason(task))) : '全部子任务已验收。',
     '', '本档案提供继续处理所需的记录；重新加载后，活动子任务须先清理，再按现有规则重试。']
   if (plan.completion) lines.push('', '## 程序交付回执', '', completionText(plan.completion))
+  if (plan.coordinatorIssue) lines.push('', '## 主控模型服务', '', plan.coordinatorIssue.message,
+    '- 服务：' + (plan.coordinatorIssue.provider || '未记录') + ' / ' + (plan.coordinatorIssue.model || '未记录'),
+    '- 原始错误：' + plan.coordinatorIssue.details, '- 下一步：' + plan.coordinatorIssue.action,
+    '- 恢复响应时间：' + time(plan.coordinatorIssue.resolvedAt))
+  if (plan.inputs?.length) lines.push('', '## 用户补充及处理', '', ...plan.inputs.flatMap(input => [
+    `- ${input.id} · ${{ queued: '待主控接收', received: '主控已接收，待处理', forwarded: '已同步至任务', resolved: '已答复', withdrawn: '已撤回' }[input.status] || input.status} · ${time(input.at)}`,
+    input.text, ...(input.taskId ? ['- 对应任务：' + input.taskId] : []), ...(input.resolution ? ['- 处理说明：' + input.resolution] : []),
+    ...(input.additionalCriteria?.length ? ['- 新增验收标准：' + input.additionalCriteria.join('；')] : [])]))
   const usage = plan.usage
   lines.push('', '## 本次需求用量', '', usage?.complete && usage.roles.every(row => row.responses >= row.requests)
     ? '已记录全部已返回请求；输入、缓存和输出沿用宿主原始口径，不估算费用。' : '统计不完整；历史或缺失数据不补造。')
@@ -48,6 +56,10 @@ export function taskSummary(plan) {
       '- 档位依据：' + (task.complexityReason || '未记录'),
       '- 配置来源：' + (task.modelRoute ? task.modelRoute.source === 'configured' ? '用户配置' : '启动时继承主 Agent' : '历史未记录'),
       '- 配置模型：' + (task.modelRoute?.requested ? task.modelRoute.requested.provider + ' / ' + task.modelRoute.requested.model : '未记录'),
+      ...(task.dispatcherModel ? [
+        '- 审查沿用主控模型：' + task.dispatcherModel.provider + ' / ' + task.dispatcherModel.model + '；思考强度：' + (task.dispatcherModel.reasoningEffort ?? '模型默认值'),
+        '- 分发模型记录：' + (task.dispatcherModel.source === 'legacy-review' ? '旧任务缺少分发快照，采用首次审查时的主控模型' : '任务第 ' + task.dispatcherModel.attempt + ' 次派发时固定') + '；时间：' + time(task.dispatcherModel.at),
+      ] : []),
       '- 实际请求模型：' + (task.modelRoute?.actual ? task.modelRoute.actual.provider + ' / ' + task.modelRoute.actual.model : task.modelRoute ? '尚未请求' : '历史未记录'),
       ...(!task.modelRoute && task.model ? ['- 历史模型记录：' + task.model.provider + ' / ' + task.model.model + '（未记录配置与实际请求的区别）'] : []),
       ...(task.modelRoute?.rejected ? ['- 已阻止的模型请求：' + task.modelRoute.rejected.provider + ' / ' + task.modelRoute.rejected.model] : []),
@@ -71,6 +83,7 @@ export function taskSummary(plan) {
           '- 执行者下一步：' + state.checkpoint.nextStep, '- 阶段工具证据：' + state.checkpoint.evidence.join('、')] : []))
     }
     if (task.error) lines.push('', '### 阻塞或失败原因', '', task.error)
+    if (task.issue?.action) lines.push('- 下一步：' + task.issue.action)
     if (task.stop) lines.push('', '### 取消记录', '', '- 原因：' + task.stop.reason,
       '- 取消来源：' + ({ coordinator: '主控', host: '用户或宿主' }[task.stop.source] || task.stop.source),
       '- 取消时间：' + time(task.stop.at))
@@ -87,7 +100,7 @@ export function taskSummary(plan) {
         '- 审查对应执行次数：' + audit.forAttempt, '- 审查启动次数：' + audit.attempts,
         '- 需求：' + verdict(audit.specVerdict) + '；质量：' + verdict(audit.qualityVerdict),
         '- 审查模型：' + (route ? route.provider + ' / ' + route.model : '未记录') + '（' + (audit.modelRoute?.actual ? '实际请求已核对' : '尚未记录实际请求') + '）',
-        '- 审查配置来源：' + (audit.modelRoute ? audit.modelRoute.source === 'configured' ? '用户配置' : '审查启动时跟随主控' : '历史未记录'),
+        '- 审查配置来源：' + (audit.modelRoute ? audit.modelRoute.source === 'dispatcher' ? '沿用本次执行的分发者模型记录' : audit.modelRoute.source === 'configured' ? '历史用户配置' : '历史审查启动时跟随主控' : '历史未记录'),
         ...(audit.error ? ['- 原因：' + audit.error] : []),
         ...(audit.execution?.reportPath ? ['- 完整报告：' + audit.execution.reportPath] : []),
         ...(audit.report ? ['', audit.report] : []))
