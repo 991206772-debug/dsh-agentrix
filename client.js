@@ -630,7 +630,8 @@ window.__ModuleLoader__.load({
     const modelRoutes = config => Object.fromEntries(MODEL_ROLES.map(role => [role,
       config?.models && Object.hasOwn(config.models, role) ? config.models[role] : config?.models?.[role === 'worker' ? 'routine' : 'complex'] ?? null]))
     const draftOf = config => ({ mode: config?.mode ?? 'auto', threshold: config?.threshold ?? 2,
-      maxParallel: config?.maxParallel ?? 2, maxAttempts: config?.maxAttempts ?? 2, maxActivations: config?.maxActivations ?? 8, taskTimeoutMinutes: config?.taskTimeoutMinutes ?? 15,
+      maxParallel: config?.maxParallel ?? config?.defaults?.maxParallel ?? 2, maxAttempts: config?.maxAttempts ?? config?.defaults?.maxAttempts ?? 2,
+      maxActivations: config?.maxActivations ?? config?.defaults?.maxActivations ?? 8, taskTimeoutMinutes: config?.taskTimeoutMinutes ?? config?.defaults?.taskTimeoutMinutes ?? 15,
       models: modelRoutes(config) })
     const configSignature = config => config?.revision ?? JSON.stringify(draftOf(config))
     const sameValue = (left, right) => JSON.stringify(left) === JSON.stringify(right)

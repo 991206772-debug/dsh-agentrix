@@ -8,7 +8,7 @@ const assetDirectory = process.argv[2]
 if (!assetDirectory) throw new Error('Provide a directory containing react.js and react-dom.js')
 const invalid = process.argv.includes('--invalid')
 const loadError = process.argv.includes('--load-error')
-let config = { ok: true, modelRouting: 'roles', mode: 'auto', threshold: 2, maxParallel: 2, maxAttempts: 2, maxActivations: 8, taskTimeoutMinutes: 15, locked: false,
+let config = { ok: true, modelRouting: 'roles', mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS, locked: false,
   models: { worker: { provider: invalid ? 'retired-demo' : 'demo', model: 'routine-model' }, reviewer: { provider: 'demo', model: 'design-model' } }, file: 'C:/isolated-test/delegation-first/default.json',
   defaults: { mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS }, ranges: { threshold: { min: 0, max: 20 }, ...OPTION_RANGES },
   revision: 'preview-1', updatedAt: Date.now(), source: { kind: 'file', profile: 'default', environmentValue: null } }

@@ -6,16 +6,16 @@ import { buildCompletion, completionText, incompleteReason, RECOVERY_LIMIT } fro
 import { startSupervision, observeTool, observeUsage, observeRequest, budgetExceeded, EXECUTION_BUDGET, SUPERVISION_POLICY } from './supervision.js'
 
 export const DEFAULT_OPTIONS = Object.freeze({
-  maxParallel: 2, maxAttempts: 2, maxActivations: 8, taskTimeoutMinutes: 15,
+  maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120,
   models: { worker: null, reviewer: null },
 })
 const MAX_PLANS = 12
 const MAX_TASKS = 16
 const MIN_ACTIVATIONS = 1
-const MAX_ACTIVATIONS = 32
+const MAX_ACTIVATIONS = 256
 export const OPTION_RANGES = Object.freeze({
-  maxParallel: Object.freeze({ min: 1, max: 4 }), maxAttempts: Object.freeze({ min: 1, max: 3 }),
-  maxActivations: Object.freeze({ min: MIN_ACTIVATIONS, max: MAX_ACTIVATIONS }), taskTimeoutMinutes: Object.freeze({ min: 1, max: 60 }),
+  maxParallel: Object.freeze({ min: 1, max: 8 }), maxAttempts: Object.freeze({ min: 1, max: 10 }),
+  maxActivations: Object.freeze({ min: MIN_ACTIVATIONS, max: MAX_ACTIVATIONS }), taskTimeoutMinutes: Object.freeze({ min: 1, max: 240 }),
 })
 const CHECK_TOOLS = ['read', 'grep', 'glob', 'pwsh', 'bash']
 const LIVE = ['starting', 'running']

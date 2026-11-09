@@ -74,6 +74,9 @@ try {
   let response
   await routes.get('/dsh-delegation-first/api/state')({ method: 'GET' }, { writeHead() {}, end(body) { response = JSON.parse(body) } })
   assert.equal(response.ok, true)
+  for (const [key, value] of Object.entries({ maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120 })) {
+    assert.equal(response.limits[key], value, key + ' installed default')
+  }
   const saveConfig = async body => {
     let status, payload
     await routes.get('/dsh-delegation-first/api/config')({ method: 'POST', async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)) } },

@@ -437,6 +437,37 @@ const designConfig = () => ({ ok: true, mode: 'auto', threshold: 2, maxParallel:
   ranges: { threshold: { min: 0, max: 20 }, maxParallel: { min: 1, max: 4 }, maxAttempts: { min: 1, max: 3 }, maxActivations: { min: 1, max: 32 }, taskTimeoutMinutes: { min: 1, max: 60 } },
   source: { kind: 'file', profile: 'default', environmentValue: null }, modelRouting: 'roles', models: { worker: null, reviewer: null }, locked: false, file: 'C:/test/default.json' })
 
+test('expanded defaults and server ranges work without replacing saved lower limits', async () => {
+  const defaults = { maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120 }
+  const maxima = { maxParallel: 8, maxAttempts: 10, maxActivations: 256, taskTimeoutMinutes: 240 }
+  const ranges = Object.fromEntries(Object.entries(maxima).map(([key, max]) => [key, { min: 1, max }]))
+  const f = await sidebarFixture()
+  await f.setConfig({ ok: true, mode: 'auto', models: { worker: null, reviewer: null }, defaults, ranges })
+  const panel = f.mountPanel()
+  try {
+    await panel.flush(); panel.button('执行限制').props.onClick(); await panel.flush()
+    for (const [key, value] of Object.entries(defaults)) {
+      const input = panel.nodes('input').find(node => node.props.id === 'ddf-' + key)
+      assert.equal(Number(input.props.value), value, key + ' fallback')
+      assert.equal(input.props.max, maxima[key], key + ' range')
+      assert.ok(panel.text().includes('默认 ' + value), key + ' default label')
+    }
+    const saved = designConfig()
+    await f.setConfig({ ...saved, revision: 'expanded-revision', defaults, ranges }); await panel.flush()
+    for (const key of Object.keys(defaults)) {
+      assert.equal(Number(panel.nodes('input').find(node => node.props.id === 'ddf-' + key).props.value), saved[key], key + ' saved value')
+    }
+    const expanded = { maxParallel: 6, maxAttempts: 6, maxActivations: 128, taskTimeoutMinutes: 180 }
+    for (const [key, value] of Object.entries(expanded)) {
+      panel.nodes('input').find(node => node.props.id === 'ddf-' + key).props.onChange({ target: { value: String(value) } })
+      await panel.flush()
+    }
+    assert.equal(panel.button('保存').props.disabled, false)
+    await panel.button('保存').props.onClick(); await panel.flush()
+    for (const [key, value] of Object.entries(expanded)) assert.equal(f.posted().at(-1)[key], value, key + ' saved')
+  } finally { panel.close(); f.close() }
+})
+
 test('the four configuration tabs preserve drafts and validate fields using server ranges', async () => {
   const configured = designConfig(); configured.ranges.maxAttempts.max = 4
   const f = await sidebarFixture(); await f.setConfig(configured); const panel = f.mountPanel()

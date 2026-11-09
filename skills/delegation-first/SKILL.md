@@ -17,7 +17,7 @@ description: "主 Agent 自动判断任务难度、拆分任务、选择子模�
    准备读取用 `read/grep/glob`；目录和 Git 基线用 `delegation_inspect({operation:'list'|'git_status',directory})`。准备记录用 `delegation_note({kind:'task_plan'|'findings'|'progress',content})`，目录由插件确定并返回，不占业务操作额度。不得把任意业务文件命名为计划文档来绕过委派，也不要反复尝试被阻止的未知 shell。
 2. 调用 `delegation_plan` 提交结构化任务卡。字段和示例见 `references/task-card.md`。
 3. 主控使用对话框选择的高模型做规划与最终验收，先确定复杂需求的方案、接口与验收标准，再拆给执行者。`complexity: routine/complex` 和 `complexityReason` 只说明复杂度与审查需要。所有执行者固定使用 `models.worker`；独立审查固定使用 `models.reviewer`。执行模型未选则暂停，不继承主控；审查模型未选则明确跟随主控，并在审查启动时固定快照。主控自动派单只走 `delegation_plan/run`，不可走原生派单绕过角色配置。
-4. 调用 `delegation_run`。插件先检查执行模型；复杂任务还提前检查必需的审查模型，再按依赖、写入范围、并发与启动预算派单。默认每计划最多启动 8 次（首次、返工、独立审查都计入，可配置 1~32）；预算耗尽不反复 run。模型配置失效时说明执行或审查哪个角色有问题，提示重新选择并保存；不会偷偷换模型。任务尚未启动时不消耗执行次数，保存后可继续原计划。
+4. 调用 `delegation_run`。插件先检查执行模型；复杂任务还提前检查必需的审查模型，再按依赖、写入范围、并发与启动预算派单。默认每计划最多启动 64 次（首次、返工、独立审查都计入，可配置 1~256）；预算耗尽不反复 run。模型配置失效时说明执行或审查哪个角色有问题，提示重新选择并保存；不会偷偷换模型。任务尚未启动时不消耗执行次数，保存后可继续原计划。
 5. 执行者在调查、实现或验证阶段用 `delegation_checkpoint` 记录结论、下一步和成功工具 callId；阶段记录待主控核实，不代表完成，也不延长时限。执行者通过 `delegation_report` 提交报告，工具确认后自动结束，由插件通知原主控；不用 `send_message` 交成果，提交后不能继续修改。`NEEDS_CONTEXT/BLOCKED` 暂停派单，先处理原因；`DONE_WITH_CONCERNS` 要主控说明疑点如何处理。用 `delegation_status` 核对状态，不不断轮询或重复派单。
 6. 对 `review` 状态任务调用 `delegation_verify`，主控亲自执行任务卡中的文件读取与命令。严格模式下也允许。
 7. 新建 complex 任务自动安排一个独立只读审查者，同时检查需求和质量，审查通过后主控才可验收。普通任务由主控实际核验，可按风险用 `delegation_audit` 请求独立审查。两种审查均用 reviewer 模型并计入同一并发与启动预算；失败后用 `delegation_audit({taskId,message})` 明确重试审查，不重跑实现。

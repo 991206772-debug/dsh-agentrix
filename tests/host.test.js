@@ -65,6 +65,49 @@ export async function host() {
 
 const complex = '1. 重构所有模块并且迁移数据\n2. 批量修复接口同时补充测试套件'
 
+test('expanded execution limits are authoritative, persist, and reject values above their ranges', async () => {
+  delete process.env.DSH_DELEGATION_FIRST
+  process.env.DSH_HOME = path.join(home, 'expanded-limits')
+  const h = await host()
+  try {
+    const defaults = { maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120 }
+    const maxima = { maxParallel: 8, maxAttempts: 10, maxActivations: 256, taskTimeoutMinutes: 240 }
+    const initial = (await h.request('GET')).payload
+    for (const [key, value] of Object.entries(defaults)) {
+      assert.equal(initial[key], value, key)
+      assert.equal(initial.defaults[key], value, key + ' default')
+      assert.deepEqual(initial.ranges[key], { min: 1, max: maxima[key] }, key + ' range')
+    }
+    const limits = { maxParallel: 6, maxAttempts: 6, maxActivations: 128, taskTimeoutMinutes: 180 }
+    const saved = await h.request('POST', limits)
+    assert.equal(saved.status, 200)
+    const stored = JSON.parse(await readFile(saved.payload.file, 'utf8'))
+    for (const [key, value] of Object.entries(limits)) {
+      assert.equal(saved.payload[key], value, key)
+      assert.equal(stored[key], value, key + ' persisted')
+      assert.equal((await h.request('POST', { [key]: maxima[key] + 1 })).status, 400, key + ' upper bound')
+    }
+  } finally { await h.close() }
+})
+
+test('new defaults preserve explicitly saved lower execution limits without rewriting them', async () => {
+  delete process.env.DSH_DELEGATION_FIRST
+  process.env.DSH_HOME = path.join(home, 'saved-limits')
+  const h = await host()
+  try {
+    const file = (await h.request('GET')).payload.file
+    const limits = { maxParallel: 2, maxAttempts: 3, maxActivations: 8, taskTimeoutMinutes: 60 }
+    const original = JSON.stringify({ version: 3, mode: 'auto', ...limits })
+    await mkdir(path.dirname(file), { recursive: true })
+    await writeFile(file, original)
+    const config = (await h.request('GET')).payload
+    for (const [key, value] of Object.entries(limits)) assert.equal(config[key], value, key)
+    assert.equal(config.defaults.maxActivations, 64)
+    assert.equal(config.defaults.taskTimeoutMinutes, 120)
+    assert.equal(await readFile(file, 'utf8'), original)
+  } finally { await h.close() }
+})
+
 test('legacy model settings migrate to execution and review roles without rewriting the file on read', async () => {
   delete process.env.DSH_DELEGATION_FIRST
   const h = await host()
@@ -333,8 +376,8 @@ test('configuration persists model routes, validates limits, and updates the cur
   assert.equal(saved.status, 200)
   assert.equal(saved.payload.models.worker.model, 'cheap')
   assert.match(h.call('edit'), /派/)
-  assert.equal((await h.request('POST', { maxParallel: 8 })).status, 400)
-  assert.equal((await h.request('POST', { maxActivations: 33 })).status, 400)
+  assert.equal((await h.request('POST', { maxParallel: 9 })).status, 400)
+  assert.equal((await h.request('POST', { maxActivations: 257 })).status, 400)
   assert.equal((await h.request('POST', { models: { routine: { provider: 'local' } } })).status, 400)
   await h.close()
   const reopened = await host(); await reopened.state()
@@ -363,8 +406,8 @@ test('configuration exposes authoritative ranges and rejects stale or concurrent
   try {
     await h.request('POST', { mode: 'auto', models: { routine: null, complex: null } })
     const initial = (await h.request('GET')).payload
-    assert.deepEqual(initial.ranges.maxAttempts, { min: 1, max: 3 })
-    assert.equal(initial.defaults.taskTimeoutMinutes, 15)
+    assert.deepEqual(initial.ranges.maxAttempts, { min: 1, max: 10 })
+    assert.equal(initial.defaults.taskTimeoutMinutes, 120)
     assert.equal(initial.source.kind, 'file')
     assert.ok(initial.revision)
     assert.ok(initial.updatedAt > 0)

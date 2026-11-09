@@ -18,6 +18,19 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('default execution limits dispatch four tasks and retain the expanded plan and time budgets', async () => {
+  const f = await fixture()
+  await f.plan(['a', 'b', 'c', 'd', 'e'].map(id => card(id)))
+  await f.execute('delegation_run')
+  const plan = f.snapshot()
+  assert.equal(f.calls.length, 4)
+  assert.equal(plan.tasks[4].status, 'queued')
+  assert.equal(plan.activationBudget.limit, 64)
+  for (const task of plan.tasks.slice(0, 4)) {
+    assert.equal(task.supervision.deadlineAt - task.supervision.startedAt, 120 * 60_000)
+  }
+})
+
 test('execution models depend on role rather than task complexity and both audit paths use the reviewer', async () => {
   const f = await fixture({ autoConclude: true, models: {
     worker: { provider: 'local', model: 'low-worker' }, reviewer: { provider: 'local', model: 'high-reviewer' },
