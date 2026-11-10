@@ -19,7 +19,8 @@ export async function host() {
   const listeners = new Map(), routes = new Map(), definitions = new Map(), cleanups = []
   let guard
   const agent = { id: 'root' }
-  const sessions = { get: id => ({ header: id === 'worker' ? { origin: 'subagent', parentSession: 'root' } : {} }) }
+  const sessions = { get: id => ({ header: id === 'worker' ? { origin: 'subagent', parentSession: 'root' } : { title: '便签保存内容丢失排查' } }) }
+  const sessionTitle = { get: session => ({ title: session?.header?.title }) }
   const emit = (name, ...args) => { for (const fn of listeners.get(name) ?? []) fn(...args) }
   const ctx = {
     tools: {
@@ -28,7 +29,7 @@ export async function host() {
       schemas: () => ['subagent', 'read', 'grep', 'glob', 'pwsh'].map(name => ({ name })).concat([...definitions.keys()].map(name => ({ name }))),
       register(definition) { definitions.set(definition.name, definition); return () => definitions.delete(definition.name) },
     },
-    get(name) { return { sessions, agents: { list: () => [], get: id => id === 'root' ? agent : undefined }, webServer: ctx.webServer,
+    get(name) { return { sessions, sessionTitle, agents: { list: () => [], get: id => id === 'root' ? agent : undefined }, webServer: ctx.webServer,
       llm: { async resolveCallConfig(route) {
         if (route.provider === 'retired') throw Object.assign(new Error('no adapter registered for provider "retired"'), { code: 'NO_ADAPTER' })
         return { config: { ...route }, modelInfo: { id: route.model } }
@@ -64,6 +65,12 @@ export async function host() {
 }
 
 const complex = '1. 重构所有模块并且迁移数据\n2. 批量修复接口同时补充测试套件'
+
+test('state includes the current DSH conversation title', async () => {
+  const h = await host(); h.turn('修改页面标题')
+  assert.equal((await h.state()).sessionTitle, '便签保存内容丢失排查')
+  await h.close()
+})
 
 test('obsolete reviewer settings are inert and config saves expose the dispatcher-snapshot policy', async () => {
   delete process.env.DSH_DELEGATION_FIRST
@@ -300,41 +307,40 @@ test('short approvals and follow-up requirements retain task context, while new 
   await h.close()
 })
 
-test('growing workload updates routing advice without forcing delegation', async () => {
+test('workload thresholds do not rewrite the initial difficulty or route', async () => {
   const h = await host(); await h.state(); h.turn('修改页面标题')
-  for (let i = 0; i < 6; i++) assert.equal(h.call('pwsh', String(i)), undefined)
-  assert.equal(h.call('pwsh', 'seventh'), undefined)
+  const initial = await h.state()
+  for (let i = 0; i < 12; i++) assert.equal(h.call('read', String(i)), undefined)
+  for (let i = 0; i < 6; i++) assert.equal(h.call('pwsh', `command-${i}`), undefined)
+  for (const file of ['src/a.js', 'src/b.js', 'src/c.js']) {
+    assert.equal(h.call('edit', file, h.agent, { file_path: file }), undefined)
+  }
   const state = await h.state()
-  assert.equal(state.difficulty.level, 'complex')
-  assert.match(state.difficulty.signals.join(' '), /执行.*6/)
+  assert.deepEqual(state.difficulty, initial.difficulty)
+  assert.deepEqual(state.route, initial.route)
   await h.close()
 })
 
-test('follow-up turns retain workload advice without blocking direct execution', async () => {
+test('follow-up turns retain the initial difficulty and allow continued direct execution', async () => {
   const h = await host(); await h.state(); h.turn('修改页面标题')
+  const initial = await h.state()
   for (let i = 0; i < 4; i++) assert.equal(h.call('edit', String(i)), undefined)
   h.turn('继续呢')
   assert.equal(h.call('edit', 'fifth'), undefined)
   assert.equal(h.call('edit', 'sixth'), undefined)
   assert.equal(h.call('edit', 'seventh'), undefined)
+  const continued = (await h.state()).difficulty
+  assert.equal(continued.level, initial.difficulty.level)
+  assert.equal(continued.score, initial.difficulty.score)
+  assert.ok(initial.difficulty.signals.every(signal => continued.signals.includes(signal)))
   await h.close()
 })
 
-test('editing several real files upgrades the initial single-file estimate', async () => {
-  const h = await host(); await h.state(); h.turn('修改页面标题')
-  for (const file of ['src/a.js', 'src/b.js', 'src/c.js']) {
-    assert.equal(h.call('edit', file, h.agent, { file_path: file }), undefined)
-  }
-  assert.equal(h.call('edit', 'fourth', h.agent, { file_path: 'src/d.js' }), undefined)
-  assert.match((await h.state()).difficulty.signals.join(' '), /3.*文件/)
-  await h.close()
-})
-
-test('read-only context remains available after workload escalation', async () => {
+test('large read-only context does not alter difficulty or block later direct work', async () => {
   const h = await host(); await h.state(); h.turn('你评审下代码，看看是否可以优化')
-  for (let i = 0; i < 12; i++) assert.equal(h.call('read', String(i)), undefined)
-  for (let i = 12; i < 40; i++) assert.equal(h.call('read', String(i)), undefined)
-  assert.equal((await h.state()).difficulty.level, 'complex', 'reading can strengthen the routing advice without blocking context')
+  const initial = await h.state()
+  for (let i = 0; i < 40; i++) assert.equal(h.call('read', String(i)), undefined)
+  assert.deepEqual((await h.state()).difficulty, initial.difficulty)
   assert.equal(h.call('edit'), undefined)
   assert.equal(h.call('read', 'after-delegation'), undefined)
   assert.equal(h.call('pwsh', 'worker', { id: 'worker' }), undefined)

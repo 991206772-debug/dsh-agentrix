@@ -262,9 +262,6 @@ const GATED_TOOLS = [
   'pwsh',
   'bash',
 ]
-const WORK_TOOLS = [...GATED_TOOLS, 'read', 'grep', 'glob']
-const READ_ONLY_TOOLS = ['read', 'grep', 'glob']
-const newWorkload = () => ({ direct: 0, calls: 0, files: new Set(), exhausted: false })
 
 /** A call of one of these means work left this context. */
 const DELEGATION_TOOLS = ['spawn_teammate', 'subagent', 'subagent_fork']
@@ -538,6 +535,16 @@ export function apply(ctx) {
     }
   }
 
+  const sessionTitleOf = sessionId => {
+    try {
+      const session = sessions()?.get?.(sessionId)
+      const title = ctx.get('sessionTitle')?.get?.(session)?.title
+      return typeof title === 'string' && title.trim() ? title.trim() : null
+    } catch {
+      return null
+    }
+  }
+
   /** sessionId → the counters and the judgement a turn is governed by. */
   const states = new Map()
   const stateOf = (sessionId) => {
@@ -562,7 +569,6 @@ export function apply(ctx) {
         taskText: '',
         source: null,
         sessionId,
-        workload: newWorkload(),
         // Message ids already counted. The harness commits the same human input
         // twice (see `rememberHumanText`), so ids are the only safe dedupe key.
         humanIds: new Set(),
@@ -619,7 +625,7 @@ export function apply(ctx) {
       const continuing = !text || CONTINUE_ONLY.test(text.trim()) ||
         (text.length < 120 && FOLLOWUP.test(text.trim())) || orchestration.hasPending(state.sessionId)
       const previous = continuing ? state.difficulty : null
-      if (!continuing) { state.taskText = ''; state.workload = newWorkload() }
+      if (!continuing) state.taskText = ''
       if (text && !CONTINUE_ONLY.test(text.trim())) state.taskText = `${state.taskText}\n${text}`.trim().slice(-4000)
       let difficulty = state.taskText ? scoreTask(state.taskText) : { ...DEFAULT_DIFFICULTY }
       if (previous && LEVEL_RANK[previous.level] >= LEVEL_RANK[difficulty.level]) {
@@ -715,18 +721,6 @@ export function apply(ctx) {
       state.last = { tool: name, kind: 'managed-plan', at: Date.now() }
       return '[DSH Agentrix] 当前计划尚未验收。请监督或返工任务；主控验证通过 delegation_verify 执行，避免与子 Agent 重复修改。'
     }
-    if (current.enabled && current.mode === 'auto' && WORK_TOOLS.includes(name) && !orchestration.hasPending(role.agentId)) {
-      const work = state.workload
-      const reason = work.files.size >= 3 ? '已涉及 3 个修改文件' :
-        work.direct >= 6 ? '直接执行已达 6 次' : work.calls >= 12 ? '上下文读取与执行已达 12 次' : null
-      if (reason) {
-        work.exhausted = true
-        state.difficulty = { score: Math.max(6, state.difficulty?.score ?? 0), level: 'complex',
-          signals: [...new Set([...(state.difficulty?.signals ?? []), reason])] }
-        state.route = routeFor(state.difficulty, state.taskText)
-        state.policy = policyFor('complex', current)
-      }
-    }
     const verdict = evaluate(name, state, current)
     if (verdict.countsAsDelegation) {
       state.delegationPending.set(exec.callId, state.turn)
@@ -735,18 +729,6 @@ export function apply(ctx) {
     }
     if (verdict.allow) {
       if (verdict.countsAsDirect) state.direct += 1
-      if (current.enabled && current.mode === 'auto' && WORK_TOOLS.includes(name)) {
-        const work = state.workload
-        work.calls = Math.min(12, work.calls + 1)
-        if (verdict.countsAsDirect) {
-          work.direct = Math.min(6, work.direct + 1)
-          const target = exec.arguments?.file_path ?? exec.arguments?.path
-          if (typeof target === 'string' && !['pwsh', 'bash'].includes(name) && work.files.size < 3) {
-            const file = path.resolve(sessions()?.get?.(role.agentId)?.header?.cwd ?? process.cwd(), target)
-            work.files.add(process.platform === 'win32' ? file.toLowerCase() : file)
-          }
-        }
-      }
       return undefined
     }
     state.denied += 1
@@ -899,6 +881,7 @@ export function apply(ctx) {
       })(),
       sessions: [...states.entries()].filter(([id]) => selectedId === null || id === selectedId).map(([id, state]) => ({
         sessionId: id,
+        sessionTitle: sessionTitleOf(id),
         source: state.source,
         role: state.isCoordinator ? 'coordinator' : 'worker',
         turn: state.turn,

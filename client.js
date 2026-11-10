@@ -48,7 +48,7 @@ window.__ModuleLoader__.load({
       'config.subtitle': '改完点保存立即生效，不需要重启 Harness。',
       'mode.label': '模式',
       'mode.auto': '自动判断难度',
-      'mode.auto.hint': '简单任务直接完成；中等和复杂任务交给子 Agent，主控负责验收。',
+      'mode.auto.hint': '规则评分只提供分流建议；主控结合任务范围和并行价值决定是否委派，小任务可直接完成。',
       'mode.strict': '严格（先派单）',
       'mode.strict.hint': '没派单的回合，一次动手都不许。',
       'mode.off': '关闭',
@@ -117,7 +117,7 @@ window.__ModuleLoader__.load({
       'config.subtitle': 'Saved changes apply immediately; no Harness restart needed.',
       'mode.label': 'Mode',
       'mode.auto': 'Judge each turn',
-      'mode.auto.hint': 'Tightens or relaxes the gate according to the turn\u2019s difficulty.',
+      'mode.auto.hint': 'Rule-based scoring only suggests a route. The coordinator decides whether to delegate based on scope and parallel value; small tasks can be handled directly.',
       'mode.strict': 'Strict (delegate first)',
       'mode.strict.hint': 'No hands-on call at all in a turn that has not delegated.',
       'mode.off': 'Off',
@@ -318,8 +318,8 @@ window.__ModuleLoader__.load({
       'view.boardActivity': '当前进展', 'view.boardReason': '原因', 'view.boardNext': '下一步',
       'view.boardDetails': '查看任务详情', 'view.boardHideDetails': '收起任务详情',
       'view.boardAffected': '受影响', 'view.boardRootCause': '根因', 'view.boardNoActivity': '暂无进展',
-      'view.boardNoReason': '记录中未提供具体原因', 'view.boardNoPlan': '本次需求未启动托管子代理。',
-      'view.boardNoPlanHint': '主控可以直接处理需求；需要委派时再建立计划，执行与验收状态会显示在这里。',
+      'view.boardNoReason': '记录中未提供具体原因', 'view.boardNoPlan': '当前没有托管子代理计划。',
+      'view.boardNoPlanHint': '规则分级只提供建议，不会自动派单。上方的直接操作和派发次数反映本轮已记录的实际情况；没有托管计划时，不会有子代理进度或验收记录。',
       'view.unavailable': '对应页签未启用，可在 DSH 插件设置中检查。', 'view.diagnostics': '查看本会话的判断依据',
       'view.unknownError': '执行失败，旧记录未保存具体原因。请到 Fleet 或聊天核对原始错误。',
       'view.archiveWarning': '辅助记录提示',
@@ -422,8 +422,8 @@ window.__ModuleLoader__.load({
       'view.boardActivity': 'Current activity', 'view.boardReason': 'Reason', 'view.boardNext': 'Next step',
       'view.boardDetails': 'View task details', 'view.boardHideDetails': 'Hide task details',
       'view.boardAffected': 'Affected', 'view.boardRootCause': 'Root cause', 'view.boardNoActivity': 'No activity recorded',
-      'view.boardNoReason': 'No specific reason was recorded', 'view.boardNoPlan': 'No managed child agent for this request.',
-      'view.boardNoPlanHint': 'The coordinator can work directly. If delegation is needed, its plan will show execution and acceptance here.',
+      'view.boardNoReason': 'No specific reason was recorded', 'view.boardNoPlan': 'No managed child-agent plan exists.',
+      'view.boardNoPlanHint': 'Rule-based difficulty is advice and does not dispatch agents. The direct-action and dispatch counts above show recorded activity; without a managed plan, there is no child-agent progress or acceptance record.',
       'view.unavailable': 'This view is not enabled. Check DSH plugin settings.', 'view.diagnostics': 'View this conversation’s difficulty assessment',
       'view.unknownError': 'Execution failed. This older record has no detailed cause. Check Fleet or the conversation for the original error.',
       'view.archiveWarning': 'Supporting record warning',
@@ -576,12 +576,16 @@ window.__ModuleLoader__.load({
     })
     Object.assign(zh, {
       'view.decisionTitle': '本轮判断与执行安排', 'view.decisionDifficulty': '本轮难度',
-      'view.decisionHint': '规则评分用于建议如何拆分任务，不代表完成进度或模型能力。',
+      'view.decisionHint': '规则评分只给分流建议，不会自动派单；操作次数单独展示，不会改变难度。',
       'view.suggestedRoute': '系统建议', 'view.actualArrangement': '当前实际安排',
+      'view.currentSessionTitle': '当前会话：{title}',
       'view.routeCurrent': '当前回合的建议', 'view.routeSnapshot': '计划建立时的建议',
       'view.actualDependency': '按任务依赖先后执行', 'view.actualParallel': '当前 {count} 个子 Agent 同时执行',
       'view.actualRunning': '当前 1 个子 Agent 在执行', 'view.actualQueued': '计划已建立，等待派发',
-      'view.actualNoPlan': '尚未建立任务计划', 'view.actualAudit': '正在独立审查',
+      'view.actualNoPlan': '未建立托管计划；没有可显示的子代理进度',
+      'view.actualDirect': '主控已直接执行 {count} 次业务操作，未启动托管子代理',
+      'view.actualCounts': '主控直接操作 {direct} 次、记录到派发 {delegated} 次；未建立托管计划',
+      'view.actualUnknown': '未建立托管计划，当前记录不足以判断实际执行方式', 'view.actualAudit': '正在独立审查',
       'view.countersUnknown': '旧记录没有本轮统计，不用累计次数代替。',
       'view.taskModel': '执行模型', 'view.taskComplexity': '任务复杂度', 'view.taskAudit': '独立审查',
       'view.taskAcceptance': '主控验收', 'view.auditRequired': '复杂任务需独立审查',
@@ -595,12 +599,16 @@ window.__ModuleLoader__.load({
     })
     Object.assign(en, {
       'view.decisionTitle': 'Assessment and actual execution', 'view.decisionDifficulty': 'This turn\'s difficulty',
-      'view.decisionHint': 'Rule-based scores suggest how to split work; they do not measure progress or model capability.',
+      'view.decisionHint': 'Rule-based scoring only recommends a route; it does not dispatch agents. Operation counts are shown separately and do not change difficulty.',
       'view.suggestedRoute': 'Suggested route', 'view.actualArrangement': 'Actual arrangement',
+      'view.currentSessionTitle': 'Current conversation: {title}',
       'view.routeCurrent': 'Recommendation for this turn', 'view.routeSnapshot': 'Recommendation when the plan was created',
       'view.actualDependency': 'Following task dependencies', 'view.actualParallel': '{count} child Agents are running concurrently',
       'view.actualRunning': 'One child Agent is running', 'view.actualQueued': 'Plan created; awaiting dispatch',
-      'view.actualNoPlan': 'No task plan has been created', 'view.actualAudit': 'Independent review is running',
+      'view.actualNoPlan': 'No managed plan; child-agent progress is unavailable',
+      'view.actualDirect': 'The coordinator performed {count} direct operations; no managed child agent was started',
+      'view.actualCounts': 'The coordinator performed {direct} direct operations and recorded {delegated} dispatches; no managed plan exists',
+      'view.actualUnknown': 'No managed plan exists, and the available records do not show how execution proceeded', 'view.actualAudit': 'Independent review is running',
       'view.countersUnknown': 'This older record has no turn counters; cumulative counts are not substituted.',
       'view.taskModel': 'Execution model', 'view.taskComplexity': 'Task complexity', 'view.taskAudit': 'Independent review',
       'view.taskAcceptance': 'Coordinator acceptance', 'view.auditRequired': 'Complex tasks require independent review',
@@ -621,9 +629,9 @@ window.__ModuleLoader__.load({
       'supervision.requestNotice': '调用次数提醒已记录，原代理继续执行',
       'supervision.timeNotice': '运行时间提醒已记录，任务继续执行',
       'supervision.inquiry': '活动核对提醒', 'supervision.inquiryCount': '需核对活动 {count} 项',
-      'view.actualNoPlan': '尚未启动子代理，由主控自主分流',
+      'view.actualNoPlan': '未建立托管计划；没有可显示的子代理进度',
       'view.confirmedDifficulty': '主控已确认的任务复杂度', 'view.confirmedArrangement': '主控已确认的执行安排',
-      'view.initialAssessment': '初始规则判断（仅供参考）', 'view.initialDifficulty': '初步估计', 'view.unconfirmed': '尚未确认',
+      'view.initialAssessment': '规则判断与建议（仅供参考）', 'view.initialDifficulty': '规则估计', 'view.unconfirmed': '尚未确认',
       'view.delegationConfirmed': '已安排子代理', 'view.complexAudit': '执行完成后进行独立审查，主控最终验收',
       'view.routineAcceptance': '执行者提交报告，主控验证验收',
       'input.title': '补充信息', 'input.pending': '待主控处理 {count} 条', 'input.chatPending': '待处理补充 {count} 条',
@@ -644,9 +652,9 @@ window.__ModuleLoader__.load({
       'supervision.requestNotice': 'Request-count reminder recorded; same agent continues',
       'supervision.timeNotice': 'Elapsed-time reminder recorded; task continues',
       'supervision.inquiry': 'Activity inquiry', 'supervision.inquiryCount': '{count} activity inquiries',
-      'view.actualNoPlan': 'No worker started; coordinator decides the route',
+      'view.actualNoPlan': 'No managed plan; child-agent progress is unavailable',
       'view.confirmedDifficulty': 'Task complexity confirmed by coordinator', 'view.confirmedArrangement': 'Confirmed execution arrangement',
-      'view.initialAssessment': 'Initial rule-based assessment (advisory)', 'view.initialDifficulty': 'Preliminary estimate', 'view.unconfirmed': 'Not confirmed',
+      'view.initialAssessment': 'Rule-based assessment and recommendation (advisory)', 'view.initialDifficulty': 'Rule-based estimate', 'view.unconfirmed': 'Not confirmed',
       'view.delegationConfirmed': 'Child agents assigned', 'view.complexAudit': 'Independent review after execution; coordinator accepts the result',
       'view.routineAcceptance': 'Worker reports; coordinator verifies and accepts',
       'input.title': 'Additional input', 'input.pending': '{count} awaiting coordinator handling', 'input.chatPending': '{count} pending supplements',
@@ -1914,7 +1922,11 @@ window.__ModuleLoader__.load({
       const reasons = tasks.filter(task => task.complexityReason).map(task => `${task.title || task.id}：${task.complexityReason}`).join('；')
       const dependent = tasks.filter(task => ['queued', 'blocked'].includes(task.status)
         && (task.dependsOn ?? []).some(id => tasks.some(item => item.id === id && item.status !== 'accepted')))
-      const actual = !plan ? t('view.actualNoPlan')
+      const direct = session?.turnStats?.direct, delegated = session?.turnStats?.delegated
+      const noPlanActual = !Number.isFinite(direct) || !Number.isFinite(delegated) ? t('view.actualUnknown')
+        : direct > 0 && delegated > 0 ? fill(t('view.actualCounts'), { direct, delegated })
+        : direct > 0 ? fill(t('view.actualDirect'), { count: direct }) : t('view.actualNoPlan')
+      const actual = !plan ? noPlanActual
         : ['accepted', 'cancelled', 'failed', 'blocked'].includes(status) ? t('status.' + status)
         : running > 1 ? fill(t('view.actualParallel'), { count: running })
         : dependent.length ? t('view.actualDependency')
@@ -2033,6 +2045,7 @@ window.__ModuleLoader__.load({
       const modelBlock = blockers.find(task => task.issue?.code === 'MODEL_CONFIG_INVALID')
       const route = plan?.routing || state?.sessions?.find(item => item.sessionId === sessionId)?.route
       const session = state?.sessions?.find(item => item.sessionId === sessionId)
+      const sessionTitle = plan?.sessionTitle || session?.sessionTitle
       const request = session?.source
       const previous = state?.plans?.find(item => item.sessionId === sessionId && item !== plan)
       const next = plan?.completion ? completionNext(t, plan, state) : serviceProblem(plan)?.action || (plan ? dashboardNextText(t, status, tasks, modelBlock, rootTask) : '')
@@ -2051,7 +2064,9 @@ window.__ModuleLoader__.load({
         h('main', { className: 'ddf-board', 'data-status': status },
           h('header', { className: 'ddf-board-header' },
             h('div', null, h('h1', { className: 'ddf-board-title' }, t('view.tab')),
-              h('p', { className: 'ddf-board-meta' }, t('view.currentSession') + ' · ' + shortId(sessionId),
+              h('p', { className: 'ddf-board-meta' }, sessionTitle
+                ? fill(t('view.currentSessionTitle'), { title: sessionTitle }) + ' · ' + shortId(sessionId)
+                : t('view.currentSession') + ' · ' + shortId(sessionId),
                 updatedAt ? ' · ' + fill(t('view.lastRead'), { time: new Date(updatedAt).toLocaleTimeString() }) : '',
                 ' · ' + t('view.footNote'))),
             h('div', { className: 'ddf-board-actions' }, ...links)),

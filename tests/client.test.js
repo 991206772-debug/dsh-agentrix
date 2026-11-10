@@ -88,7 +88,7 @@ test('the confirmed plan takes precedence over an initial zero-score direct sugg
     assert.match(JSON.stringify(main), /主控已确认.*复杂.*重构页面/)
     assert.match(JSON.stringify(main), /已安排子代理.*独立审查/)
     assert.doesNotMatch(JSON.stringify(main), /评分|直接执行|系统建议/)
-    assert.match(view.text(), /初始规则判断.*评分 0.*直接执行/)
+    assert.match(view.text(), /规则判断与建议.*评分 0.*直接执行/)
     assert.match(view.text(), /补充信息.*待主控处理 1 条.*交付人员需要操作引导/)
     assert.match(view.text(), /已同步至任务.*ui.*提供默认配置/)
     assert.match(action.text(), /待处理补充 1 条/)
@@ -765,7 +765,7 @@ test('an older host response is scoped locally without showing unrelated tasks o
   const view = f.mountView('session-current')
   try {
     await view.flush()
-    assert.match(view.text(), /本次需求未启动托管子代理/)
+    assert.match(view.text(), /当前没有托管子代理计划/)
     assert.match(view.text(), /重新加载.*DSH Agentrix/)
     assert.doesNotMatch(view.text(), /读取失败|其他会话的私有需求|其他会话的档案提示/)
   } finally { view.close(); f.close() }
@@ -976,7 +976,7 @@ test('manual retry disables repeated requests and restores the normal view after
     assert.equal(calls, 2)
     finish({ ok: true, json: async () => ({ ok: true, sessionId: 'session-current', plans: [], sessions: [] }) })
     await view.flush()
-    assert.match(view.text(), /本次需求未启动托管子代理/)
+    assert.match(view.text(), /当前没有托管子代理计划/)
     assert.doesNotMatch(view.text(), /暂时无法显示|Failed to fetch/)
     assert.ok(view.button('整理与导出'))
   } finally { view.close(); f.close() }
@@ -1066,7 +1066,7 @@ test('loading and provider catalog failures do not become stale-model alerts', a
   } finally { f.close() }
 })
 
-test('the board exposes the confirmed plan before tasks and keeps initial assessment in diagnostics', async () => {
+test('the board exposes the confirmed plan before tasks and keeps rule-based advice in diagnostics', async () => {
   const body = { ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current', status: 'running',
     goal: '按接口规范开发工具', routing: { route: 'delegate_parallel', reasons: ['multiple_files'] }, tasks: [
       { id: 'spec', title: '确定接口规范', status: 'running', complexity: 'routine' },
@@ -1088,11 +1088,31 @@ test('the board exposes the confirmed plan before tasks and keeps initial assess
     const main = view.nodes('div').find(node => node.props?.className === 'ddf-board-decision-main')
     assert.match(JSON.stringify(main), /主控已确认.*复杂.*独立审查/)
     assert.doesNotMatch(JSON.stringify(main), /评分 3|系统建议/)
-    assert.match(view.text(), /初始规则判断.*中等.*评分 3.*并行委派多个子 Agent/)
+    assert.match(view.text(), /规则判断.*中等.*评分 3.*并行委派多个子 Agent/)
     assert.match(view.text(), /当前实际安排.*按任务依赖先后执行/)
     assert.match(view.text(), /本轮拦截.*0.*本次载入后累计 4 次/)
     assert.doesNotMatch(view.text(), /其他会话信号|评分 19/)
     assert.match(view.text(), /最近一次策略拦截.*pwsh.*主控命令需要先委派/)
+  } finally { view.close(); f.close() }
+})
+
+test('the no-plan view shows the session name and actual coordinator work separately from advice', async () => {
+  const body = { ok: true, sessionId: 'session-current', plans: [], sessions: [{
+    sessionId: 'session-current', sessionTitle: '便签保存内容丢失排查',
+    difficulty: { level: 'complex', score: 6, signals: ['需要实施或评审'] },
+    route: { route: 'delegate', reasons: ['high_complexity'] },
+    turnStats: { direct: 12, delegated: 0, denied: 0 },
+  }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    assert.match(view.text(), /当前会话：便签保存内容丢失排查/)
+    assert.match(view.text(), /主控已直接执行/)
+    assert.match(view.text(), /本轮业务操作 12/)
+    assert.match(view.text(), /规则评分只给分流建议，不会自动派单/)
+    assert.match(view.text(), /当前没有托管子代理计划/)
+    assert.doesNotMatch(view.text(), /已安排子代理/)
   } finally { view.close(); f.close() }
 })
 
