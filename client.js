@@ -214,7 +214,7 @@ window.__ModuleLoader__.load({
         body = undefined
       }
       if (!response.ok || body?.ok !== true) {
-        throw new Error(body?.error ?? `HTTP ${response.status}`)
+        throw Object.assign(new Error(body?.error ?? `HTTP ${response.status}`), { status: response.status })
       }
       return body
     }
@@ -667,6 +667,23 @@ window.__ModuleLoader__.load({
       'live.command': 'Running a command', 'live.report': 'Submitting a report', 'live.checkpoint': 'Recording stage findings',
     })
 
+    Object.assign(zh, {
+      'direct.title': '主控直接执行', 'direct.incomplete': '修改未完成',
+      'direct.advice': '系统建议委派，当前尚未启动子代理', 'direct.reasonMissing': '主控尚未说明本次直接执行的原因',
+      'direct.statement': '主控最近说明', 'direct.calls': '本轮工具调用 {count} 次',
+      'direct.unavailable': '委派入口不可用', 'direct.checkPlugin': '请检查 DSH Agentrix 插件是否启用，以及宿主的子代理功能是否可用；当前没有通过这些入口启动协作。',
+      'direct.backendMissing': 'Agentrix 插件服务不可用', 'direct.backendHint': '请检查插件是否启用；进度恢复前无法确认当前执行情况。',
+      'direct.stale': '进度暂时无法更新，以下为最近记录',
+    })
+    Object.assign(en, {
+      'direct.title': 'Coordinator executing directly', 'direct.incomplete': 'File changes remain incomplete',
+      'direct.advice': 'Delegation was suggested; no child agent has started', 'direct.reasonMissing': 'The coordinator has not explained its choice to execute directly',
+      'direct.statement': 'Latest coordinator statement', 'direct.calls': '{count} tool calls this turn',
+      'direct.unavailable': 'Delegation tools unavailable', 'direct.checkPlugin': 'Check that DSH Agentrix is enabled and the host supports subagents. These entry points have not started collaboration.',
+      'direct.backendMissing': 'Agentrix plugin service unavailable', 'direct.backendHint': 'Check that the plugin is enabled. Current execution cannot be confirmed until progress is available.',
+      'direct.stale': 'Progress could not be refreshed; the last record is shown',
+    })
+
     const CONFIG_NUMBERS = ['threshold', 'maxParallel', 'maxAttempts', 'maxActivations', 'taskTimeoutMinutes']
     // Compatibility only; current hosts provide the authoritative defaults and ranges.
     const LEGACY_RANGES = { threshold: { min: 0, max: 20 }, maxParallel: { min: 1, max: 4 }, maxAttempts: { min: 1, max: 3 }, maxActivations: { min: 1, max: 32 }, taskTimeoutMinutes: { min: 1, max: 60 } }
@@ -909,7 +926,7 @@ window.__ModuleLoader__.load({
         try {
           const data = await getState(AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]), entry.sessionId)
           if (controller.signal.aborted || sessions.get(entry.sessionId) !== entry) return
-          entry.result = { sessionId: entry.sessionId, data, error: '', loading: false }
+          entry.result = { sessionId: entry.sessionId, data, error: '', errorStatus: null, loading: false }
           const plan = currentPlanOf(data, entry.sessionId)
           const route = plan?.routing ?? data.sessions?.find(item => item.sessionId === entry.sessionId)?.route
           entry.terminal = Boolean(plan && (plan.protocolVersion >= 2 ? plan.completion : ['accepted', 'cancelled'].includes(plan.status)))
@@ -917,7 +934,7 @@ window.__ModuleLoader__.load({
           else if (entry.timer === null) entry.timer = window.setInterval(() => { void refresh(entry) }, CHAT_POLL_MS)
         } catch (error) {
           if (controller.signal.aborted || sessions.get(entry.sessionId) !== entry) return
-          entry.result = { ...entry.result, loading: false, error: error.message || String(error) }
+          entry.result = { ...entry.result, loading: false, error: error.message || String(error), errorStatus: error.status }
         } finally { if (entry.controller === controller) entry.controller = null }
         for (const notify of entry.listeners) notify(entry.result)
       }
@@ -1216,8 +1233,42 @@ window.__ModuleLoader__.load({
       // transition also refreshes a terminal snapshot when the next turn starts.
       const result = useChatProgress(progress, sessionId, true, session?.running)
       const plan = currentPlanOf(result.data, sessionId)
-      if (!plan || plan.completion && !(plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled)) return null
-      return h('div', { className: 'ddf-chat-dock' }, h(ChatPlanNotice, { t, plan, error: result.error }))
+      const state = result.data?.sessions?.find(item => item.sessionId === sessionId)
+      if (result.errorStatus === 404 || result.error && !result.data) return h('section', {
+        className: 'ddf-chat-notice', 'data-kind': 'service', role: 'alert',
+      }, h('style', null, CHAT_NOTICE_STYLES), h('strong', null, t('direct.backendMissing')),
+      h('p', null, t('direct.backendHint')), h('p', null, result.error))
+      const availability = state?.delegationAvailability
+      const missing = availability?.status === 'unavailable' ? h('section', { className: 'ddf-chat-notice', 'data-kind': 'service', role: 'alert' },
+        h('style', null, CHAT_NOTICE_STYLES), h('strong', null, t('direct.unavailable')),
+        availability.missingTools?.length ? h('p', null, availability.missingTools.join('、')) : null,
+        h('p', null, t('direct.checkPlugin'))) : null
+      if (!plan) {
+        if (!missing && !state?.execution?.running && !state?.execution?.unresolvedChanges?.length) return null
+        return h('div', { className: 'ddf-chat-dock' }, missing, h(CoordinatorProgress, { t, state, error: result.error }))
+      }
+      if ((plan.completion || plan.status === 'accepted') && !(plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled)) return missing
+      return h('div', { className: 'ddf-chat-dock' }, missing, h(ChatPlanNotice, { t, plan, error: result.error }))
+    }
+
+    function CoordinatorProgress({ t, state, error }) {
+      const execution = state?.execution
+      if (!execution || !execution.running && !execution.unresolvedChanges?.length) return null
+      const failures = execution.unresolvedChanges ?? [], activity = execution.activity
+      const current = activity?.kind === 'tool' ? liveToolLabel(t, activity.tool) + (activity.target ? ' · ' + activity.target : '')
+        : activity?.kind ? t('supervision.activity.' + activity.kind) : t('live.unknown')
+      return h('section', { className: 'ddf-chat-notice ddf-chat-live', 'data-kind': failures.length ? 'service' : 'progress', role: failures.length ? 'alert' : 'status' },
+        h('style', null, CHAT_NOTICE_STYLES), h('strong', null, t(failures.length ? 'direct.incomplete' : 'direct.title')),
+        state.source?.text ? h('p', null, state.source.text.slice(0, 160)) : null,
+        error ? h('p', null, t('direct.stale')) : null,
+        execution.running ? h('p', null, t('live.current') + '：' + current) : null,
+        execution.model?.model ? h('p', null, t('role.coordinator') + '：' + execution.model.model) : null,
+        h('p', { className: 'ddf-chat-live-meta' }, fill(t('direct.calls'), { count: execution.toolCalls })),
+        state.route?.route && state.route.route !== 'direct' ? h('p', null, t('direct.advice'),
+          failures.length ? '' : ' · ' + (execution.statement ? t('direct.statement') + '：' + execution.statement : t('direct.reasonMissing'))) : null,
+        execution.lastResult ? h('p', { className: 'ddf-chat-live-meta' }, t('live.recent') + '：' + liveToolLabel(t, execution.lastResult.tool),
+          execution.lastResult.target ? ' · ' + execution.lastResult.target : '', execution.lastResult.failed ? ' · ' + t('live.toolFailed') : '') : null,
+        ...failures.map(item => h('p', { key: item.callId }, (item.target || item.tool) + '：' + item.reason)))
     }
 
     function ChatPlanNotice({ t, plan, openView, error }) {

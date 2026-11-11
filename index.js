@@ -1,6 +1,6 @@
 /** Host policy, native task orchestration, and the panel's HTTP API. */
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { createOrchestrator, OPTION_RANGES, orchestrationOptions, REVIEWER_MODEL_POLICY, validateModelRoute } from './orchestrator.js'
@@ -38,7 +38,7 @@ const DISCIPLINE = [
   "自动评分只作建议；主控按范围、风险和并行性分流：小任务直接完成并验证；执行工作多则先定方案再用 delegation_plan/run；复杂任务加独立审查。",
   "主控定方案，worker执行；审查沿用派发时的主控模型，不走原生派单。托管任务中主控不重复实现；先用 delegation_verify 实际验证，再用 delegation_review 按证据逐条验收。",
   "默认读摘要，详情指定 taskId。用户补充先答复；变更用 inputIds/additionalCriteria steer 原代理，纯答复用 acknowledge。审查核对需求与代码，主控验证验收；仅重要问题返工，minor 记录，复查不扩围。",
-  "开工、派发、阶段变化、等待或阻塞时，先向用户说清正在做什么和下一步；不能只在思考或工具里留过程，不为进度多调模型。",
+  "开工先用正文说明直接做或委派及理由；阶段变化、等待或阻塞也简短说明。多步骤重复执行优先交worker；工具失败须修复并核对原产物，不能拿读取或另一文件成功代替，不为进度多调模型。",
   "模型错配、重复故障先处理原因；次数、Token、时间只提醒，不停止、不换代理。等事件，不轮询。短任务交最终 report；长调查、阶段变化或阻塞才记 checkpoint。报告成功后自动释放。",
   "stop 只取消且须传原因。完成以程序回执为准；最后验收后自动结束，无需总结。详见 delegation-first 手册。",
 ].join('\n')
@@ -265,6 +265,8 @@ const GATED_TOOLS = [
 
 /** A call of one of these means work left this context. */
 const DELEGATION_TOOLS = ['spawn_teammate', 'subagent', 'subagent_fork']
+const MANAGED_ENTRY_POINTS = ['delegation_plan', 'delegation_run', 'delegation_status', 'delegation_report', 'delegation_verify', 'delegation_review']
+const CHANGE_TOOLS = ['write', 'edit', 'apply_patch', 'multi_edit', 'notebook_edit']
 
 /**
  * Tunables.
@@ -573,6 +575,9 @@ export function apply(ctx) {
         // twice (see `rememberHumanText`), so ids are the only safe dedupe key.
         humanIds: new Set(),
         delegationPending: new Map(),
+        execution: null,
+        activeCalls: new Map(),
+        delegationAvailability: null,
       }
       states.set(sessionId, state)
     }
@@ -698,6 +703,38 @@ export function apply(ctx) {
     }
   }
 
+  const delegationAvailability = (agent, tools) => {
+    if (!current.enabled) return { status: 'disabled', missingTools: [] }
+    try {
+      const names = new Set((tools ?? ctx.tools.schemas(agent)).map(tool => tool.name))
+      const missingTools = MANAGED_ENTRY_POINTS.filter(name => !names.has(name))
+      const nativeAvailable = canDelegate({ agent })
+      return { status: missingTools.length || !nativeAvailable ? 'unavailable' : 'available', missingTools, nativeAvailable }
+    } catch { return { status: 'unknown', missingTools: [] } }
+  }
+  const ensureExecution = state => state.execution ??= {
+    running: true, startedAt: Date.now(), lastActivityAt: Date.now(), toolCalls: 0,
+    activity: { kind: 'waiting_model_response' }, lastResult: null, statement: null, unresolvedChanges: [], repairUsed: 0,
+  }
+  const toolTarget = exec => {
+    const args = exec.arguments ?? {}
+    return String(args.file_path ?? args.path ?? args.notebook_path ?? '').slice(0, 1000)
+  }
+  const changeKey = (exec, target) => {
+    if (!target) return exec.name + ':' + exec.callId
+    const cwd = sessions()?.get?.(exec.agent.id)?.header?.cwd ?? process.cwd()
+    return path.resolve(cwd, target).replaceAll('\\', '/').toLowerCase()
+  }
+  const observeCoordinatorCall = (exec, state) => {
+    if (!current.enabled || exec.name.startsWith('delegation_')) return
+    const execution = ensureExecution(state), now = Date.now(), target = toolTarget(exec)
+    state.activeCalls.set(exec.callId, { tool: exec.name, target, key: changeKey(exec, target), turn: state.turn })
+    if (state.activeCalls.size > 100) state.activeCalls.delete(state.activeCalls.keys().next().value)
+    execution.toolCalls++
+    execution.running = true; execution.lastActivityAt = now
+    execution.activity = { kind: 'tool', tool: exec.name, target, at: now }
+  }
+
   const disposeGuard = ctx.tools.guard((exec) => {
     const childBlock = orchestration.guardChild(exec)
     if (childBlock) return childBlock
@@ -706,7 +743,7 @@ export function apply(ctx) {
     const state = stateOf(role.agentId)
     state.isCoordinator = !role.worker
     if (!state.isCoordinator) return undefined
-    if (!canDelegate(exec)) return undefined
+    if (!canDelegate(exec)) { observeCoordinatorCall(exec, state); return undefined }
 
     const name = String(exec?.name ?? '')
     if (orchestration.allowsVerification(exec)) return undefined
@@ -728,6 +765,7 @@ export function apply(ctx) {
       return undefined
     }
     if (verdict.allow) {
+      observeCoordinatorCall(exec, state)
       if (verdict.countsAsDirect) state.direct += 1
       return undefined
     }
@@ -740,10 +778,59 @@ export function apply(ctx) {
   const offResult = ctx.on('tools/result', (exec, result) => {
     orchestration.observe(exec, result)
     const state = states.get(String(exec.agent?.id ?? ''))
+    const call = state?.activeCalls.get(exec.callId)
+    state?.activeCalls.delete(exec.callId)
+    if (call && call.turn === state.turn && current.enabled) {
+      const execution = ensureExecution(state), now = Date.now()
+      const text = (result.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')
+      const failed = Boolean(result.isError || Number(result.value?.exitCode ?? 0) !== 0 || /\[exit code: [1-9]\d*\]/.test(text))
+      execution.lastActivityAt = now
+      execution.activity = { kind: 'waiting_model', at: now }
+      execution.lastResult = { tool: call.tool, target: call.target, at: now, failed }
+      if (CHANGE_TOOLS.includes(exec.name)) {
+        if (failed) {
+          const failure = { key: call.key, tool: call.tool, target: call.target, callId: exec.callId,
+            reason: (text.trim().split('\n')[0] || '文件修改工具返回错误').slice(0, 600), at: now }
+          execution.unresolvedChanges = [...execution.unresolvedChanges.filter(item => item.key !== call.key), failure].slice(-16)
+        } else if (call.target) execution.unresolvedChanges = execution.unresolvedChanges.filter(item => item.key !== call.key)
+      }
+    }
     if (!state || !state.delegationPending.has(exec.callId)) return
     const turn = state.delegationPending.get(exec.callId)
     state.delegationPending.delete(exec.callId)
     if (turn === state.turn && result.isError === false) state.delegated++
+  }, { global: true })
+
+  const offCoordinatorStream = ctx.on('llm/stream', (request, next) => {
+    const agent = ctx.get('agents')?.get?.(request.sessionId), role = roleOf({ agent })
+    if (!current.enabled || !role || role.worker) return next()
+    const state = stateOf(role.agentId), execution = ensureExecution(state)
+    execution.running = true
+    execution.model = { provider: request.provider, model: request.model }
+    execution.activity = { kind: 'waiting_model_response', at: Date.now() }
+    const stream = next()
+    if (!stream?.[Symbol.asyncIterator]) return stream
+    return (async function* () {
+      let received = false
+      for await (const chunk of stream) {
+        execution.lastActivityAt = Date.now()
+        if (!received && ['block-start', 'block-delta'].includes(chunk.type)) {
+          received = true; execution.activity = { kind: 'model', at: execution.lastActivityAt }
+        }
+        yield chunk
+      }
+    })()
+  }, { global: true })
+
+  const offDirectStopping = ctx.on('agent/turn-stopping', async ({ agent, signal }) => {
+    await ready
+    if (!current.enabled || signal?.aborted || roleOf({ agent })?.worker !== false || orchestration.hasPending(agent.id)) return
+    const execution = states.get(agent.id)?.execution
+    if (!execution?.unresolvedChanges.length || execution.repairUsed >= 1 || typeof agent.inject !== 'function') return
+    execution.repairUsed++
+    agent.inject({ id: randomUUID(), role: 'user', source: { kind: 'delegation-direct-recovery' }, content: [{ type: 'text', text:
+      '本次文件修改仍有失败记录，不能作为已完成交付。请在原任务中核对并修复以下文件，不新开代理、不扩大范围；成功读取或生成另一份文件不能代替原修改成功。若确实无法完成，明确说明未完成项和原因。本次只自动提醒一次。\n' +
+      execution.unresolvedChanges.map(item => `${item.target || item.tool}：${item.reason}`).join('\n') }] })
   }, { global: true })
 
   // A turn is the unit of judgement: a new turn starts with a clean slate, so a
@@ -778,6 +865,19 @@ export function apply(ctx) {
       return
     }
 
+    if (['request/header', 'assistant/message', 'turn/end'].includes(type)) {
+      const state = states.get(id)
+      if (!state) return
+      if (type === 'request/header') state.delegationAvailability = delegationAvailability(ctx.get('agents')?.get?.(id), event.data?.header?.tools)
+      if (type === 'assistant/message' && state.execution) {
+        const text = messageText(event.data?.message)
+        if (text) state.execution.statement = text.slice(0, 500)
+      }
+      if (type === 'turn/end' && state.execution) {
+        state.execution.running = false; state.execution.endedAt = Date.now()
+      }
+      return
+    }
     if (type !== 'turn/start') return
     const state = stateOf(id)
     state.sessionId = id
@@ -787,6 +887,15 @@ export function apply(ctx) {
     state.turnDenied = 0
     state.last = null
     state.delegationPending.clear()
+    const previous = state.execution
+    state.execution = null
+    const execution = ensureExecution(state)
+    execution.requestId = state.source?.messageId ?? null
+    if (previous?.requestId && previous.requestId === execution.requestId) {
+      execution.unresolvedChanges = previous.unresolvedChanges; execution.repairUsed = previous.repairUsed
+    }
+    state.activeCalls.clear()
+    state.delegationAvailability = delegationAvailability(ctx.get('agents')?.get?.(id))
     assessTurn(state)
   })
 
@@ -866,6 +975,7 @@ export function apply(ctx) {
       limits: orchestrationOptions(current),
       supervisionPolicy: orchestration.supervisionPolicy,
       runtimePolicyVersion: 2,
+      coordinatorProgressVersion: 1,
       reviewerModelPolicy: REVIEWER_MODEL_POLICY,
       requestUsage: orchestration.requestUsages(selectedId),
       // No execution here, so this is the global view only — a status probe, not
@@ -890,6 +1000,8 @@ export function apply(ctx) {
         denied: state.denied,
         turnStats: { direct: state.direct, delegated: state.delegated, denied: state.turnDenied },
         sessionStats: { denied: state.denied, since: state.observedSince },
+        execution: state.execution,
+        delegationAvailability: state.delegationAvailability ?? delegationAvailability(ctx.get('agents')?.get?.(id)),
         last: state.last,
         // The judgement that governs this turn, and the policy it produced.
         // `null` means no turn has started since the plugin activated.
@@ -1246,7 +1358,11 @@ export function apply(ctx) {
             if (!current.enabled) return ''
             const summary = orchestration.summary(agentId)
             const route = states.get(agentId)?.route
-            return [DISCIPLINE, !summary && difficulty ? difficultyLine(difficulty) : '', !summary && route ? routingLine(route) : '', summary].filter(Boolean).join('\n\n')
+            const state = states.get(agentId), missing = state?.delegationAvailability?.status === 'unavailable'
+              ? '当前会话的委派入口不可用。请明确告知用户并检查插件启用状态，不要宣称已派发子代理。' : ''
+            const failures = state?.execution?.unresolvedChanges ?? []
+            const unresolved = failures.length ? '尚未成功修改：' + failures.map(item => `${item.target || item.tool}（${item.reason}）`).join('；') : ''
+            return [DISCIPLINE, !summary && difficulty ? difficultyLine(difficulty) : '', !summary && route ? routingLine(route) : '', missing, unresolved, summary].filter(Boolean).join('\n\n')
           } catch {
             return DISCIPLINE
           }
@@ -1294,6 +1410,8 @@ export function apply(ctx) {
       offAgentCreated,
       offAgentSectionDisposed,
       offResult,
+      offCoordinatorStream,
+      offDirectStopping,
     ]) {
       try {
         dispose?.()

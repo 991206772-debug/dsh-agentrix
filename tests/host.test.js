@@ -18,7 +18,7 @@ after(async () => {
 export async function host() {
   const listeners = new Map(), routes = new Map(), definitions = new Map(), cleanups = []
   let guard
-  const agent = { id: 'root' }
+  const injections = [], agent = { id: 'root', inject: message => injections.push(message) }
   const sessions = { get: id => ({ header: id === 'worker' ? { origin: 'subagent', parentSession: 'root' } : { title: '便签保存内容丢失排查' } }) }
   const sessionTitle = { get: session => ({ title: session?.header?.title }) }
   const emit = (name, ...args) => { for (const fn of listeners.get(name) ?? []) fn(...args) }
@@ -47,7 +47,10 @@ export async function host() {
   }
   let turn = 0
   return {
-    ctx, agent, definitions, emit, state, routes,
+    ctx, agent, definitions, emit, state, routes, injections,
+    async stopping(signal = new AbortController().signal, who = agent) {
+      for (const fn of listeners.get('agent/turn-stopping') ?? []) await fn({ agent: who, signal })
+    },
     turn(text) {
       emit('session/event', { id: 'root' }, { type: 'agent/inbox/spliced', data: { inserted: [{ id: String(++turn), source: { kind: 'user' }, content: [{ type: 'text', text }] }] } })
       emit('session/event', { id: 'root' }, { type: 'turn/start', data: { turn } })
@@ -65,6 +68,114 @@ export async function host() {
 }
 
 const complex = '1. 重构所有模块并且迁移数据\n2. 批量修复接口同时补充测试套件'
+
+test('direct execution exposes current activity without creating a managed plan or changing routing', async () => {
+  const h = await host(); await h.state()
+  try {
+    h.turn('评审文章并改写后生成分享文档')
+    const route = (await h.state()).route.route
+    h.call('read', 'read-article', h.agent, { file_path: 'article.md' })
+    let state = await h.state()
+    assert.equal(state.execution.running, true)
+    assert.equal(state.execution.toolCalls, 1)
+    assert.equal(state.execution.activity.kind, 'tool')
+    assert.equal(state.execution.activity.target, 'article.md')
+    h.result('read', { isError: false, content: [] }, 'read-article')
+    state = await h.state()
+    assert.equal(state.execution.activity.kind, 'waiting_model')
+    assert.equal(state.execution.lastResult.tool, 'read')
+    assert.equal(state.route.route, route)
+    assert.equal(state.turnStats.delegated, 0)
+    h.emit('session/event', { id: 'root' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
+    assert.equal((await h.state()).execution.running, false)
+  } finally { await h.close() }
+})
+
+test('actual request tool removal and restoration are visible without blocking direct work', async () => {
+  const h = await host(); await h.state(); h.turn('生成分享文档')
+  const tools = [...h.definitions.keys()].map(name => ({ name }))
+  const header = tools => h.emit('session/event', { id: 'root' }, { type: 'request/header', data: { header: { tools } } })
+  try {
+    header([{ name: 'read' }])
+    let state = await h.state()
+    assert.equal(state.delegationAvailability.status, 'unavailable')
+    assert.ok(state.delegationAvailability.missingTools.includes('delegation_plan'))
+    assert.equal(h.call('edit', 'direct-allowed', h.agent, { file_path: 'article.md' }), undefined)
+    header(tools)
+    state = await h.state()
+    assert.equal(state.delegationAvailability.status, 'available')
+    assert.deepEqual(state.delegationAvailability.missingTools, [])
+  } finally { await h.close() }
+})
+
+test('failed edits survive unrelated success and a completion claim, then prompt the same coordinator once', async () => {
+  const h = await host(); await h.state(); h.turn('修改文章案例')
+  try {
+    h.call('edit', 'failed-edit', h.agent, { file_path: 'article.md' })
+    h.result('edit', { isError: true, content: [{ type: 'text', text: 'Error: old_string was not found in article.md' }] }, 'failed-edit')
+    h.call('read', 'read-back', h.agent, { file_path: 'article.md' })
+    h.result('read', { isError: false, content: [] }, 'read-back')
+    h.call('write', 'other-document', h.agent, { file_path: 'other.md' })
+    h.result('write', { isError: false, content: [] }, 'other-document')
+    h.emit('session/event', { id: 'root' }, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '已全部修改完成。' }] } } })
+    await h.stopping()
+    assert.equal(h.injections.length, 1)
+    assert.match(JSON.stringify(h.injections[0]), /article\.md.*old_string|old_string.*article\.md/)
+    await h.stopping()
+    assert.equal(h.injections.length, 1, 'never repeatedly wake the coordinator')
+    assert.equal((await h.state()).execution.unresolvedChanges.length, 1)
+    h.call('edit', 'correct-edit', h.agent, { file_path: 'ARTICLE.md' })
+    h.result('edit', { isError: false, content: [] }, 'correct-edit')
+    assert.deepEqual((await h.state()).execution.unresolvedChanges, [])
+    await h.stopping()
+    assert.equal(h.injections.length, 1)
+  } finally { await h.close() }
+})
+
+test('cancellation and worker turns never trigger direct-edit recovery', async () => {
+  const h = await host(); await h.state(); h.turn('修改文章案例')
+  try {
+    h.call('edit', 'failed-edit', h.agent, { file_path: 'article.md' })
+    h.result('edit', { isError: true, content: [{ type: 'text', text: 'missing old string' }] }, 'failed-edit')
+    const controller = new AbortController(); controller.abort()
+    await h.stopping(controller.signal)
+    await h.stopping(undefined, { id: 'worker' })
+    assert.equal(h.injections.length, 0)
+  } finally { await h.close() }
+})
+
+test('direct failures and the repair allowance follow continuations but never leak into a new request', async () => {
+  const h = await host(); await h.state(); h.turn('修改文章案例')
+  try {
+    h.call('edit', 'failed-edit', h.agent, { file_path: 'article.md' })
+    h.result('edit', { isError: true, content: [{ type: 'text', text: 'old_string was not found' }] }, 'failed-edit')
+    await h.stopping()
+    h.turn('继续')
+    let state = await h.state()
+    assert.equal(state.execution.unresolvedChanges.length, 1)
+    assert.equal(state.execution.repairUsed, 1)
+    await h.stopping()
+    assert.equal(h.injections.length, 1)
+    h.turn('请核对另一份采购合同')
+    state = await h.state()
+    assert.deepEqual(state.execution.unresolvedChanges, [])
+    assert.equal(state.execution.repairUsed, 0)
+  } finally { await h.close() }
+})
+
+test('policy denials are not recorded as attempted file changes or direct execution failures', async () => {
+  process.env.DSH_DELEGATION_FIRST = 'strict'
+  const h = await host(); await h.state(); h.turn('修改文章案例')
+  try {
+    const denial = h.call('edit', 'policy-denied', h.agent, { file_path: 'article.md' })
+    assert.match(denial, /先建立任务卡/)
+    h.result('edit', { isError: true, content: [{ type: 'text', text: denial }] }, 'policy-denied')
+    assert.equal((await h.state()).execution.toolCalls, 0)
+    assert.deepEqual((await h.state()).execution.unresolvedChanges, [])
+    await h.stopping()
+    assert.equal(h.injections.length, 0)
+  } finally { await h.close() }
+})
 
 test('state includes the current DSH conversation title', async () => {
   const h = await host(); h.turn('修改页面标题')

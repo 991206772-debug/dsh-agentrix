@@ -31,6 +31,8 @@ const nativeDefault = process.argv.includes('--native-default')
 const switchCoordinator = process.argv.includes('--switch-coordinator')
 const coordinatorQuota = process.argv.includes('--coordinator-quota')
 const nextRequest = process.argv.includes('--next-request')
+const directUnresolved = process.argv.includes('--direct-unresolved')
+const directRecovery = process.argv.includes('--direct-recovery') || directUnresolved
 let followingRequest = false
 const workerGate = Promise.withResolvers()
 let parentWaiting = false
@@ -69,6 +71,21 @@ class ScriptedAdapter extends LlmAdapter {
     phases.set(request.sessionId, phase + 1)
     let block
     if (request.sessionId === parent?.id) {
+      if (directRecovery) {
+        const target = path.join(directory, 'result.txt')
+        if (phase === 0) block = tool('edit', { file_path: target, old_string: 'missing', new_string: 'updated' })
+        else if (phase === 1 || phase === 5) block = tool('read', { path: target })
+        else if (phase === 2) block = tool('write', { file_path: path.join(directory, 'other.txt'), content: 'generated another deliverable' })
+        else if (phase === 4 && !directUnresolved) {
+          assert.match(JSON.stringify(request.messages), /本次文件修改仍有失败记录/)
+          block = tool('edit', { file_path: target, old_string: 'verified', new_string: 'updated' })
+        } else block = { type: 'text', text: phase === 3 ? '文件已经全部更新完成。' : directUnresolved ? '原文件修改未完成，需要处理。' : '已修复并核对原文件。' }
+        yield { type: 'block-start', index: 0, blockType: block.type }
+        yield { type: 'block-end', index: 0, block }
+        yield { type: 'usage', usage: { inputTokens: 30, outputTokens: 5 } }
+        yield { type: 'finish', reason: { kind: block.type === 'tool-call' ? 'tool-calls' : 'stop' } }
+        return
+      }
       if (followingRequest) {
         const system = JSON.stringify(request.messages.filter(message => message.role === 'system'))
         assert.ok(system.includes('DSH Agentrix'), 'the native coordinator discipline is present')
@@ -127,6 +144,25 @@ try {
       if ((supplement || switchCoordinator) && exec.agent.id !== 'root' && requests.some(request => request.sessionId === exec.agent.id && request.model === 'low-worker')) await workerGate.promise
       return { text: await readFile(args.path, 'utf8') }
     } }))
+  if (directRecovery) {
+    ctx.tools.register(defineTool({ name: 'edit', description: 'Edit isolated fixture', parameters: {
+      file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } },
+      output: { schema: { type: 'object', additionalProperties: true }, render: () => [{ type: 'text', text: 'file edited' }] },
+      async execute(args) {
+        assert.equal(args.file_path, path.join(directory, 'result.txt'))
+        const content = await readFile(args.file_path, 'utf8')
+        if (!content.includes(args.old_string)) throw new Error('old_string was not found')
+        await writeFile(args.file_path, content.replace(args.old_string, args.new_string))
+        return { ok: true }
+      } }))
+    ctx.tools.register(defineTool({ name: 'write', description: 'Write another isolated deliverable', parameters: {
+      file_path: { type: 'string' }, content: { type: 'string' } },
+      output: { schema: { type: 'object', additionalProperties: true }, render: () => [{ type: 'text', text: 'another file generated' }] },
+      async execute(args) {
+        assert.equal(args.file_path, path.join(directory, 'other.txt'))
+        await writeFile(args.file_path, args.content); return { ok: true }
+      } }))
+  }
   await writeFile(path.join(directory, 'result.txt'), 'verified')
   ctx.on('agent/turn-stopping', ({ agent }) => { if (agent.id === 'root') parentWaiting = true }, { global: true })
   apply(ctx)
@@ -167,7 +203,22 @@ try {
   }
   await until(() => events.some(event => event.id === 'root' && event.type === 'turn/end'), 'coordinator completion')
   const plan = (await state()).plans[0]
-  if (cancelSupplement) {
+  if (directRecovery) {
+    await until(() => parent.status === 'idle', 'direct request settled')
+    const result = await state(), execution = result.sessions[0].execution
+    assert.equal(result.plans.length, 0)
+    assert.equal(result.coordinatorProgressVersion, 1)
+    assert.equal(execution.repairUsed, 1)
+    assert.equal(execution.running, false)
+    assert.equal(execution.unresolvedChanges.length, directUnresolved ? 1 : 0)
+    assert.equal(await readFile(path.join(directory, 'result.txt'), 'utf8'), directUnresolved ? 'verified' : 'updated')
+    assert.equal(await readFile(path.join(directory, 'other.txt'), 'utf8'), 'generated another deliverable')
+    assert.equal(requests.length, directUnresolved ? 5 : 7)
+    assert.ok(requests.every(request => request.sessionId === 'root'))
+    assert.equal(events.filter(event => event.id === 'root' && event.type === 'turn/end').length, 1)
+    assert.equal(result.sessions[0].delegationAvailability.status, 'available')
+    console.log('PASS: native direct edit failure survives read and unrelated file success; same coordinator repairs once; unresolved mode=' + directUnresolved)
+  } else if (cancelSupplement) {
     await until(() => parent.status === 'idle', 'cancelled coordinator cleanup')
     assert.equal(plan.cancelled, true)
     assert.equal(plan.completion.outcome, 'cancelled')

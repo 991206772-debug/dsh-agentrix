@@ -5,6 +5,55 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('direct work is visible in the input dock with actual activity, advisory mismatch and unresolved edits', async () => {
+  const execution = { running: true, startedAt: Date.now(), toolCalls: 2, statement: null,
+    activity: { kind: 'tool', tool: 'edit', target: 'article.md' },
+    lastResult: { tool: 'read', target: 'article.md', at: Date.now(), failed: false }, unresolvedChanges: [] }
+  const body = { ok: true, sessionId: 'session-current', enabled: true, plans: [], sessions: [{ sessionId: 'session-current',
+    source: { messageId: 'direct-request', text: '改写文章并生成分享文档' }, route: { route: 'delegate', reasons: [] }, execution,
+    delegationAvailability: { status: 'available', missingTools: [] } }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock('session-current')
+  try {
+    await dock.flush()
+    assert.match(dock.text(), /改写文章并生成分享文档/)
+    assert.match(dock.text(), /主控直接执行/)
+    assert.match(dock.text(), /当前.*修改文件.*article\.md/)
+    assert.match(dock.text(), /建议.*委派.*尚未启动子代理/)
+    assert.match(dock.text(), /尚未说明.*原因/)
+    execution.unresolvedChanges = [{ callId: 'failed-edit', tool: 'edit', target: 'article.md', reason: 'old_string was not found' }]
+    execution.statement = 'Markdown 和 Word 已全部修改完成。'
+    execution.running = false
+    await dock.tick()
+    assert.match(dock.text(), /修改未完成.*article\.md.*old_string/)
+    assert.doesNotMatch(dock.text(), /已完成|已验收/)
+    execution.unresolvedChanges = []
+    await dock.tick()
+    assert.equal(dock.text(), '', 'ordinary ended direct work needs no persistent completion card')
+  } finally { dock.close(); f.close() }
+})
+
+test('missing delegation tools and a missing backend show actionable warnings instead of an empty dock', async () => {
+  const body = { ok: true, sessionId: 'session-current', enabled: true, plans: [], sessions: [{ sessionId: 'session-current',
+    source: { text: '生成文档' }, delegationAvailability: { status: 'unavailable', missingTools: ['delegation_plan', 'delegation_run'] } }] }
+  let missingBackend = false
+  const f = await sidebarFixture(undefined, { fetchState: async () => missingBackend
+    ? { ok: false, status: 404, json: async () => ({}) } : { ok: true, json: async () => structuredClone(body) } })
+  const dock = f.mountDock('session-current')
+  try {
+    await dock.flush()
+    assert.match(dock.text(), /委派入口不可用.*delegation_plan/)
+    assert.match(dock.text(), /插件.*启用/)
+    missingBackend = true
+    await dock.tick()
+    assert.match(dock.text(), /插件服务不可用/)
+    assert.doesNotMatch(dock.text(), /等待子代理|协作中/)
+    missingBackend = false; body.sessions[0].delegationAvailability.status = 'available'
+    await dock.tick()
+    assert.equal(dock.text(), '')
+  } finally { dock.close(); f.close() }
+})
+
 test('the input dock shows worker activity before a turn tail or assistant actions exist and updates without a reply', async () => {
   const now = Date.now(), request = { messageId: 'live-request', text: '调整工作台参数' }
   const task = { id: 'parameters', title: '实现双接口与参数自动生成', status: 'running',
