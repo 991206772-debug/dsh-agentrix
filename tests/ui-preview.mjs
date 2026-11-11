@@ -2,7 +2,7 @@
 import { readFile } from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
-import { DEFAULT_OPTIONS, OPTION_RANGES } from '../orchestrator.js'
+import { DEFAULT_OPTIONS, OPTION_RANGES, COORDINATION_POLICY_VERSION } from '../orchestrator.js'
 import { buildCompletion } from '../completion.js'
 const assetDirectory = process.argv[2]
 if (!assetDirectory) throw new Error('Provide a directory containing react.js and react-dom.js')
@@ -52,9 +52,12 @@ if (nextRequest) {
 }
 if (liveProgress) {
   const now = Date.now()
-  Object.assign(plans[0], { protocolVersion: 2, status: 'running', goal: '调整双接口并自动生成参数',
+  Object.assign(plans[0], { protocolVersion: 2, status: 'running', sessionTitle: '接口调试工具实现', goal: '调整双接口并自动生成参数',
     source: { messageId: 'live-request', text: '工作台保留两个接口，参数自动生成，固定参数改为配置项' },
+    decision: { mode: 'delegate', reason: '参数生成与固定配置可以独立执行，交给执行模型实现，主控核对接口约定并验证验收。', model: { model: 'demo/coordinator' }, at: now },
+    decisionCurrent: true, messageResolution: { relation: 'new' },
     tasks: [{ ...baseTask, id: 'parameters', title: '实现双接口、自动参数与固定配置', status: 'running', report: '',
+      complexityReason: '按已明确的接口参数规范实现配置与参数生成，完成后由主控验证',
       progress: { tool: 'read', at: now - 4000 }, supervision: { startedAt: now - 13 * 60000, lastActivityAt: now,
         activity: { kind: 'tool', tool: 'edit', at: now } } }],
   })
@@ -236,7 +239,7 @@ const server = http.createServer(async (request, response) => {
       if (loadError) { response.statusCode = 503; response.end(JSON.stringify({ ok: false, error: '本地任务服务暂不可用（隔离测试）' })); return }
       const sessionId = url.searchParams.get('sessionId')
       if (process.argv.includes('--slow') && sessionId === plans[0].sessionId) await new Promise(resolve => setTimeout(resolve, 1500))
-      response.end(JSON.stringify({ ok: true, sessionId, mode: config.mode, coordinationPolicyVersion: coordinationConflict ? 2 : undefined, requestBindingVersion: process.argv.includes('--model-relationship') ? 2 : undefined, runtimePolicyVersion: nextRequest || liveProgress ? 2 : undefined, plans: directProgress ? [] : plans.filter(plan => plan.sessionId === sessionId), sessions: directProgress ? [directSession].filter(row => row.sessionId === sessionId) : liveProgress ? [
+      response.end(JSON.stringify({ ok: true, sessionId, mode: config.mode, coordinationPolicyVersion: COORDINATION_POLICY_VERSION, requestBindingVersion: process.argv.includes('--model-relationship') ? 2 : undefined, runtimePolicyVersion: nextRequest || liveProgress ? 2 : undefined, plans: directProgress ? [] : plans.filter(plan => plan.sessionId === sessionId), sessions: directProgress ? [directSession].filter(row => row.sessionId === sessionId) : liveProgress ? [
         { sessionId: plans[0].sessionId, source: plans[0].source, turnStats: { direct: 0, delegated: 1, denied: 0 } },
       ] : nextRequest ? [
         { sessionId: plans[0].sessionId, source: { messageId: 'request-new', text: '核查代码实际调用了哪些密码接口' }, route: { route: 'direct', reasons: ['scope_small'] },
