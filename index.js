@@ -452,7 +452,8 @@ export function apply(ctx) {
     if (!current.enabled) return { status: 'disabled', missingTools: [] }
     try {
       const names = new Set((tools ?? ctx.tools.schemas(agent)).map(tool => tool.name))
-      const missingTools = MANAGED_ENTRY_POINTS.filter(name => !names.has(name))
+      const missingTools = MANAGED_ENTRY_POINTS.filter(name => !names.has(name) &&
+        !(orchestration?.isToolHiddenByPolicy?.(agent?.id, name) && ctx.tools.get(name)))
       if (!ctx.tools.get('delegation_report')) missingTools.push('delegation_report')
       const nativeAvailable = canDelegate({ agent })
       return { status: missingTools.length || !nativeAvailable ? 'unavailable' : 'available', missingTools, nativeAvailable }

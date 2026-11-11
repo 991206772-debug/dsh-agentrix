@@ -350,6 +350,61 @@ test('actual request tool removal and restoration are visible without blocking d
   } finally { await h.close() }
 })
 
+test('workflow-hidden acceptance tools do not mark delegation unavailable or poison the coordinator prompt', async () => {
+  const h = await host(); await h.state()
+  let denied = new Set()
+  const sections = []
+  const registered = () => ['subagent', 'read', ...h.definitions.keys()].map(name => ({ name }))
+  h.ctx.tools.view = () => ({ restrictableNames: registered().map(tool => tool.name) })
+  h.ctx.tools.schemas = () => registered().filter(tool => !denied.has(tool.name))
+  h.agent.ctx = {
+    tools: { restrict({ deny }) { denied = new Set(deny); return () => { denied.clear() } } },
+    systemPrompt: { section(value) { sections.push(value); return () => {} } },
+  }
+  const header = tools => h.emit('session/event', { id: 'root' }, { type: 'request/header', data: { header: { tools } } })
+  try {
+    h.emit('agent/created', { agent: h.agent })
+    h.turn('调研项目功能与架构')
+    await h.definitions.get('delegation_plan').execute({ goal: '调研并总结项目', decisionReason: '执行者调研，主控在正式报告返回后验证验收。',
+      tasks: [{ id: 'investigation', title: '项目调研', instructions: '读取实际文件并形成报告', scope: '调研', outputs: ['findings.md'], writes: ['findings.md'],
+        complexity: 'routine', criteria: ['报告符合项目事实'], checks: [{ tool: 'read', arguments: { file_path: 'findings.md' } }] }] },
+    { agent: h.agent, callId: 'plan-investigation' })
+    assert.ok(denied.has('delegation_verify') && denied.has('delegation_review'))
+    const requestTools = h.ctx.tools.schemas(h.agent)
+    header(requestTools)
+    let state = await h.state()
+    assert.equal(state.delegationAvailability.status, 'available')
+    assert.deepEqual(state.delegationAvailability.missingTools, [])
+    assert.equal(state.delegationAvailability.nativeAvailable, true)
+    assert.ok(sections.length)
+    assert.ok(sections.every(section => !section.text().includes('当前会话的委派入口不可用')))
+
+    const verify = h.definitions.get('delegation_verify')
+    h.definitions.delete('delegation_verify')
+    header(requestTools)
+    state = await h.state()
+    assert.equal(state.delegationAvailability.status, 'unavailable', 'an actually unregistered tool is not merely phase-hidden')
+    assert.ok(state.delegationAvailability.missingTools.includes('delegation_verify'))
+    assert.ok(sections.some(section => section.text().includes('当前会话的委派入口不可用')))
+    h.definitions.set('delegation_verify', verify)
+
+    header(requestTools.filter(tool => tool.name !== 'delegation_plan'))
+    state = await h.state()
+    assert.equal(state.delegationAvailability.status, 'unavailable', 'request-scoped removal of a dispatch entry point still warns')
+    assert.deepEqual(state.delegationAvailability.missingTools, ['delegation_plan'])
+    header(requestTools)
+    assert.equal((await h.state()).delegationAvailability.status, 'available')
+
+    const get = h.ctx.tools.get
+    h.ctx.tools.get = (name, ...args) => name === 'subagent' ? undefined : get(name, ...args)
+    h.ctx.tools.schemas = () => requestTools.filter(tool => tool.name !== 'subagent')
+    header(h.ctx.tools.schemas())
+    state = await h.state()
+    assert.equal(state.delegationAvailability.nativeAvailable, false)
+    assert.equal(state.delegationAvailability.status, 'unavailable', 'missing native delegation capability is still reported')
+  } finally { await h.close() }
+})
+
 test('failed edits survive unrelated success and a completion claim, then prompt the same coordinator once', async () => {
   const h = await host(); await h.state(); h.turn('修改文章案例')
   await h.decide()

@@ -732,7 +732,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const key = JSON.stringify(names)
       if (previous?.agent === target && previous.key === key) continue
       previous?.dispose(); coordinationRestrictions.delete(target.id)
-      if (names.length) coordinationRestrictions.set(target.id, { agent: target, key, dispose: target.ctx.tools.restrict({ deny: names }) })
+      if (names.length) coordinationRestrictions.set(target.id, { agent: target, key, names, dispose: target.ctx.tools.restrict({ deny: names }) })
     }
   }
   disposers.push(ctx.on('agent/created', async ({ agent }) => { await ready; refreshCoordinationTools(agent) }, { global: true }))
@@ -2016,6 +2016,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   return {
     ready, snapshot, observe, allowsVerification, decisionFor, decisionCurrent, recoverDecision, sourceOf, revisionOf,
     refreshCoordinationTools, guardCoordination, coordinatorWriteBlock, recordCoordinationFailure,
+    isToolHiddenByPolicy(sessionId, name) {
+      return ['delegation_verify', 'delegation_review'].includes(name) && Boolean(coordinationRestrictions.get(sessionId)?.names.includes(name))
+    },
     pendingMessages: id => clone(pendingMessages(id)),
     requestContext: sessionId => clone(decisions.get(sessionId) ?? null), supervisionPolicy: SUPERVISION_POLICY,
     requestUsage(sessionId) { const entry = usageFor(sessionId); return entry ? clone(entry) : null },

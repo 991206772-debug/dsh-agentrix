@@ -86,6 +86,12 @@ class ScriptedAdapter extends LlmAdapter {
       if (role === 'coordinator') {
         for (const name of ['delegation_report', 'delegation_checkpoint']) assert.ok(!names.includes(name), 'coordinator must not see worker-only tool ' + name)
         assert.ok(names.includes('delegation_plan'))
+        if (ergonomics) {
+          const availability = (await state()).sessions.find(session => session.sessionId === parent.id)?.delegationAvailability
+          assert.equal(availability?.status, 'available', 'phase-hidden tools must not report unavailable during actual native requests')
+          assert.deepEqual(availability.missingTools, [])
+          assert.ok(!JSON.stringify(request.messages.filter(message => message.role === 'system')).includes('当前会话的委派入口不可用'), 'the coordinator prompt must agree with real delegation capability')
+        }
       } else {
         for (const name of ['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_status', 'delegation_verify', 'delegation_review', 'delegation_cancel']) assert.ok(!names.includes(name), 'managed child must not see coordinator-only tool ' + name)
         assert.ok(names.includes('delegation_report'))
@@ -433,7 +439,7 @@ try {
         assert.ok(requests.filter(request => request.role === 'coordinator').length <= 13, 'no status polling requests while the same workers run')
         assert.equal(plan.tasks[2].audit.status, 'completed')
         assert.equal(plan.tasks[2].audit.modelRoute.actual.model, 'coordinator')
-        console.log('PASS: role-specific native schemas, three event waits, criterion/evidence references, independent audit and exact-once receipt/release')
+        console.log('PASS: role-specific native schemas, phase-hidden tools keep API and coordinator prompt available, three event waits, criterion/evidence references, independent audit and exact-once receipt/release')
       } else assert.equal(requests.filter(request => request.role === 'coordinator').length, 11)
       assert.equal(requests.filter(request => request.role === 'worker').length, 6)
     }
