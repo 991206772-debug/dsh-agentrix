@@ -6,9 +6,10 @@
 
 | 工具 | 作用 |
 | --- | --- |
+| `delegation_decide` | 主控记录 `mode: direct/delegate` 和 8—500 字的 `reason`，需求、补充消息、模型和时间由插件绑定 |
 | `delegation_inspect` | `operation: list/git_status`，可指定 `directory`；通过原生工具管线运行固定的只读检查，每次最多显示 200 项 |
 | `delegation_note` | `kind: task_plan/findings/progress` 和 `content`；保存本会话本需求的专用记录并返回路径，最多 64 KiB |
-| `delegation_plan` | 提交目标、任务卡、依赖、修改路径、任务复杂度、标准和验证步骤 |
+| `delegation_plan` | 提交目标、任务卡、依赖、修改路径、任务复杂度、标准和验证步骤；可用 `decisionReason` 同时记录委派理由 |
 | `delegation_run` | 开始调度，无依赖任务自动派出 |
 | `delegation_status` | 默认摘要；可选 taskId，detail: summary/full；full 必须指定任务，只返回该任务完整报告和证据 |
 | `delegation_checkpoint` | 执行者或只读审查者在长调查、阶段转换或阻塞时记录结论及成功工具证据；短任务只交最终报告 |
@@ -30,6 +31,7 @@
 ```json
 {
   "goal": "补充登录失败路径测试并核对结果",
+  "decisionReason": "测试补充交给执行模型，主控读取结果、运行测试并最终验收。",
   "tasks": [{
     "id": "login-tests",
     "title": "补充登录失败测试",
@@ -154,6 +156,10 @@ delegation_verify({taskId: 'login-tests', checkIndex: 1})
 ## 自动分流、状态和用量
 
 `/api/state` 的 `coordinatorProgressVersion: 1` 表示当前进程提供主控直接执行进度。每个会话的 `execution` 保存当前回合的模型、工具活动、目标、最近结果和未解决的文件修改失败；`delegationAvailability` 按实际请求头检查委派工具是否可见。输入框进度区直接读取这些字段，不新增模型请求。插件服务返回 404 时前端显示服务不可用，不继续把旧记录当成当前进度。
+
+`decisionProtocolVersion: 1` 表示当前进程要求正式记录执行选择。会话的 `decision` 包含 `mode/reason/requestId/revisionId/model/at/recommendation`，`decisionCurrent` 表示是否对应当前需求及补充范围。业务写入、通用 shell 执行前须有有效的 direct 记录；新计划启动前须有 delegate 记录。原有 strict/fixed 限制继续生效，关闭插件不要求记录。记录在现有 runs.json 中持久化，保存失败或尚在保存时不能放行业务执行。普通模型文字不参与判断。“继续”沿用原记录，新增范围需更新；同一范围遗漏时最多自动提醒原主控一次，次数持久化，取消后不提醒。纯文字问答不强制补流程；有工具活动的只读任务最迟结束前补齐记录。已有运行计划不因新协议中断，历史不补造理由。
+
+页面分别显示主控选择和实际任务状态。选择 delegate 或建立计划都不会被显示为已启动；实际启动以子任务事件为准。记录说明主控公开给用户的决策依据，不解析或展示模型内部思考。
 
 直接执行时，文件修改失败不会被读取成功或另一文件修改成功清除。结束检查最多向原主控注入一次补救提醒；同一需求继续时沿用失败记录和次数，新需求重新记录。成功修改原目标后清除对应失败；无明确目标的修改不靠其他成功工具猜测已恢复。用户取消、子代理回合与尚在托管流程中的计划不触发该提醒。这些直接执行状态只保存在当前进程中，不补造历史记录，也不生成托管验收回执。
 

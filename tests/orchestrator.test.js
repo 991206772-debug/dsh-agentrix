@@ -18,6 +18,46 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('the delegation decision is recorded separately from planning and actual child activation', async () => {
+  const f = await fixture()
+  const decision = await f.execute('delegation_decide', { mode: 'delegate', reason: '执行需要逐份核对多份文件，交给执行模型后由主控验证。' })
+  assert.equal(f.calls.length, 0)
+  const planned = await f.execute('delegation_plan', { goal: '完成任务并由主控验收', tasks: [card('a')] })
+  assert.equal(planned.plan.decision.reason, decision.decision.reason)
+  assert.equal(f.calls.length, 0)
+  await f.execute('delegation_run')
+  assert.equal(f.calls.length, 1)
+  const archived = await f.engine.readArchive(f.snapshot().archive.id)
+  assert.match(archived.markdown, /主控决定：委派/)
+  assert.ok(archived.markdown.includes(decision.decision.reason))
+})
+
+test('new plans cannot start without a valid delegation reason; legacy queued plans remain compatible', async () => {
+  const f = await fixture()
+  await f.execute('delegation_plan', { goal: '先准备再决定', tasks: [card('a')] })
+  await assert.rejects(f.execute('delegation_run'), /delegation_decide/)
+  assert.equal(f.calls.length, 0)
+  await assert.rejects(f.execute('delegation_decide', { mode: 'delegate', reason: '简单' }), /8—500/)
+  await assert.rejects(f.execute('delegation_decide', { mode: 'other', reason: '执行核对工作后由主控验收。' }), /direct.*delegate/)
+  await assert.rejects(f.execute('delegation_decide', { mode: 'direct', reason: '准备直接重复修改这些交付文件。' }), /不能同时/)
+  assert.equal(f.calls.length, 0)
+  await f.execute('delegation_decide', { mode: 'delegate', reason: '执行模型核对文件，主控独立验证并验收结果。' })
+  await f.execute('delegation_run')
+  assert.equal(f.calls.length, 1)
+
+  const legacy = await fixture()
+  await legacy.execute('delegation_plan', { goal: '旧版已排队任务', tasks: [card('old')] })
+  await legacy.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    delete stored.plans[0].decisionProtocolVersion
+    delete stored.decisions
+    await writeFile(file, JSON.stringify(stored))
+  })
+  await legacy.execute('delegation_run')
+  assert.equal(legacy.calls.length, 1)
+  assert.equal(legacy.snapshot().decision, null, 'legacy startup must not invent a reason')
+})
+
 test('review uses the dispatching coordinator snapshot across model changes and reload instead of saved review overrides', async () => {
   const f = await fixture({ models: { worker: { provider: 'local', model: 'cheap' }, reviewer: { provider: 'retired', model: 'obsolete-reviewer' } } })
   let main = { provider: 'local', model: 'dispatcher-high', reasoningEffort: 'high' }
@@ -893,7 +933,7 @@ async function fixture(options = {}) {
   const parent = { id: 'parent', options: { provider: 'local', model: 'parent' }, session: { header: {}, requestHeader: () => undefined },
     status: 'running', injected: [], inject(message) { this.injected.push(message) }, steer(message) { this.injected.push(message) } }
   let engine, count = 0, exitCode = 0
-  const config = { ...DEFAULT_OPTIONS, models: { worker: { provider: 'local', model: 'cheap' }, reviewer: { provider: 'local', model: 'deep' } }, ...options }
+  const config = { enabled: true, ...DEFAULT_OPTIONS, models: { worker: { provider: 'local', model: 'cheap' }, reviewer: { provider: 'local', model: 'deep' } }, ...options }
   const ctx = {
     get(name) { return { subagents: ctx.subagents, llm: ctx.llm, agents: { get: id => id === parent.id ? parent : children.get(id) } }[name] },
     on(name, fn) { events.set(name, fn); return () => events.delete(name) },
@@ -951,7 +991,7 @@ async function fixture(options = {}) {
     }
   }
   const execute = (name, args = {}) => invoke(name, args, parent)
-  const plan = tasks => execute('delegation_plan', { goal: '完成任务并由主控验收', tasks })
+  const plan = tasks => execute('delegation_plan', { goal: '完成任务并由主控验收', decisionReason: '执行者核对隔离文件，主控保留独立上下文验证和验收。', tasks })
   const snapshot = () => engine.snapshot()[0]
   return { get engine() { return engine }, ctx, calls, pending, config, execute, plan, snapshot, directory, file, parent, conclusions,
     render: (name, args, value) => tools.get(name).output.render(args, value).map(block => block.text).join('\n'),

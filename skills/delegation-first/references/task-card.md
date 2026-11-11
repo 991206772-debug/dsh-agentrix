@@ -1,6 +1,6 @@
 # 结构化任务卡
 
-主控通过 `delegation_plan({goal,tasks})` 提交任务。一个计划最多 16 个任务，每任务最多 4 个主控验证步骤。
+主控通过 `delegation_plan({goal,decisionReason,tasks})` 提交任务。`decisionReason` 是本次委派的具体理由（8—500 字），与建计划一并保存；若已经调用 `delegation_decide` 记录 delegate，可省略。建立计划不启动代理。一个计划最多 16 个任务，每任务最多 4 个主控验证步骤。
 
 | 字段 | 要求 |
 | --- | --- |
@@ -23,6 +23,7 @@
 ```json
 {
   "goal": "补充登录失败场景验证",
+  "decisionReason": "执行模型按既有结构补充测试，主控独立验证结果并逐项验收。",
   "tasks": [{
     "id": "login-tests",
     "title": "补充登录失败测试",

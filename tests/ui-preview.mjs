@@ -65,6 +65,13 @@ const directSession = { sessionId: plans[0].sessionId, source: { messageId: 'dir
     unresolvedChanges: [{ callId: 'demo-edit-failed', target: 'D:/demo/articles/agentrix-article.md',
       reason: 'Error: old_string was not found in D:/demo/articles/agentrix-article.md' }] } }
 if (process.argv.includes('--direct-healthy')) directSession.execution.unresolvedChanges = []
+if (process.argv.includes('--decision-direct') || process.argv.includes('--decision-delegate')) {
+  const mode = process.argv.includes('--decision-delegate') ? 'delegate' : 'direct'
+  directSession.route = { route: 'delegate', reasons: ['multiple_goals'] }
+  directSession.decision = { mode, reason: mode === 'direct' ? '已定位两处相邻文字，主控直接修改并读取核对，避免重复传递上下文。' : '需要逐份核对多份文档，交给执行模型处理，主控保留独立上下文验证验收。',
+    requestId: 'direct-demo', revisionId: 'direct-demo', model: { model: 'demo/coordinator' }, at: Date.now() }
+  directSession.decisionCurrent = true
+}
 if (process.argv.includes('--supplement')) {
   Object.assign(plans[0], { protocolVersion: 2, status: 'running', goal: '开发面向交付人员的可视化调试页面',
     routing: { route: 'direct', reasons: ['scope_small'] },

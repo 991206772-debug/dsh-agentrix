@@ -1,13 +1,14 @@
 import { test, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, rmdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { apply } from '../index.js'
 
 const home = await mkdtemp(path.join(os.tmpdir(), 'dsh-delegation-test-'))
 const previous = { home: process.env.DSH_HOME, mode: process.env.DSH_DELEGATION_FIRST }
-beforeEach(() => { process.env.DSH_HOME = home; process.env.DSH_DELEGATION_FIRST = 'auto' })
+let homeSequence = 0
+beforeEach(() => { process.env.DSH_HOME = path.join(home, 'host-' + ++homeSequence); process.env.DSH_DELEGATION_FIRST = 'auto' })
 after(async () => {
   for (const [key, value] of [['DSH_HOME', previous.home], ['DSH_DELEGATION_FIRST', previous.mode]]) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value
@@ -18,7 +19,7 @@ after(async () => {
 export async function host() {
   const listeners = new Map(), routes = new Map(), definitions = new Map(), cleanups = []
   let guard
-  const injections = [], agent = { id: 'root', inject: message => injections.push(message) }
+  const injections = [], agent = { id: 'root', options: { provider: 'local', model: 'coordinator' }, inject: message => injections.push(message) }
   const sessions = { get: id => ({ header: id === 'worker' ? { origin: 'subagent', parentSession: 'root' } : { title: '便签保存内容丢失排查' } }) }
   const sessionTitle = { get: session => ({ title: session?.header?.title }) }
   const emit = (name, ...args) => { for (const fn of listeners.get(name) ?? []) fn(...args) }
@@ -40,14 +41,17 @@ export async function host() {
     effect(fn) { const dispose = fn(); if (dispose) cleanups.push(dispose); return dispose },
   }
   apply(ctx)
-  const state = async () => {
+  const state = async (sessionId = null) => {
     let body
-    await routes.get('/dsh-delegation-first/api/state')({ method: 'GET' }, { writeHead() {}, end(text) { body = JSON.parse(text) } })
+    await routes.get('/dsh-delegation-first/api/state')({ method: 'GET', ...(sessionId ? { url: '/dsh-delegation-first/api/state?sessionId=' + sessionId } : {}) }, { writeHead() {}, end(text) { body = JSON.parse(text) } })
     return body.sessions.find(row => row.sessionId === 'root')
   }
   let turn = 0
   return {
     ctx, agent, definitions, emit, state, routes, injections,
+    decide(reason = '本次范围已明确，主控直接完成后核对实际产物和验证结果。') {
+      return definitions.get('delegation_decide').execute({ mode: 'direct', reason }, { agent, callId: 'decide-direct', signal: new AbortController().signal })
+    },
     async stopping(signal = new AbortController().signal, who = agent) {
       for (const fn of listeners.get('agent/turn-stopping') ?? []) await fn({ agent: who, signal })
     },
@@ -68,6 +72,107 @@ export async function host() {
 }
 
 const complex = '1. 重构所有模块并且迁移数据\n2. 批量修复接口同时补充测试套件'
+
+test('business execution requires an explicit decision; ordinary assistant text never supplies the reason', async () => {
+  process.env.DSH_HOME = path.join(home, 'explicit-decision')
+  const h = await host(); await h.state()
+  h.agent.options = { provider: 'local', model: 'coordinator-high' }
+  try {
+    h.turn('修复文章中的错别字')
+    assert.equal(h.call('read', 'prepare'), undefined)
+    h.emit('session/event', { id: 'root' }, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '文档已全部修改完成。' }] } } })
+    assert.match(h.call('edit', 'before-decision'), /delegation_decide/)
+    assert.equal((await h.state()).decision, null)
+    const recorded = await h.definitions.get('delegation_decide').execute({ mode: 'direct', reason: '仅修改已定位的一处错字，主控改完读取核对即可。' },
+      { agent: h.agent, callId: 'decide', signal: new AbortController().signal })
+    assert.equal(recorded.decision.mode, 'direct')
+    assert.equal(h.call('edit', 'after-decision'), undefined)
+    const state = await h.state()
+    assert.equal(state.decision.reason, '仅修改已定位的一处错字，主控改完读取核对即可。')
+    assert.equal(state.decision.requestId, '1')
+    assert.equal(state.decision.model.model, 'coordinator-high')
+    assert.equal(state.turnStats.delegated, 0)
+  } finally { await h.close() }
+})
+
+test('a decision survives continuation and reload but must be updated for new scope or a new request', async () => {
+  process.env.DSH_HOME = path.join(home, 'decision-scope')
+  let h = await host(); await h.state()
+  const decide = reason => h.definitions.get('delegation_decide').execute({ mode: 'direct', reason },
+    { agent: h.agent, callId: 'decision', signal: new AbortController().signal })
+  h.agent.options = { provider: 'local', model: 'high' }
+  try {
+    h.turn('修改文章中的一处错字')
+    await decide('已定位一处错字，直接修改并读取验证即可。')
+    const original = (await h.state()).decision
+    h.turn('可以，开始执行')
+    assert.equal(h.call('edit'), undefined)
+    assert.deepEqual((await h.state()).decision, original)
+    await h.close(); h = await host(); await h.state()
+    h.agent.options = { provider: 'local', model: 'another-high' }
+    assert.deepEqual((await h.state('root')).decision, original, 'opening details after reload must not need a human continuation')
+    h.turn('继续')
+    assert.equal((await h.state()).source.text, '修改文章中的一处错字')
+    assert.equal(h.call('edit'), undefined)
+    assert.deepEqual((await h.state()).decision, original)
+    h.turn('还要同步调整另一个文档')
+    assert.equal((await h.state()).source.messageId, original.requestId)
+    assert.match(h.call('edit'), /delegation_decide/)
+    assert.equal((await h.state()).decisionCurrent, false)
+    await decide('补充后共两处对应文字，直接修改后逐一读取核对。')
+    assert.equal((await h.state()).decision.model.model, 'another-high')
+    assert.equal(h.call('edit'), undefined)
+    h.turn('排查另一个项目的登录错误')
+    assert.equal((await h.state()).decision, null)
+    assert.match(h.call('edit'), /delegation_decide/)
+  } finally { await h.close() }
+})
+
+test('a missing decision resumes the original coordinator once, with the limit surviving reload and cancellation', async () => {
+  process.env.DSH_HOME = path.join(home, 'decision-recovery')
+  let h = await host(); await h.state()
+  try {
+    h.turn('只读核对当前文档')
+    h.call('read', 'inspection')
+    await h.stopping()
+    assert.equal(h.injections.length, 1)
+    assert.match(h.injections[0].content[0].text, /delegation_decide/)
+    assert.equal(h.injections[0].source.kind, 'delegation-decision-recovery')
+    await h.stopping()
+    assert.equal(h.injections.length, 1)
+    await h.close(); h = await host(); await h.state()
+    h.turn('继续'); h.call('read', 'inspection-again')
+    await h.stopping()
+    assert.equal(h.injections.length, 0, 'reload must not reset the automatic recovery limit')
+    h.turn('检查另一份文件')
+    h.call('read')
+    const abort = new AbortController(); abort.abort()
+    await h.stopping(abort.signal)
+    assert.equal(h.injections.length, 0)
+  } finally { await h.close() }
+})
+
+test('a pending or failed decision save never permits business execution, even without native delegation tools', async () => {
+  const h = await host(); await h.state(); h.turn('修复指定文档的错字')
+  const configuration = (await h.request('GET')).payload
+  const runsFile = configuration.file.replace(/\.json$/, '.runs.json')
+  try {
+    const nativeGet = h.ctx.tools.get
+    h.ctx.tools.get = name => name === 'subagent' ? undefined : nativeGet(name)
+    const schemas = h.ctx.tools.schemas
+    h.ctx.tools.schemas = () => schemas().filter(tool => tool.name !== 'subagent')
+    assert.match(h.call('edit'), /delegation_decide/)
+    await mkdir(runsFile, { recursive: true })
+    await assert.rejects(h.decide())
+    assert.equal((await h.state()).decision, null)
+    assert.match(h.call('edit'), /delegation_decide/)
+    await rmdir(runsFile)
+    const saving = h.decide()
+    assert.match(h.call('edit', 'while-saving'), /delegation_decide/)
+    await saving
+    assert.equal(h.call('edit', 'saved'), undefined)
+  } finally { await h.close() }
+})
 
 test('direct execution exposes current activity without creating a managed plan or changing routing', async () => {
   const h = await host(); await h.state()
@@ -93,6 +198,7 @@ test('direct execution exposes current activity without creating a managed plan 
 
 test('actual request tool removal and restoration are visible without blocking direct work', async () => {
   const h = await host(); await h.state(); h.turn('生成分享文档')
+  await h.decide('当前委派入口不可用，主控生成文档并核对交付内容。')
   const tools = [...h.definitions.keys()].map(name => ({ name }))
   const header = tools => h.emit('session/event', { id: 'root' }, { type: 'request/header', data: { header: { tools } } })
   try {
@@ -110,6 +216,7 @@ test('actual request tool removal and restoration are visible without blocking d
 
 test('failed edits survive unrelated success and a completion claim, then prompt the same coordinator once', async () => {
   const h = await host(); await h.state(); h.turn('修改文章案例')
+  await h.decide()
   try {
     h.call('edit', 'failed-edit', h.agent, { file_path: 'article.md' })
     h.result('edit', { isError: true, content: [{ type: 'text', text: 'Error: old_string was not found in article.md' }] }, 'failed-edit')
@@ -134,6 +241,7 @@ test('failed edits survive unrelated success and a completion claim, then prompt
 
 test('cancellation and worker turns never trigger direct-edit recovery', async () => {
   const h = await host(); await h.state(); h.turn('修改文章案例')
+  await h.decide()
   try {
     h.call('edit', 'failed-edit', h.agent, { file_path: 'article.md' })
     h.result('edit', { isError: true, content: [{ type: 'text', text: 'missing old string' }] }, 'failed-edit')
@@ -146,6 +254,7 @@ test('cancellation and worker turns never trigger direct-edit recovery', async (
 
 test('direct failures and the repair allowance follow continuations but never leak into a new request', async () => {
   const h = await host(); await h.state(); h.turn('修改文章案例')
+  await h.decide()
   try {
     h.call('edit', 'failed-edit', h.agent, { file_path: 'article.md' })
     h.result('edit', { isError: true, content: [{ type: 'text', text: 'old_string was not found' }] }, 'failed-edit')
@@ -205,6 +314,7 @@ test('auto routing is advice and never forces a handoff from keywords or operati
   try {
     for (const text of ['修复这一行的空指针', complex]) {
       h.turn(text)
+      await h.decide()
       for (let i = 0; i < 20; i++) {
         assert.equal(h.call('read', `read-${i}`), undefined)
         assert.equal(h.call('edit', `edit-${i}`, h.agent, { file_path: `src/${i}.js` }), undefined)
@@ -363,6 +473,7 @@ test('native delegation cannot bypass configured task routing', async () => {
   assert.match(h.call('subagent'), /delegation_plan.*delegation_run/s)
   h.result('subagent', { isError: true, error: { message: 'capacity full' } })
   assert.equal((await h.state()).delegated, 0)
+  await h.decide()
   assert.equal(h.call('edit'), undefined)
   await h.close()
 })
@@ -376,12 +487,14 @@ test('a result from a blocked native delegation cannot count as managed dispatch
 })
 test('continue preserves the previous complex task', async () => {
   const h = await host(); await h.state(); h.turn(complex); h.turn('继续')
+  await h.decide()
   assert.equal((await h.state()).difficulty.level, 'complex')
   assert.equal(h.call('edit'), undefined)
   await h.close()
 })
 test('a simple change is not blocked by the automatic budget', async () => {
   const h = await host(); await h.state(); h.turn('修改页面标题')
+  await h.decide()
   for (let i = 0; i < 5; i++) assert.equal(h.call('edit', String(i)), undefined)
   await h.close()
 })
@@ -409,10 +522,12 @@ test('short approvals and follow-up requirements retain task context, while new 
   const h = await host(); await h.state(); h.turn(complex)
   for (const text of ['可以，开始修复', '继续呢', '发给同事用']) {
     h.turn(text)
+    await h.decide()
     assert.equal((await h.state()).difficulty.level, 'complex', text)
     assert.equal(h.call('edit'), undefined)
   }
   h.turn('你是什么模型')
+  await h.decide()
   assert.equal((await h.state()).difficulty.level, 'simple')
   assert.equal(h.call('edit'), undefined)
   await h.close()
@@ -420,6 +535,7 @@ test('short approvals and follow-up requirements retain task context, while new 
 
 test('workload thresholds do not rewrite the initial difficulty or route', async () => {
   const h = await host(); await h.state(); h.turn('修改页面标题')
+  await h.decide()
   const initial = await h.state()
   for (let i = 0; i < 12; i++) assert.equal(h.call('read', String(i)), undefined)
   for (let i = 0; i < 6; i++) assert.equal(h.call('pwsh', `command-${i}`), undefined)
@@ -434,6 +550,7 @@ test('workload thresholds do not rewrite the initial difficulty or route', async
 
 test('follow-up turns retain the initial difficulty and allow continued direct execution', async () => {
   const h = await host(); await h.state(); h.turn('修改页面标题')
+  await h.decide()
   const initial = await h.state()
   for (let i = 0; i < 4; i++) assert.equal(h.call('edit', String(i)), undefined)
   h.turn('继续呢')
@@ -452,6 +569,7 @@ test('large read-only context does not alter difficulty or block later direct wo
   const initial = await h.state()
   for (let i = 0; i < 40; i++) assert.equal(h.call('read', String(i)), undefined)
   assert.deepEqual((await h.state()).difficulty, initial.difficulty)
+  await h.decide()
   assert.equal(h.call('edit'), undefined)
   assert.equal(h.call('read', 'after-delegation'), undefined)
   assert.equal(h.call('pwsh', 'worker', { id: 'worker' }), undefined)
@@ -479,6 +597,7 @@ test('explicit off and fixed modes keep their own execution policy', async () =>
   for (const mode of ['off', '20']) {
     process.env.DSH_DELEGATION_FIRST = mode
     const h = await host(); await h.state(); h.turn('修改页面标题')
+    if (mode !== 'off') await h.decide()
     for (let i = 0; i < 15; i++) assert.equal(h.call('pwsh', String(i)), undefined, mode)
     if (mode === 'off') assert.equal(h.call('subagent'), undefined)
     await h.close()
@@ -504,6 +623,7 @@ test('turn counters reset together while cumulative policy interceptions retain 
 test('a read-only baseline and three planning notes remain usable after an explicit direct-operation budget is spent', async () => {
   process.env.DSH_DELEGATION_FIRST = '1'
   const h = await host(); await h.state(); h.turn('你评审下代码，看看是否可以优化')
+  await h.decide()
   try {
     assert.equal(h.call('pwsh', 'initial-baseline'), undefined)
     h.ctx.tools.execute = async exec => {

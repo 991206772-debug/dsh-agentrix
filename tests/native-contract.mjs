@@ -104,6 +104,9 @@ try {
     assert.equal(result.isError, false, `${name}: ${JSON.stringify(result)}`)
     return result.value
   }
+  ctx.emit('session/event', { id: 'root' }, { type: 'agent/inbox/spliced', data: { inserted: [{ id: 'native-request', source: { kind: 'user' }, content: [{ type: 'text', text: '验证隔离环境中的原生工具与委派流程' }] }] } })
+  ctx.emit('session/event', { id: 'root' }, { type: 'turn/start', data: { turn: 1 } })
+  await checked('delegation_decide', { mode: 'delegate', reason: '由隔离子任务执行，主控通过原生工具管线核对结果和验收证据。' })
   assert.equal((await call('pwsh')).isError, true)
   assert.equal((await call('subagent')).isError, true)
   const quotedDirectory = path.join(directory, "quoted '$literal")
@@ -137,8 +140,8 @@ try {
   assert.equal((await checked('delegation_status', { taskId: 'a', detail: 'full' })).task.report, longReport)
   assert.equal((await call('delegation_status', { detail: 'full' })).isError, true)
   assert.ok(sections.every(section => section.text().split('\n\n')[0].length <= 600))
-  assert.ok(sections.some(section => /正文.*直接做或委派及理由/.test(section.text())))
-  assert.ok(sections.some(section => /工具失败须修复并核对原产物/.test(section.text())))
+  assert.ok(sections.some(section => /delegation_decide.*direct\/delegate.*具体理由/.test(section.text())))
+  assert.ok(sections.some(section => /修改失败须修复并核对原产物/.test(section.text())))
   const evidence = await checked('delegation_verify', { taskId: 'a', checkIndex: 0 })
   assert.equal(evidence.passed, true)
   const review = await checked('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '原生工具执行管线返回退出码 0', evidence: [evidence.callId] }] })

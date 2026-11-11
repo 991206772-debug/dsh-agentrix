@@ -55,6 +55,7 @@ function compactTask(task) {
 function compactResult(value) {
   const result = { ...value }
   if (value.plan) result.plan = { sessionId: value.plan.sessionId, goal: brief(value.plan.goal, 300), status: value.plan.status,
+    decision: value.plan.decision,
     activationBudget: value.plan.activationBudget, dispatchWait: value.plan.dispatchWait,
     coordinatorIssue: value.plan.coordinatorIssue,
     inputs: (value.plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)).map(input => ({ id: input.id, text: brief(input.text, 400), status: input.status })),
@@ -218,8 +219,9 @@ function routeWarnings(route, tasks) {
 }
 
 /** DSH owns Agent lifetimes and tool execution. This module owns task state and acceptance. */
-export function createOrchestrator({ ctx, file, getConfig, getSource = () => null, getRoute = () => null, onDelegated = () => {} }) {
+export function createOrchestrator({ ctx, file, getConfig, getSource = () => null, getRevision = getSource, getRoute = () => null, onDelegated = () => {} }) {
   const usageLedger = createUsageLedger()
+  const decisions = new Map(), decisionWrites = new Set()
   const plans = new Map(), live = new Map(), permits = new Map(), expectedRoutes = new Map(), disposers = []
   const noteRequests = new Map(), noteWrites = new Map()
   const stagedResults = new Map(), pendingTransports = new Map(), committing = new Set()
@@ -519,6 +521,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     for (const task of copy.tasks) for (const check of task.checks) delete check.verifying
     copy.activationBudget = budget
+    if (copy.decision) copy.decisionCurrent = ['accepted', 'cancelled'].includes(planStatus(plan)) || decisionCurrent(plan.sessionId)
     if (['accepted', 'cancelled'].includes(planStatus(plan))) copy.dispatchWait = null
     return { ...copy, status: planStatus(plan) }
   }
@@ -544,7 +547,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
             ({ id, entry, plan: snapshotPlan(entry.plan), events: entry.events.slice() }))
           await mkdir(path.dirname(file), { recursive: true })
           const temporary = `${file}.tmp`
-          await writeFile(temporary, JSON.stringify({ version: 1, plans: snapshot(), requestUsage: usageLedger.snapshot() }), 'utf8')
+          await writeFile(temporary, JSON.stringify({ version: 1, plans: snapshot(), requestUsage: usageLedger.snapshot(), decisions: [...decisions.values()] }), 'utf8')
           await rename(temporary, file)
           for (const item of batch) {
             try {
@@ -580,6 +583,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const stored = JSON.parse(await readFile(file, 'utf8'))
       if (stored.version !== 1 || !Array.isArray(stored.plans) || stored.plans.length > MAX_PLANS) throw new Error('任务文件格式不支持')
       usageLedger.restore(stored.requestUsage)
+      for (const entry of (stored.decisions ?? []).slice(-100)) {
+        if (typeof entry.sessionId === 'string' && entry.source?.messageId &&
+          (!entry.decision || ['direct', 'delegate'].includes(entry.decision.mode) && typeof entry.decision.reason === 'string')) decisions.set(entry.sessionId, entry)
+      }
       for (const plan of stored.plans) {
         const usage = usageLedger.request(plan.sessionId)
         if (usage?.requestId === plan.usage?.requestId) plan.usage = usage
@@ -622,6 +629,53 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const parent = own(exec), plan = plans.get(parent.id)
     if (!plan) throw new Error('请先调用 delegation_plan 创建任务计划')
     return { parent, plan }
+  }
+  function decisionFor(sessionId) {
+    const entry = decisions.get(sessionId), source = getSource(sessionId)
+    if (decisionWrites.has(sessionId) || !entry || source?.messageId !== entry.source?.messageId) return null
+    return clone(entry.decision ?? null)
+  }
+  function decisionCurrent(sessionId) {
+    const decision = decisionFor(sessionId)
+    return Boolean(decision && decision.revisionId === getRevision(sessionId)?.messageId)
+  }
+  async function recoverDecision(sessionId) {
+    if (decisionCurrent(sessionId) || decisionWrites.has(sessionId)) return false
+    const source = getSource(sessionId), revision = getRevision(sessionId)
+    if (!source?.messageId || !revision?.messageId) return false
+    const previous = decisions.get(sessionId)
+    const sameRevision = previous?.source?.messageId === source.messageId && previous?.revision?.messageId === revision.messageId
+    if (sameRevision && previous.recoveryUsed >= 1) return false
+    decisions.set(sessionId, { sessionId, source: clone(source), revision: clone(revision),
+      decision: previous?.source?.messageId === source.messageId ? previous.decision : null, recoveryUsed: 1 })
+    if (decisions.size > 100) decisions.delete(decisions.keys().next().value)
+    try { await save() }
+    catch (error) { if (previous) decisions.set(sessionId, previous); else decisions.delete(sessionId); throw error }
+    return true
+  }
+  async function recordDecision(args, exec) {
+    const parent = own(exec), source = getSource(parent.id), revision = getRevision(parent.id), reason = typeof args.reason === 'string' ? args.reason.trim() : ''
+    if (!['direct', 'delegate'].includes(args.mode) || typeof reason !== 'string' || reason.length < 8 || reason.length > 500) throw new Error('执行方式只能是 direct 或 delegate；理由须为 8—500 字，说明具体范围、风险或委派价值')
+    if (!source?.messageId) throw new Error('尚未取得当前需求编号，请先接收用户需求后记录判断')
+    const plan = plans.get(parent.id)
+    if (args.mode === 'direct' && plan && !['accepted', 'cancelled'].includes(planStatus(plan))) throw new Error('托管计划尚未结束，请监督、返工或明确取消，不能同时改为主控重复实现')
+    if (decisionWrites.has(parent.id)) throw new Error('判断正在保存，请等待本次工具返回')
+    const previous = decisions.get(parent.id)
+    const decision = { mode: args.mode, reason, requestId: source.messageId, revisionId: revision?.messageId ?? source.messageId, at: Date.now(),
+      model: coordinatorModel(parent, 0, 'decision'), recommendation: clone(getRoute(parent.id)) }
+    decisions.set(parent.id, { sessionId: parent.id, source: clone(source), revision: clone(revision ?? source), decision,
+      recoveryUsed: previous?.revision?.messageId === decision.revisionId ? previous.recoveryUsed ?? 0 : 0 })
+    if (decisions.size > 100) decisions.delete(decisions.keys().next().value)
+    decisionWrites.add(parent.id)
+    const previousPlanDecision = plan?.decision
+    if (plan?.source?.messageId === source.messageId) {
+      plan.decision = clone(decision)
+      remember(plan, 'decision.recorded', (decision.mode === 'delegate' ? '主控决定委派：' : '主控决定直接执行：') + reason)
+    }
+    try { await save() }
+    catch (error) { if (previous) decisions.set(parent.id, previous); else decisions.delete(parent.id); if (plan) plan.decision = previousPlanDecision; throw error }
+    finally { decisionWrites.delete(parent.id) }
+    return { decision: clone(decision) }
   }
   function taskOf(plan, id) {
     const task = plan.tasks.find(item => item.id === id)
@@ -1366,6 +1420,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       async execute(args, exec) { await ready; if (committing.size) await Promise.all(committing); if (!child) own(exec); return execute(args, exec) } }
     disposers.push(ctx.tools.register(definition))
   }
+  routeTool('delegation_decide', '主控正式执行前记录 direct（直接执行）或 delegate（委派）及具体理由。先读文件准备；系统建议委派而选择直接做时，说明为何直接做更合适。身份、需求、模型和时间由插件绑定；普通正文不能代替记录。', {
+    mode: { type: 'string', enum: ['direct', 'delegate'] }, reason: { type: 'string', description: '8—500 字的具体判断依据。' },
+  }, ['mode', 'reason'], recordDecision)
   routeTool('delegation_checkpoint', '托管执行者或只读审查者在长调查、阶段转换或阻塞时记录结论、下一步和成功工具证据。短任务只交最终报告；阶段记录不能代替验收或其他任务的记录。', {
     phase: { type: 'string', enum: ['investigation', 'implementation', 'verification'] }, summary: string, nextStep: string, evidence: array(string),
   }, ['phase', 'summary', 'nextStep', 'evidence'], async (args, exec) => {
@@ -1497,7 +1554,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return { path: target, sessionId: parent.id, requestId: source?.messageId ?? null, kind: args.kind }
   })
   routeTool('delegation_plan', '主控提交可验证的任务拆分。包含依赖、可修改路径、验收标准和主控验证工具参数；不开始执行。', {
-    goal: string, tasks: array({ ...object({ id: string, title: string, instructions: string, scope: string,
+    goal: string, decisionReason: { type: 'string', description: '8—500 字；可在建计划时一并记录委派理由，省去单独调用 delegation_decide；不填写时需在 run 前记录。' }, tasks: array({ ...object({ id: string, title: string, instructions: string, scope: string,
       outputs: array(string), writes: array(string), dependsOn: array(string), complexity: { type: 'string', enum: ['routine', 'complex'] }, complexityReason: string,
       criteria: array(string), checks: array({ ...object({ tool: { type: 'string', enum: CHECK_TOOLS }, arguments: { type: 'object', additionalProperties: true } }), required: ['tool', 'arguments'] }) }),
       required: ['id', 'title', 'instructions', 'scope', 'outputs', 'writes', 'complexity', 'criteria', 'checks'] }),
@@ -1507,6 +1564,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (previous && !['accepted', 'cancelled'].includes(planStatus(previous))) throw new Error('当前计划尚未验收；请监督、返工或取消后再建新计划')
     const validated = validatePlan(args)
     validateChecks(validated.tasks, parent, exec.toolSet)
+    if (args.decisionReason !== undefined) await recordDecision({ mode: 'delegate', reason: args.decisionReason }, exec)
     if (!previous && plans.size >= MAX_PLANS) {
       const oldest = [...plans.values()].filter(plan => ['accepted', 'cancelled'].includes(planStatus(plan))).sort((a, b) => a.updatedAt - b.updatedAt)[0]
       if (!oldest) throw new Error(`已有 ${MAX_PLANS} 个未完成计划，请先完成或取消`)
@@ -1517,7 +1575,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const source = getSource(parent.id)
     const routing = getRoute(parent.id)
     const sessionTitle = service('sessionTitle')?.get(parent.session)?.title
-    const plan = { ...validated, protocolVersion: 2, completion: null, recovery: { used: 0, limit: RECOVERY_LIMIT }, source: source ? clone(source) : null,
+    const plan = { ...validated, protocolVersion: 2, decisionProtocolVersion: 1, decision: decisionCurrent(parent.id) ? decisionFor(parent.id) : null,
+      completion: null, recovery: { used: 0, limit: RECOVERY_LIMIT }, source: source ? clone(source) : null,
       usage: usageLedger.request(parent.id, source),
       ...(routing ? { routing: clone(routing), routingWarnings: routeWarnings(routing, validated.tasks) } : {}),
       activationBudget: { limit: getConfig().maxActivations, used: 0 },
@@ -1528,6 +1587,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   })
   routeTool('delegation_run', '按依赖和全局并发上限执行当前计划。无依赖任务自动派单；前置任务须主控验收后才继续。若返回 dispatchWait，说明正在等待其他会话释放名额或写入冲突结束，等待即可，不要反复调用。失败不自动重试；历史无原因取消在明确继续且仍有执行额度时沿用原计划恢复。', {}, [], async (_args, exec) => {
     const { plan, parent } = ownPlan(exec)
+    if (getConfig().enabled && plan.decisionProtocolVersion >= 1 && (!decisionCurrent(parent.id) || decisionFor(parent.id).mode !== 'delegate')) throw new Error('启动前请用 delegation_decide 记录 delegate 和具体理由，再自动继续 delegation_run；建计划时可用 decisionReason 一并记录')
     if (plan.cancelled) {
       const recoverable = recoverableTasks(plan, true)
       if (!recoverable.length) throw new Error('计划已取消，请提高 maxAttempts 后明确 retry，或创建新计划')
@@ -1636,7 +1696,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     await save(); return { status: 'cancelled', completion: plan.completion ?? null }
   })
   return {
-    ready, snapshot, observe, allowsVerification, supervisionPolicy: SUPERVISION_POLICY,
+    ready, snapshot, observe, allowsVerification, decisionFor, decisionCurrent, recoverDecision,
+    requestContext: sessionId => clone(decisions.get(sessionId) ?? null), supervisionPolicy: SUPERVISION_POLICY,
     requestUsage(sessionId) { const entry = usageFor(sessionId); return entry ? clone(entry) : null },
     requestUsages(sessionId = null) { return usageLedger.snapshot().filter(entry => sessionId === null || entry.sessionId === sessionId) },
     guardChild(exec) {
@@ -1646,7 +1707,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         ? '[DSH Agentrix] 报告已提交，子回合正在结束，不能继续执行工具。' : '[DSH Agentrix] 报告正在确认，不能继续执行工具。'
       if (!expected) return undefined
       if (task.protocolVersion >= 2 && exec.name === 'send_message') return '[DSH Agentrix] 托管任务必须通过 delegation_report 提交正式报告；普通消息不能代替报告。'
-      if (['delegation_plan', 'delegation_run', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'].includes(exec.name)) return '[DSH Agentrix] 此入口仅供主控。子代理读取使用 read/grep/glob，阶段进度使用 delegation_checkpoint，最终结果使用 delegation_report。'
+      if (['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'].includes(exec.name)) return '[DSH Agentrix] 此入口仅供主控。子代理读取使用 read/grep/glob，阶段进度使用 delegation_checkpoint，最终结果使用 delegation_report。'
       if (['subagent', 'subagent_fork', 'spawn_teammate', ...(getConfig().delegationTools ?? [])].includes(exec.name)) return '[DSH Agentrix] 执行者和审查者不能继续委派。'
       if (expected.task.role === 'reviewer' && !['read', 'grep', 'glob', 'delegation_checkpoint', 'delegation_report'].includes(exec.name)) return '[DSH Agentrix] 独立审查只允许只读检索、阶段记录和最终报告；命令与实际验证由主控执行。'
       if (task.supervision) { task.supervision.lastActivityAt = Date.now(); task.supervision.activity = { kind: 'tool', tool: exec.name, at: Date.now() }; backgroundSave() }

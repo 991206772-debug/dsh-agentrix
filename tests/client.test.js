@@ -76,12 +76,37 @@ test('hiding the dock survives polling but a new failure or task becomes visible
   } finally { dock.close(); f.close() }
 })
 
+test('the dock shows formal decision reasons and does not treat assistant prose or delegation intent as a started worker', async () => {
+  const row = { sessionId: 'session-current', source: { messageId: 'request', text: '核对分享文档' },
+    route: { route: 'delegate', reasons: [] }, decision: null, execution: { running: true, toolCalls: 1,
+      activity: { kind: 'tool', tool: 'read' }, statement: '我已经修改完成。', unresolvedChanges: [] } }
+  const body = { ok: true, sessionId: 'session-current', enabled: true, plans: [], sessions: [row] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock('session-current')
+  try {
+    await dock.flush()
+    assert.match(dock.text(), /等待主控记录执行方式和理由/)
+    assert.doesNotMatch(dock.text(), /我已经修改完成|尚未说明/)
+    row.decision = { mode: 'delegate', reason: '需要逐份核对文档，交给执行模型后由主控验证。', model: { model: 'high' }, at: Date.now() }
+    row.decisionCurrent = true
+    await dock.tick()
+    assert.match(dock.text(), /主控决定.*委派/)
+    assert.ok(dock.text().includes(row.decision.reason))
+    assert.match(dock.text(), /已决定委派，尚未启动子代理/)
+    assert.doesNotMatch(dock.text(), /子任务执行中/)
+    row.decisionCurrent = false
+    await dock.tick()
+    assert.match(dock.text(), /需求已补充.*更新判断/)
+  } finally { dock.close(); f.close() }
+})
+
 test('direct work is visible in the input dock with actual activity, advisory mismatch and unresolved edits', async () => {
   const execution = { running: true, startedAt: Date.now(), toolCalls: 2, statement: null,
     activity: { kind: 'tool', tool: 'edit', target: 'article.md' },
     lastResult: { tool: 'read', target: 'article.md', at: Date.now(), failed: false }, unresolvedChanges: [] }
   const body = { ok: true, sessionId: 'session-current', enabled: true, plans: [], sessions: [{ sessionId: 'session-current',
     source: { messageId: 'direct-request', text: '改写文章并生成分享文档' }, route: { route: 'delegate', reasons: [] }, execution,
+    decision: { mode: 'direct', reason: '文档修改范围明确，主控直接调整并核对内容。', at: Date.now(), model: { model: 'high' } }, decisionCurrent: true,
     delegationAvailability: { status: 'available', missingTools: [] } }] }
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
   const dock = f.mountDock('session-current')
@@ -91,7 +116,7 @@ test('direct work is visible in the input dock with actual activity, advisory mi
     assert.match(dock.text(), /主控直接执行/)
     assert.match(dock.text(), /当前.*修改文件.*article\.md/)
     assert.match(dock.text(), /建议.*委派.*尚未启动子代理/)
-    assert.match(dock.text(), /尚未说明.*原因/)
+    assert.match(dock.text(), /判断理由.*文档修改范围明确/)
     execution.unresolvedChanges = [{ callId: 'failed-edit', tool: 'edit', target: 'article.md', reason: 'old_string was not found' }]
     execution.statement = 'Markdown 和 Word 已全部修改完成。'
     execution.running = false
@@ -206,7 +231,8 @@ test('the confirmed plan takes precedence over an initial zero-score direct sugg
     await view.flush(); await action.flush()
     const main = view.nodes('div').find(node => node.props?.className === 'ddf-board-decision-main')
     assert.match(JSON.stringify(main), /主控已确认.*复杂.*重构页面/)
-    assert.match(JSON.stringify(main), /已安排子代理.*独立审查/)
+    assert.match(JSON.stringify(main), /主控判断未记录.*独立审查/)
+    assert.match(JSON.stringify(main), /当前 1 个子 Agent 在执行/)
     assert.doesNotMatch(JSON.stringify(main), /评分|直接执行|系统建议/)
     assert.match(view.text(), /规则判断与建议.*评分 0.*直接执行/)
     assert.match(view.text(), /补充信息.*待主控处理 1 条.*交付人员需要操作引导/)
@@ -1188,6 +1214,7 @@ test('loading and provider catalog failures do not become stale-model alerts', a
 
 test('the board exposes the confirmed plan before tasks and keeps rule-based advice in diagnostics', async () => {
   const body = { ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current', status: 'running',
+    decision: { mode: 'delegate', reason: '规范和实现可以分工处理，主控统一验证接口和交付结果。' }, decisionCurrent: true,
     goal: '按接口规范开发工具', routing: { route: 'delegate_parallel', reasons: ['multiple_files'] }, tasks: [
       { id: 'spec', title: '确定接口规范', status: 'running', complexity: 'routine' },
       { id: 'build', title: '开发工具', status: 'queued', complexity: 'complex', dependsOn: ['spec'] },
@@ -1207,6 +1234,7 @@ test('the board exposes the confirmed plan before tasks and keeps rule-based adv
     assert.ok(decisionIndex < sections.findIndex(node => node?.props?.['data-task-list'] === ''), 'judgment must precede task cards')
     const main = view.nodes('div').find(node => node.props?.className === 'ddf-board-decision-main')
     assert.match(JSON.stringify(main), /主控已确认.*复杂.*独立审查/)
+    assert.match(JSON.stringify(main), /主控决定.*委派.*规范和实现可以分工处理/)
     assert.doesNotMatch(JSON.stringify(main), /评分 3|系统建议/)
     assert.match(view.text(), /规则判断.*中等.*评分 3.*并行委派多个子 Agent/)
     assert.match(view.text(), /当前实际安排.*按任务依赖先后执行/)

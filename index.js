@@ -35,11 +35,11 @@ const MAX_BODY_BYTES = 64 * 1024
  */
 const DISCIPLINE = [
   "## DSH Agentrix：主控职责",
-  "自动评分只作建议；主控按范围、风险和并行性分流：小任务直接完成并验证；执行工作多则先定方案再用 delegation_plan/run；复杂任务加独立审查。",
-  "主控定方案，worker执行；审查沿用派发时的主控模型，不走原生派单。托管任务中主控不重复实现；先用 delegation_verify 实际验证，再用 delegation_review 按证据逐条验收。",
-  "默认读摘要，详情指定 taskId。用户补充先答复；变更用 inputIds/additionalCriteria steer 原代理，纯答复用 acknowledge。审查核对需求与代码，主控验证验收；仅重要问题返工，minor 记录，复查不扩围。",
-  "开工先用正文说明直接做或委派及理由；阶段变化、等待或阻塞也简短说明。多步骤重复执行优先交worker；工具失败须修复并核对原产物，不能拿读取或另一文件成功代替，不为进度多调模型。",
-  "模型错配、重复故障先处理原因；次数、Token、时间只提醒，不停止、不换代理。等事件，不轮询。短任务交最终 report；长调查、阶段变化或阻塞才记 checkpoint。报告成功后自动释放。",
+  "自动评分仅供建议；小任务直接完成并验证，执行工作多用 delegation_plan/run，复杂任务加独立审查。",
+  "主控定方案，worker执行；审查沿用派发时的主控模型，不走原生派单。托管中主控不重复实现；用 delegation_verify 验证，再用 delegation_review 按证据逐条验收。",
+  "默认读摘要，详情指定 taskId。用户补充先答复；变更用 inputIds/additionalCriteria steer 原代理，纯答复用 acknowledge。仅重要问题返工，minor 记录，复查不扩围。",
+  "准备可先 read/grep/glob、inspect/note。正式执行前用 delegation_decide 记录 direct/delegate 和具体理由；建计划可用 decisionReason 一并记录。范围变了更新判断，普通回复不能代替。阶段变化简短告知；修改失败须修复并核对原产物，不为进度多调模型。",
+  "模型错配、重复故障先处理原因；调用量、Token、时间不终止或换代理。等事件，不轮询。短任务交 report；长调查、阶段变化或阻塞记 checkpoint。报告成功后自动释放。",
   "stop 只取消且须传原因。完成以程序回执为准；最后验收后自动结束，无需总结。详见 delegation-first 手册。",
 ].join('\n')
 
@@ -58,8 +58,8 @@ const CONNECTIVES = ['并且', '同时', '另外', '然后', '还要', '以及',
 const HEAVY_WORDS = ['重构', '审计', '调研', '迁移', '全量', '所有', '批量', '多文件', '测试套件', '性能优化', '逐个']
 const LIGHT_WORDS = ['看看', '这是啥', '解释一下', '为什么', '是什么']
 const TASK_ACTION = /实现|开发|新增|增加|补充|修复|修改|改成|调整|替换|评审|审核|排查|优化|重构|迁移|对接|集成|结合|推送|上传|部署|打包|自动生成/
-const CONTINUE_ONLY = /^(?:继续(?:呢|吧)?|接着(?:做|吧)?|下一步|continue|go on|可以|好的?|行|开始吧)[。.!！\s]*$/i
-const FOLLOWUP = /^(?:(?:可以|好的?|行)[，,]|还有|另外|而且|然后|那就|再把|这个|这里|这处|它|他|发给)/
+const CONTINUE_ONLY = /^(?:(?:可以|好的?|行)[，,\s]*)?(?:继续(?:呢|吧)?|接着(?:做|吧)?|下一步|continue|go on|可以|好的?|行|开始(?:吧|执行|优化|修复)?|执行)[。.!！\s]*$/i
+const FOLLOWUP = /^(?:(?:可以|好的?|行)[，,]|还有|还要|另外|而且|然后|那就|再(?:把|补充|增加|调整|修改)|这个|这里|这处|它|他|发给)/
 const LEVEL_RANK = { simple: 0, medium: 1, complex: 2 }
 
 /** A numbered or bulleted requirement line. */
@@ -265,7 +265,7 @@ const GATED_TOOLS = [
 
 /** A call of one of these means work left this context. */
 const DELEGATION_TOOLS = ['spawn_teammate', 'subagent', 'subagent_fork']
-const MANAGED_ENTRY_POINTS = ['delegation_plan', 'delegation_run', 'delegation_status', 'delegation_report', 'delegation_verify', 'delegation_review']
+const MANAGED_ENTRY_POINTS = ['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_status', 'delegation_report', 'delegation_verify', 'delegation_review']
 const CHANGE_TOOLS = ['write', 'edit', 'apply_patch', 'multi_edit', 'notebook_edit']
 
 /**
@@ -549,9 +549,11 @@ export function apply(ctx) {
 
   /** sessionId → the counters and the judgement a turn is governed by. */
   const states = new Map()
+  let orchestration
   const stateOf = (sessionId) => {
     let state = states.get(sessionId)
     if (!state) {
+      const restored = orchestration?.requestContext(sessionId)
       state = {
         turn: 0,
         direct: 0,
@@ -568,8 +570,9 @@ export function apply(ctx) {
         policy: null,
         // Human text collected for the turn that has not started yet.
         pendingText: '',
-        taskText: '',
-        source: null,
+        taskText: restored?.source?.text ?? '',
+        source: restored?.source ?? null,
+        revision: restored?.revision ?? restored?.source ?? null,
         sessionId,
         // Message ids already counted. The harness commits the same human input
         // twice (see `rememberHumanText`), so ids are the only safe dedupe key.
@@ -584,8 +587,8 @@ export function apply(ctx) {
     return state
   }
 
-  const orchestration = createOrchestrator({ ctx, file: file.replace(/\.json$/, '.runs.json'),
-    getConfig: () => current, getSource: id => states.get(id)?.source ?? null, getRoute: id => states.get(id)?.route ?? null,
+  orchestration = createOrchestrator({ ctx, file: file.replace(/\.json$/, '.runs.json'),
+    getConfig: () => current, getSource: id => states.get(id)?.source ?? null, getRevision: id => states.get(id)?.revision ?? null, getRoute: id => states.get(id)?.route ?? null,
     onDelegated: id => { stateOf(id).delegated++ } })
   const ready = Promise.all([configReady, orchestration.ready])
 
@@ -601,6 +604,11 @@ export function apply(ctx) {
   const rememberHumanText = (state, data) => {
     const text = messageText(data)
     if (!text) return
+    if (!state.source) {
+      const restored = orchestration.requestContext(state.sessionId)
+      state.source = restored?.source ?? null; state.revision = restored?.revision ?? state.source
+      if (state.source) state.taskText = state.source.text
+    }
     const id = data?.id ? String(data.id) : `text:${text}`
     if (state.humanIds.has(id)) return
     state.humanIds.add(id)
@@ -610,9 +618,10 @@ export function apply(ctx) {
       if (oldest !== undefined) state.humanIds.delete(oldest)
     }
     const followup = CONTINUE_ONLY.test(text.trim()) || (text.length < 120 && FOLLOWUP.test(text.trim()))
-    if (!state.pendingText && !followup && !orchestration.hasPending(state.sessionId)) {
+    if (!state.source || !state.pendingText && !followup && !orchestration.hasPending(state.sessionId)) {
       state.source = { messageId: data?.id ? String(data.id) : null, text: text.slice(0, 4000) }
     }
+    if (!state.revision || !CONTINUE_ONLY.test(text.trim())) state.revision = { messageId: data?.id ? String(data.id) : null, text: text.slice(0, 4000) }
     state.pendingText = state.pendingText ? `${state.pendingText}\n${text}` : text
   }
 
@@ -714,7 +723,7 @@ export function apply(ctx) {
   }
   const ensureExecution = state => state.execution ??= {
     running: true, startedAt: Date.now(), lastActivityAt: Date.now(), toolCalls: 0,
-    activity: { kind: 'waiting_model_response' }, lastResult: null, statement: null, unresolvedChanges: [], repairUsed: 0,
+    activity: { kind: 'waiting_model_response' }, lastResult: null, unresolvedChanges: [], repairUsed: 0,
   }
   const toolTarget = exec => {
     const args = exec.arguments ?? {}
@@ -743,8 +752,6 @@ export function apply(ctx) {
     const state = stateOf(role.agentId)
     state.isCoordinator = !role.worker
     if (!state.isCoordinator) return undefined
-    if (!canDelegate(exec)) { observeCoordinatorCall(exec, state); return undefined }
-
     const name = String(exec?.name ?? '')
     if (orchestration.allowsVerification(exec)) return undefined
     if (current.enabled && current.delegationTools.includes(name)) {
@@ -758,13 +765,24 @@ export function apply(ctx) {
       state.last = { tool: name, kind: 'managed-plan', at: Date.now() }
       return '[DSH Agentrix] 当前计划尚未验收。请监督或返工任务；主控验证通过 delegation_verify 执行，避免与子 Agent 重复修改。'
     }
-    const verdict = evaluate(name, state, current)
+    const verdict = canDelegate(exec) ? evaluate(name, state, current) : { allow: true }
     if (verdict.countsAsDelegation) {
       state.delegationPending.set(exec.callId, state.turn)
       if (state.delegationPending.size > 100) state.delegationPending.delete(state.delegationPending.keys().next().value)
       return undefined
     }
     if (verdict.allow) {
+      if (current.enabled && current.gatedTools.includes(name)) {
+        const decision = orchestration.decisionFor(role.agentId)
+        if (!orchestration.decisionCurrent(role.agentId) || decision.mode !== 'direct') {
+          state.denied++; state.turnDenied++
+          const message = !orchestration.decisionCurrent(role.agentId)
+            ? '[DSH Agentrix] 本需求尚未记录判断或范围已更新。正式执行前请调用 delegation_decide，记录 direct 或 delegate 及具体理由；随后自动继续原任务。read/grep/glob、delegation_inspect/note 可先准备，无需用户确认。'
+            : '[DSH Agentrix] 主控已决定委派。请用 delegation_plan/run 执行；若范围改变，先用 delegation_decide 更新方式和理由。'
+          state.last = { tool: name, kind: 'decision', message, at: Date.now() }
+          return message
+        }
+      }
       observeCoordinatorCall(exec, state)
       if (verdict.countsAsDirect) state.direct += 1
       return undefined
@@ -825,7 +843,12 @@ export function apply(ctx) {
   const offDirectStopping = ctx.on('agent/turn-stopping', async ({ agent, signal }) => {
     await ready
     if (!current.enabled || signal?.aborted || roleOf({ agent })?.worker !== false || orchestration.hasPending(agent.id)) return
-    const execution = states.get(agent.id)?.execution
+    const state = states.get(agent.id), execution = state?.execution
+    if ((execution?.toolCalls > 0 || state?.last?.kind === 'decision') && typeof agent.inject === 'function' && await orchestration.recoverDecision(agent.id)) {
+      agent.inject({ id: randomUUID(), role: 'user', source: { kind: 'delegation-decision-recovery' }, content: [{ type: 'text', text:
+        '本次需求尚未记录执行方式或范围已更新。请先用 delegation_decide 记录 direct/delegate 和具体理由，再自动继续原任务；若只读工作已结束，补齐判断即可，不重复执行。不新开分类代理、不要求用户点击继续；普通回复不能代替记录。此类遗漏本次范围只自动补齐一次。' }] })
+      return
+    }
     if (!execution?.unresolvedChanges.length || execution.repairUsed >= 1 || typeof agent.inject !== 'function') return
     execution.repairUsed++
     agent.inject({ id: randomUUID(), role: 'user', source: { kind: 'delegation-direct-recovery' }, content: [{ type: 'text', text:
@@ -869,10 +892,6 @@ export function apply(ctx) {
       const state = states.get(id)
       if (!state) return
       if (type === 'request/header') state.delegationAvailability = delegationAvailability(ctx.get('agents')?.get?.(id), event.data?.header?.tools)
-      if (type === 'assistant/message' && state.execution) {
-        const text = messageText(event.data?.message)
-        if (text) state.execution.statement = text.slice(0, 500)
-      }
       if (type === 'turn/end' && state.execution) {
         state.execution.running = false; state.execution.endedAt = Date.now()
       }
@@ -957,6 +976,7 @@ export function apply(ctx) {
     }
     await ready
     const selectedId = new URL(request.url || `${API_BASE}/state`, 'http://localhost').searchParams.get('sessionId')
+    if (selectedId && orchestration.requestContext(selectedId)) stateOf(selectedId)
     const body = {
       ok: true,
       sessionId: selectedId,
@@ -976,6 +996,7 @@ export function apply(ctx) {
       supervisionPolicy: orchestration.supervisionPolicy,
       runtimePolicyVersion: 2,
       coordinatorProgressVersion: 1,
+      decisionProtocolVersion: 1,
       reviewerModelPolicy: REVIEWER_MODEL_POLICY,
       requestUsage: orchestration.requestUsages(selectedId),
       // No execution here, so this is the global view only — a status probe, not
@@ -1001,6 +1022,8 @@ export function apply(ctx) {
         turnStats: { direct: state.direct, delegated: state.delegated, denied: state.turnDenied },
         sessionStats: { denied: state.denied, since: state.observedSince },
         execution: state.execution,
+        decision: orchestration.decisionFor(id),
+        decisionCurrent: orchestration.decisionCurrent(id),
         delegationAvailability: state.delegationAvailability ?? delegationAvailability(ctx.get('agents')?.get?.(id)),
         last: state.last,
         // The judgement that governs this turn, and the policy it produced.
@@ -1362,7 +1385,10 @@ export function apply(ctx) {
               ? '当前会话的委派入口不可用。请明确告知用户并检查插件启用状态，不要宣称已派发子代理。' : ''
             const failures = state?.execution?.unresolvedChanges ?? []
             const unresolved = failures.length ? '尚未成功修改：' + failures.map(item => `${item.target || item.tool}（${item.reason}）`).join('；') : ''
-            return [DISCIPLINE, !summary && difficulty ? difficultyLine(difficulty) : '', !summary && route ? routingLine(route) : '', missing, unresolved, summary].filter(Boolean).join('\n\n')
+            const decision = orchestration.decisionFor(agentId)
+            const choice = orchestration.decisionCurrent(agentId) ? '本需求已记录执行方式：' + decision.mode + '。范围未变无需重复记录。'
+              : '本需求尚未记录判断或范围已补充；准备后用 delegation_decide 记录，也可在建计划时提供 decisionReason。'
+            return [DISCIPLINE, !summary && difficulty ? difficultyLine(difficulty) : '', !summary && route ? routingLine(route) : '', choice, missing, unresolved, summary].filter(Boolean).join('\n\n')
           } catch {
             return DISCIPLINE
           }

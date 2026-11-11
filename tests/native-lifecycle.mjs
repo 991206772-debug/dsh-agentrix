@@ -33,6 +33,7 @@ const coordinatorQuota = process.argv.includes('--coordinator-quota')
 const nextRequest = process.argv.includes('--next-request')
 const directUnresolved = process.argv.includes('--direct-unresolved')
 const directRecovery = process.argv.includes('--direct-recovery') || directUnresolved
+const decisionRecovery = process.argv.includes('--decision-recovery')
 let followingRequest = false
 const workerGate = Promise.withResolvers()
 let parentWaiting = false
@@ -71,15 +72,28 @@ class ScriptedAdapter extends LlmAdapter {
     phases.set(request.sessionId, phase + 1)
     let block
     if (request.sessionId === parent?.id) {
-      if (directRecovery) {
+      if (decisionRecovery || directRecovery) {
         const target = path.join(directory, 'result.txt')
-        if (phase === 0) block = tool('edit', { file_path: target, old_string: 'missing', new_string: 'updated' })
-        else if (phase === 1 || phase === 5) block = tool('read', { path: target })
-        else if (phase === 2) block = tool('write', { file_path: path.join(directory, 'other.txt'), content: 'generated another deliverable' })
-        else if (phase === 4 && !directUnresolved) {
+        const step = phase - 1
+        if (decisionRecovery) {
+          if (phase === 0) block = tool('edit', { file_path: target, old_string: 'verified', new_string: 'updated' })
+          else if (phase === 1) {
+            assert.equal(await readFile(target, 'utf8'), 'verified', 'missing decision must prevent the write')
+            block = { type: 'text', text: '本次故意漏记判断后提前结束。' }
+          } else if (phase === 2) {
+            assert.match(JSON.stringify(request.messages), /delegation_decide.*具体理由/)
+            block = tool('delegation_decide', { mode: 'direct', reason: '只有一处已定位文字，主控修改后直接读取验证即可。' })
+          } else if (phase === 3) block = tool('edit', { file_path: target, old_string: 'verified', new_string: 'updated' })
+          else if (phase === 4) block = tool('read', { path: target })
+          else block = { type: 'text', text: '已核对修改结果。' }
+        } else if (phase === 0) block = tool('delegation_decide', { mode: 'direct', reason: '本次仅核对一个隔离文件，主控直接修改并读取验证即可。' })
+        else if (step === 0) block = tool('edit', { file_path: target, old_string: 'missing', new_string: 'updated' })
+        else if (step === 1 || step === 5) block = tool('read', { path: target })
+        else if (step === 2) block = tool('write', { file_path: path.join(directory, 'other.txt'), content: 'generated another deliverable' })
+        else if (step === 4 && !directUnresolved) {
           assert.match(JSON.stringify(request.messages), /本次文件修改仍有失败记录/)
           block = tool('edit', { file_path: target, old_string: 'verified', new_string: 'updated' })
-        } else block = { type: 'text', text: phase === 3 ? '文件已经全部更新完成。' : directUnresolved ? '原文件修改未完成，需要处理。' : '已修复并核对原文件。' }
+        } else block = { type: 'text', text: step === 3 ? '文件已经全部更新完成。' : directUnresolved ? '原文件修改未完成，需要处理。' : '已修复并核对原文件。' }
         yield { type: 'block-start', index: 0, blockType: block.type }
         yield { type: 'block-end', index: 0, block }
         yield { type: 'usage', usage: { inputTokens: 30, outputTokens: 5 } }
@@ -97,7 +111,7 @@ class ScriptedAdapter extends LlmAdapter {
         return
       }
       const plan = (await state())?.plans?.[0], task = plan?.tasks?.[0]
-      if (!task) block = tool('delegation_plan', { goal: '高模型规划、低模型执行、高模型审查与验收', tasks: [{ id: 'a', title: '检查隔离产物', instructions: '只读取隔离文件并正式报告', scope: '隔离目录', outputs: [path.join(directory, 'result.txt')], writes: [], complexity: 'complex', criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: path.join(directory, 'result.txt') } }] }] })
+      if (!task) block = tool('delegation_plan', { goal: '高模型规划、低模型执行、高模型审查与验收', decisionReason: '核对工作由执行模型完成，主控保留独立上下文做验证和验收。', tasks: [{ id: 'a', title: '检查隔离产物', instructions: '只读取隔离文件并正式报告', scope: '隔离目录', outputs: [path.join(directory, 'result.txt')], writes: [], complexity: 'complex', criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: path.join(directory, 'result.txt') } }] }] })
       else if (phase === 1) block = tool('delegation_run', {})
       else if (supplement && plan.inputs?.some(input => ['queued', 'received'].includes(input.status))) block = tool('delegation_control', {
         taskId: 'a', action: 'steer', message: '将交付人员的操作引导纳入任务', inputIds: plan.inputs.filter(input => ['queued', 'received'].includes(input.status)).map(input => input.id),
@@ -144,7 +158,7 @@ try {
       if ((supplement || switchCoordinator) && exec.agent.id !== 'root' && requests.some(request => request.sessionId === exec.agent.id && request.model === 'low-worker')) await workerGate.promise
       return { text: await readFile(args.path, 'utf8') }
     } }))
-  if (directRecovery) {
+  if (directRecovery || decisionRecovery) {
     ctx.tools.register(defineTool({ name: 'edit', description: 'Edit isolated fixture', parameters: {
       file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } },
       output: { schema: { type: 'object', additionalProperties: true }, render: () => [{ type: 'text', text: 'file edited' }] },
@@ -203,7 +217,18 @@ try {
   }
   await until(() => events.some(event => event.id === 'root' && event.type === 'turn/end'), 'coordinator completion')
   const plan = (await state()).plans[0]
-  if (directRecovery) {
+  if (decisionRecovery) {
+    await until(() => parent.status === 'idle', 'decision recovery settled')
+    const result = await state()
+    assert.equal(result.plans.length, 0)
+    assert.equal(result.sessions[0].decision.mode, 'direct')
+    assert.equal(result.sessions[0].decisionCurrent, true)
+    assert.equal(await readFile(path.join(directory, 'result.txt'), 'utf8'), 'updated')
+    assert.equal(requests.length, 6)
+    assert.ok(requests.every(request => request.sessionId === 'root'))
+    assert.equal(events.filter(event => event.id === 'root' && event.type === 'turn/end').length, 1)
+    console.log('PASS: native missing decision blocks the write, resumes the same coordinator once, records the reason and completes without a new agent or human continuation')
+  } else if (directRecovery) {
     await until(() => parent.status === 'idle', 'direct request settled')
     const result = await state(), execution = result.sessions[0].execution
     assert.equal(result.plans.length, 0)
@@ -213,7 +238,7 @@ try {
     assert.equal(execution.unresolvedChanges.length, directUnresolved ? 1 : 0)
     assert.equal(await readFile(path.join(directory, 'result.txt'), 'utf8'), directUnresolved ? 'verified' : 'updated')
     assert.equal(await readFile(path.join(directory, 'other.txt'), 'utf8'), 'generated another deliverable')
-    assert.equal(requests.length, directUnresolved ? 5 : 7)
+    assert.equal(requests.length, directUnresolved ? 6 : 8)
     assert.ok(requests.every(request => request.sessionId === 'root'))
     assert.equal(events.filter(event => event.id === 'root' && event.type === 'turn/end').length, 1)
     assert.equal(result.sessions[0].delegationAvailability.status, 'available')

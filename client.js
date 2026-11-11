@@ -673,8 +673,10 @@ window.__ModuleLoader__.load({
       'dock.hideLabel': '隐藏提示', 'dock.coordinator': '主控处理中', 'dock.repairing': '正在处理异常',
       'dock.workers': '{count} 个子任务执行中', 'dock.audit': '独立审查中', 'dock.review': '待验收 {count} 项',
       'dock.unavailable': '协作暂不可用', 'dock.offline': '状态暂不可用',
-      'direct.advice': '系统建议委派，当前尚未启动子代理', 'direct.reasonMissing': '主控尚未说明本次直接执行的原因',
-      'direct.statement': '主控最近说明', 'direct.calls': '本轮工具调用 {count} 次',
+      'direct.advice': '系统建议委派，当前尚未启动子代理', 'direct.calls': '本轮工具调用 {count} 次',
+      'direct.preparing': '主控准备中', 'decision.title': '主控决定', 'decision.direct': '直接执行', 'decision.delegate': '委派',
+      'decision.reason': '判断理由', 'decision.pending': '等待主控记录执行方式和理由', 'decision.unrecorded': '主控判断未记录',
+      'decision.revised': '需求已补充，等待主控更新判断', 'decision.notStarted': '已决定委派，尚未启动子代理', 'decision.at': '判断时间',
       'direct.unavailable': '委派入口不可用', 'direct.checkPlugin': '请检查 DSH Agentrix 插件是否启用，以及宿主的子代理功能是否可用；当前没有通过这些入口启动协作。',
       'direct.backendMissing': 'Agentrix 插件服务不可用', 'direct.backendHint': '请检查插件是否启用；进度恢复前无法确认当前执行情况。',
       'direct.stale': '进度暂时无法更新，以下为最近记录',
@@ -685,8 +687,10 @@ window.__ModuleLoader__.load({
       'dock.hideLabel': 'Hide notice', 'dock.coordinator': 'Coordinator working', 'dock.repairing': 'Handling an issue',
       'dock.workers': '{count} subtasks running', 'dock.audit': 'Independent review', 'dock.review': '{count} awaiting acceptance',
       'dock.unavailable': 'Delegation unavailable', 'dock.offline': 'Status unavailable',
-      'direct.advice': 'Delegation was suggested; no child agent has started', 'direct.reasonMissing': 'The coordinator has not explained its choice to execute directly',
-      'direct.statement': 'Latest coordinator statement', 'direct.calls': '{count} tool calls this turn',
+      'direct.advice': 'Delegation was suggested; no child agent has started', 'direct.calls': '{count} tool calls this turn',
+      'direct.preparing': 'Coordinator preparing', 'decision.title': 'Coordinator decision', 'decision.direct': 'Execute directly', 'decision.delegate': 'Delegate',
+      'decision.reason': 'Reason', 'decision.pending': 'Waiting for the coordinator to record its execution choice and reason', 'decision.unrecorded': 'Coordinator decision not recorded',
+      'decision.revised': 'Request updated; waiting for a revised decision', 'decision.notStarted': 'Delegation chosen; no child agent has started', 'decision.at': 'Decision time',
       'direct.unavailable': 'Delegation tools unavailable', 'direct.checkPlugin': 'Check that DSH Agentrix is enabled and the host supports subagents. These entry points have not started collaboration.',
       'direct.backendMissing': 'Agentrix plugin service unavailable', 'direct.backendHint': 'Check that the plugin is enabled. Current execution cannot be confirmed until progress is available.',
       'direct.stale': 'Progress could not be refreshed; the last record is shown',
@@ -1226,6 +1230,7 @@ window.__ModuleLoader__.load({
         h('style', null, CHAT_NOTICE_STYLES), h('strong', { className: 'ddf-chat-notice-heading' }, t('live.title') + ' · ' + fill(t('live.counts'), {
           running, returned: tasks.filter(task => ['review', 'accepted'].includes(task.status)).length, accepted: tasks.length - unfinished.length, total: tasks.length })),
         error ? h('p', { className: 'ddf-chat-live-meta' }, t('view.staleTitle')) : null,
+        h(DecisionDetails, { t, decision: plan.decision, current: plan.decisionCurrent !== false }),
         ...unfinished.map(task => {
           const target = live(task.audit ?? {}) ? task.audit : task, state = target.supervision
           const time = value => new Date(value).toLocaleTimeString()
@@ -1313,6 +1318,16 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', className: 'ddf-dock-hide', 'aria-label': t('dock.hide'), onClick: () => setDismissed(identity) }, t('dock.hideLabel'))), content)))
     }
 
+    function DecisionDetails({ t, decision, current = true, preparing = false }) {
+      if (!decision) return h('p', { className: 'ddf-chat-live-meta' }, t(preparing ? 'decision.pending' : 'decision.unrecorded'))
+      return h('div', { className: 'ddf-decision' },
+        h('p', null, t('decision.title') + '：' + t('decision.' + decision.mode)),
+        !current ? h('p', null, t('decision.revised')) : null,
+        h('p', null, t('decision.reason') + '：' + decision.reason),
+        h('p', { className: 'ddf-chat-live-meta' }, decision.model?.model || '—',
+          decision.at ? ' · ' + t('decision.at') + '：' + new Date(decision.at).toLocaleTimeString() : ''))
+    }
+
     function CoordinatorProgress({ t, state, error }) {
       const execution = state?.execution
       if (!execution || !execution.running && !execution.unresolvedChanges?.length) return null
@@ -1320,14 +1335,15 @@ window.__ModuleLoader__.load({
       const current = activity?.kind === 'tool' ? liveToolLabel(t, activity.tool) + (activity.target ? ' · ' + activity.target : '')
         : activity?.kind ? t('supervision.activity.' + activity.kind) : t('live.unknown')
       return h('section', { className: 'ddf-chat-notice ddf-chat-live', 'data-kind': failures.length ? execution.running ? 'supervision' : 'service' : 'progress', role: failures.length && !execution.running ? 'alert' : 'status' },
-        h('style', null, CHAT_NOTICE_STYLES), h('strong', null, t(failures.length ? execution.running ? 'direct.repairing' : 'direct.incomplete' : 'direct.title')),
+        h('style', null, CHAT_NOTICE_STYLES), h('strong', null, t(failures.length ? execution.running ? 'direct.repairing' : 'direct.incomplete' : state.decision?.mode === 'direct' ? 'direct.title' : 'direct.preparing')),
         state.source?.text ? h('p', null, state.source.text.slice(0, 160)) : null,
         error ? h('p', null, t('direct.stale')) : null,
         execution.running ? h('p', null, t('live.current') + '：' + current) : null,
         execution.model?.model ? h('p', null, t('role.coordinator') + '：' + execution.model.model) : null,
         h('p', { className: 'ddf-chat-live-meta' }, fill(t('direct.calls'), { count: execution.toolCalls })),
-        state.route?.route && state.route.route !== 'direct' ? h('p', null, t('direct.advice'),
-          failures.length ? '' : ' · ' + (execution.statement ? t('direct.statement') + '：' + execution.statement : t('direct.reasonMissing'))) : null,
+        h(DecisionDetails, { t, decision: state.decision, current: state.decisionCurrent !== false, preparing: execution.running }),
+        state.decision?.mode === 'delegate' && state.decisionCurrent !== false ? h('p', null, t('decision.notStarted'))
+          : state.route?.route && state.route.route !== 'direct' ? h('p', null, t('direct.advice')) : null,
         execution.lastResult ? h('p', { className: 'ddf-chat-live-meta' }, t('live.recent') + '：' + liveToolLabel(t, execution.lastResult.tool),
           execution.lastResult.target ? ' · ' + execution.lastResult.target : '', execution.lastResult.failed ? ' · ' + t('live.toolFailed') : '') : null,
         ...failures.map(item => h('p', { key: item.callId }, (item.target || item.tool) + '：' + item.reason)))
@@ -1799,6 +1815,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'ddf-card-title' }, t('view.details')),
         plan.activationBudget ? h('p', { className: 'ddf-hint' }, fill(t('plans.activationBudget'), plan.activationBudget)) : null,
         plan.routing ? h('p', { className: 'ddf-hint' }, routeEstimate(t, plan.routing)) : null,
+        h(DecisionDetails, { t, decision: plan.decision, current: plan.decisionCurrent !== false }),
         h('details', { className: 'ddf-details' }, h('summary', null, t('view.source')),
           h('div', { className: 'ddf-task-body' },
             h('pre', null, plan.source?.text || t('view.unknownSource')),
@@ -2028,6 +2045,8 @@ window.__ModuleLoader__.load({
 
     function BoardDecision({ t, session, plan, status, running }) {
       const route = plan?.routing ?? session?.route
+      const decision = plan ? plan.decision : session?.decision
+      const decisionCurrent = (plan ? plan.decisionCurrent : session?.decisionCurrent) !== false
       const difficulty = session?.difficulty, level = levelKey(difficulty)
       const tasks = plan?.tasks ?? []
       const complex = tasks.some(task => task.complexity === 'complex')
@@ -2056,9 +2075,11 @@ window.__ModuleLoader__.load({
             h('div', { className: 'ddf-board-decision-level' }, h('strong', null, plan ? confirmed : level && difficulty?.signals?.length ? t('level.' + level) : t('view.unconfirmed'))),
             h('p', { className: 'ddf-board-decision-signals' }, plan ? reasons || t('plans.modelReasonUnknown') : signalsText(t, difficulty))),
           h('div', { className: 'ddf-board-decision-routes' },
-            h('div', null, h('h2', null, t(plan ? 'view.confirmedArrangement' : 'view.suggestedRoute')),
-              h('strong', { className: 'ddf-board-decision-route' }, plan ? t('view.delegationConfirmed') : routeLabel(t, route)),
-              h('p', { className: 'ddf-board-decision-note' }, plan ? t(complex || tasks.some(task => task.audit) ? 'view.complexAudit' : 'view.routineAcceptance') : routeReasonsText(t, route))),
+            h('div', null, h('h2', null, t('decision.title')),
+              h('strong', { className: 'ddf-board-decision-route' }, t(decision ? 'decision.' + decision.mode : 'decision.unrecorded')),
+              decision ? h('p', { className: 'ddf-board-decision-note' }, decision.reason) : null,
+              !decisionCurrent && decision ? h('p', { className: 'ddf-board-decision-note' }, t('decision.revised')) : null,
+              plan ? h('p', { className: 'ddf-board-decision-note' }, t(complex || tasks.some(task => task.audit) ? 'view.complexAudit' : 'view.routineAcceptance')) : null),
             h('div', { className: 'ddf-board-decision-actual' }, h('h2', null, t('view.actualArrangement')), h('strong', null, actual),
               dependent.length ? h('p', { className: 'ddf-board-decision-note' }, fill(t('view.boardDependency'), {
                 tasks: [...new Set(dependent.flatMap(task => task.dependsOn ?? []))].map(id => tasks.find(task => task.id === id))
@@ -2274,7 +2295,7 @@ window.__ModuleLoader__.load({
       const level = levelKey(session.difficulty)
       const score = session.difficulty?.score
       const field = (key, ...values) => h('div', { key }, h('dt', null, t('table.' + key)), h('dd', null, ...values))
-      return h('article', null, h('dl', null,
+      return h('article', null, h(DecisionDetails, { t, decision: session.decision, current: session.decisionCurrent !== false }), h('dl', null,
         field('session', h('code', { title: session.sessionId }, shortId(session.sessionId)), t(session.role === 'worker' ? 'role.worker' : 'role.coordinator')),
         field('difficulty', level ? t('level.' + level) : t('difficulty.none'),
           level && Number.isFinite(score) ? h('span', null, fill(t('difficulty.score'), { score })) : null,
