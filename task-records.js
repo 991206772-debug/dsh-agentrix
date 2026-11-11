@@ -22,6 +22,8 @@ export function taskSummary(plan) {
     '- 创建时间：' + time(plan.createdAt), '- 最近更新：' + time(plan.updatedAt),
     '- 工作目录：' + (plan.cwd || '未提供项目目录'), '- 主 Agent：' + plan.sessionId,
     '- 原始需求消息：' + (plan.source?.messageId || '未记录'),
+    ...(plan.messageResolution ? ['- 最近消息关联：' + ({ new: '新需求', continue: '继续原需求', update: '补充或调整原需求', question: '询问进度或普通提问' }[plan.messageResolution.relation] || '未记录'),
+      '- 关联消息：' + plan.messageResolution.messageId + '；对应需求：' + plan.messageResolution.requestId] : []),
     '- 主控决定：' + (plan.decision ? plan.decision.mode === 'delegate' ? '委派' : '直接执行' : '未记录'),
     ...(plan.decision ? ['- 判断理由：' + plan.decision.reason,
       '- 判断时间：' + time(plan.decision.at) + '；主控模型：' + plan.decision.model.provider + ' / ' + plan.decision.model.model,

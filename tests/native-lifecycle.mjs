@@ -34,6 +34,7 @@ const nextRequest = process.argv.includes('--next-request')
 const directUnresolved = process.argv.includes('--direct-unresolved')
 const directRecovery = process.argv.includes('--direct-recovery') || directUnresolved
 const decisionRecovery = process.argv.includes('--decision-recovery')
+const longVerification = process.argv.includes('--long-verification')
 let followingRequest = false
 const workerGate = Promise.withResolvers()
 let parentWaiting = false
@@ -55,7 +56,7 @@ ctx.plugin(SubagentRuntime)
 ctx.plugin(Spawn)
 const tick = () => new Promise(resolve => setTimeout(resolve, 10))
 async function until(predicate, label) {
-  for (let i = 0; i < 500; i++) { if (await predicate()) return; await tick() }
+  for (let i = 0; i < (longVerification ? 7500 : 500); i++) { if (await predicate()) return; await tick() }
   throw new Error('Timed out: ' + label)
 }
 let parent, handle, nextCall = 0
@@ -103,16 +104,19 @@ class ScriptedAdapter extends LlmAdapter {
       if (followingRequest) {
         const system = JSON.stringify(request.messages.filter(message => message.role === 'system'))
         assert.ok(system.includes('DSH Agentrix'), 'the native coordinator discipline is present')
-        assert.ok(!system.includes('当前计划：高模型规划、低模型执行、高模型审查与验收'), 'the previous plan must not be injected into the new request')
-        yield { type: 'block-start', index: 0, blockType: 'text' }
-        yield { type: 'block-end', index: 0, block: { type: 'text', text: '已核对第二项需求，无需委派。' } }
+        const message = (await state()).sessions[0]?.pendingMessages?.[0]
+        if (!message) assert.ok(!system.includes('当前计划：高模型规划、低模型执行、高模型审查与验收'), 'after confirmation the previous plan must not be injected as the current request')
+        const answer = message ? tool('delegation_decide', { relation: 'new', messageId: message.messageId, mode: 'direct', reason: '第二项需求只需主控核对已有上下文并答复。' }) : { type: 'text', text: '已核对第二项需求，无需委派。' }
+        yield { type: 'block-start', index: 0, blockType: answer.type }
+        yield { type: 'block-end', index: 0, block: answer }
         yield { type: 'usage', usage: { inputTokens: 30, outputTokens: 5 } }
-        yield { type: 'finish', reason: { kind: 'stop' } }
+        yield { type: 'finish', reason: { kind: answer.type === 'tool-call' ? 'tool-calls' : 'stop' } }
         return
       }
       const plan = (await state())?.plans?.[0], task = plan?.tasks?.[0]
       if (!task) block = tool('delegation_plan', { goal: '高模型规划、低模型执行、高模型审查与验收', decisionReason: '核对工作由执行模型完成，主控保留独立上下文做验证和验收。', tasks: [{ id: 'a', title: '检查隔离产物', instructions: '只读取隔离文件并正式报告', scope: '隔离目录', outputs: [path.join(directory, 'result.txt')], writes: [], complexity: 'complex', criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: path.join(directory, 'result.txt') } }] }] })
       else if (phase === 1) block = tool('delegation_run', {})
+      else if (supplement && (await state()).sessions[0]?.pendingMessages?.length) block = tool('delegation_decide', { relation: 'update', mode: 'delegate', reason: '将补充的操作引导纳入原任务，沿用原执行者完成。' })
       else if (supplement && plan.inputs?.some(input => ['queued', 'received'].includes(input.status))) block = tool('delegation_control', {
         taskId: 'a', action: 'steer', message: '将交付人员的操作引导纳入任务', inputIds: plan.inputs.filter(input => ['queued', 'received'].includes(input.status)).map(input => input.id),
         additionalCriteria: ['提供面向交付操作员的页面引导'],
@@ -155,6 +159,15 @@ try {
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: value.text }] },
     async execute(args, exec) {
       assert.equal(args.path, path.join(directory, 'result.txt'))
+      if (longVerification && exec.agent.id === 'root') {
+        const started = Date.now()
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(resolve, 61_000)
+          exec.signal.addEventListener('abort', () => { clearTimeout(timer); reject(exec.signal.reason) }, { once: true })
+        })
+        assert.ok(Date.now() - started >= 61_000)
+        assert.equal(exec.signal.aborted, false)
+      }
       if ((supplement || switchCoordinator) && exec.agent.id !== 'root' && requests.some(request => request.sessionId === exec.agent.id && request.model === 'low-worker')) await workerGate.promise
       return { text: await readFile(args.path, 'utf8') }
     } }))
@@ -296,7 +309,7 @@ try {
     inputCharacters: requests.reduce((sum, request) => sum + request.inputCharacters, 0) }))
   const coordinatorCalls = requests.filter(request => request.sessionId === 'root').length
   if (truncateOutput) assert.ok(coordinatorCalls >= 7 && coordinatorCalls <= 8, 'the original coordinator resumes each truncated output and may wait once for the child')
-  else assert.equal(coordinatorCalls, supplement ? 7 : 5)
+  else assert.equal(coordinatorCalls, supplement ? 8 : 5, 'a supplement adds one structured relationship confirmation on the original coordinator')
   if (supplement) {
     assert.equal(plan.inputs[0].status, 'forwarded')
     assert.equal(plan.tasks[0].criteria.length, 2)
@@ -332,7 +345,7 @@ try {
     assert.equal(following.plans[0].source.messageId, firstRequest)
     assert.equal(following.plans[0].completion.id, receipt)
     assert.equal(following.requestUsage[0].requestId, newMessage.id)
-    assert.equal(requests.length, calls + 1, 'direct follow-up needs no old-task recovery or replacement child')
+    assert.equal(requests.length, calls + 2, 'new request confirmation and answer use the same coordinator without old-task recovery or replacement child')
     assert.ok(events.filter(event => event.id === 'root' && event.type === 'turn/end').every(event => event.reason.kind === 'completed'))
     console.log('PASS: native second request gets its own source and usage, excludes the previous plan from system context, and preserves the original accepted receipt')
   }

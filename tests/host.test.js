@@ -49,14 +49,14 @@ export async function host() {
   let turn = 0
   return {
     ctx, agent, definitions, emit, state, routes, injections,
-    decide(reason = '本次范围已明确，主控直接完成后核对实际产物和验证结果。') {
-      return definitions.get('delegation_decide').execute({ mode: 'direct', reason }, { agent, callId: 'decide-direct', signal: new AbortController().signal })
+    decide(reason = '本次范围已明确，主控直接完成后核对实际产物和验证结果。', relation = 'new') {
+      return definitions.get('delegation_decide').execute({ relation, mode: 'direct', reason }, { agent, callId: 'decide-direct', signal: new AbortController().signal })
     },
     async stopping(signal = new AbortController().signal, who = agent) {
       for (const fn of listeners.get('agent/turn-stopping') ?? []) await fn({ agent: who, signal })
     },
-    turn(text) {
-      emit('session/event', { id: 'root' }, { type: 'agent/inbox/spliced', data: { inserted: [{ id: String(++turn), source: { kind: 'user' }, content: [{ type: 'text', text }] }] } })
+    turn(text, messageId = String(++turn)) {
+      emit('session/event', { id: 'root' }, { type: 'agent/inbox/spliced', data: { inserted: [{ id: messageId, source: { kind: 'user' }, content: [{ type: 'text', text }] }] } })
       emit('session/event', { id: 'root' }, { type: 'turn/start', data: { turn } })
     },
     call(name, id = 'call', who = agent, args = {}) { return guard({ name, callId: id, agent: who, arguments: args, signal: new AbortController().signal }) },
@@ -72,6 +72,89 @@ export async function host() {
 }
 
 const complex = '1. 重构所有模块并且迁移数据\n2. 批量修复接口同时补充测试套件'
+
+test('the coordinator classifies message relationships without prefix or length guesses', async () => {
+  const h = await host(); await h.state()
+  const decide = args => h.definitions.get('delegation_decide').execute(args,
+    { agent: h.agent, callId: 'classify', signal: new AbortController().signal })
+  try {
+    h.turn('修复页面标题')
+    assert.equal((await h.state()).source, null, 'a received message is not yet an assigned request')
+    await decide({ relation: 'new', mode: 'direct', reason: '仅一处标题，修改后读取核对。' })
+    const first = (await h.state()).decision
+    h.turn('继续完善这个任务')
+    assert.equal((await h.state()).source.messageId, '1')
+    assert.equal((await h.state()).pendingMessages[0].messageId, '2')
+    await decide({ relation: 'continue' })
+    assert.deepEqual((await h.state()).decision, first)
+    assert.equal(h.call('edit'), undefined)
+    h.turn('另外开一个新任务：排查数据库慢查询')
+    assert.equal((await h.state()).source.messageId, '1', 'prefixes cannot silently assign or switch requests')
+    await decide({ relation: 'new', mode: 'direct', reason: '先读取查询与执行计划，定位后再决定是否委派。' })
+    assert.equal((await h.state()).source.messageId, '3')
+    const next = (await h.state()).decision
+    h.turn('现在进度怎么样')
+    await decide({ relation: 'question' })
+    assert.deepEqual((await h.state()).decision, next)
+    assert.equal((await h.state()).messageResolution.relation, 'question')
+    assert.equal((await h.state()).route, null)
+    assert.equal((await h.state()).difficulty, null)
+  } finally { await h.close() }
+})
+
+test('usage before classification stays unassigned, survives reload and follows the model-confirmed request', async () => {
+  let h = await host(); await h.state()
+  const decide = args => h.definitions.get('delegation_decide').execute(args, { agent: h.agent, callId: 'decide', signal: new AbortController().signal })
+  const usage = async () => {
+    let body
+    await h.routes.get('/dsh-delegation-first/api/state')({ method: 'GET', url: '/dsh-delegation-first/api/state?sessionId=root' }, { writeHead() {}, end(text) { body = JSON.parse(text) } })
+    return body.requestUsage[0]
+  }
+  const event = (seq, tokens) => {
+    h.emit('llm/stream', { sessionId: 'root', provider: 'local', model: 'coordinator' }, () => {})
+    h.emit('session/event', { id: 'root' }, { type: 'assistant/message', seq, data: { usage: { inputTokens: tokens, outputTokens: 5 } } })
+  }
+  try {
+    h.turn('修复标题'); event(1, 100)
+    assert.equal(await usage(), undefined)
+    await h.close(); h = await host(); await h.state('root')
+    await decide({ relation: 'new', mode: 'direct', reason: '定位标题后修改并验证。' })
+    assert.equal((await usage()).roles[0].inputTokens, 100)
+    h.turn('进度如何', '2'); event(2, 20)
+    assert.equal((await usage()).roles[0].inputTokens, 100)
+    await decide({ relation: 'question' })
+    assert.equal((await usage()).roles[0].inputTokens, 120)
+    h.turn('另外做一个新需求', '3'); event(3, 200)
+    await decide({ relation: 'new', mode: 'direct', reason: '先读取新需求涉及文件，再执行和核对。' })
+    assert.equal((await usage()).requestId, '3')
+    assert.equal((await usage()).roles[0].inputTokens, 200)
+    assert.equal((await usage()).roles[0].requests, 1)
+  } finally { await h.close() }
+})
+
+test('multiple pending messages require an actual message id rather than silently choosing the latest', async () => {
+  const h = await host(); await h.state(); h.turn('修复接口'); h.turn('可以开始')
+  const decide = args => h.definitions.get('delegation_decide').execute(args, { agent: h.agent })
+  try {
+    await assert.rejects(decide({ relation: 'new', mode: 'direct', reason: '读取接口后修复并验证。' }), /messageId/)
+    await decide({ messageId: '1', relation: 'new', mode: 'direct', reason: '读取接口后修复并验证。' })
+    assert.equal((await h.state()).source.messageId, '1')
+    await decide({ messageId: '2', relation: 'continue' })
+    assert.equal((await h.state()).decisionCurrent, true)
+  } finally { await h.close() }
+})
+
+test('a new plan must bind the actual request before it is saved, with inline confirmation supported', async () => {
+  const h = await host(); await h.state(); h.turn('核对指定文件')
+  const args = { goal: '核对文件', tasks: [{ id: 'check', title: '核对文件', instructions: '读取指定文件', scope: '仅当前文件', outputs: ['fixture.txt'], writes: [], complexity: 'routine', criteria: ['文件存在'], checks: [{ tool: 'read', arguments: { path: 'fixture.txt' } }] }] }
+  const execute = values => h.definitions.get('delegation_plan').execute(values, { agent: h.agent })
+  try {
+    await assert.rejects(execute(args), /关联/)
+    const result = await execute({ ...args, relation: 'new', decisionReason: '执行者核对文件，主控验证和验收。' })
+    assert.equal(result.plan.source.messageId, '1')
+    assert.equal(result.plan.decision.requestId, '1')
+  } finally { await h.close() }
+})
 
 test('business execution requires an explicit decision; ordinary assistant text never supplies the reason', async () => {
   process.env.DSH_HOME = path.join(home, 'explicit-decision')
@@ -95,36 +178,31 @@ test('business execution requires an explicit decision; ordinary assistant text 
   } finally { await h.close() }
 })
 
-test('a decision survives continuation and reload but must be updated for new scope or a new request', async () => {
+test('model-confirmed relationships survive reload and only an explicit new request clears old scope', async () => {
   process.env.DSH_HOME = path.join(home, 'decision-scope')
   let h = await host(); await h.state()
-  const decide = reason => h.definitions.get('delegation_decide').execute({ mode: 'direct', reason },
-    { agent: h.agent, callId: 'decision', signal: new AbortController().signal })
-  h.agent.options = { provider: 'local', model: 'high' }
+  const decide = args => h.definitions.get('delegation_decide').execute(args, { agent: h.agent, callId: 'decision', signal: new AbortController().signal })
   try {
     h.turn('修改文章中的一处错字')
-    await decide('已定位一处错字，直接修改并读取验证即可。')
+    await h.decide('已定位一处错字，直接修改并读取验证即可。')
     const original = (await h.state()).decision
     h.turn('可以，开始执行')
+    await decide({ relation: 'continue' })
     assert.equal(h.call('edit'), undefined)
     assert.deepEqual((await h.state()).decision, original)
-    await h.close(); h = await host(); await h.state()
-    h.agent.options = { provider: 'local', model: 'another-high' }
-    assert.deepEqual((await h.state('root')).decision, original, 'opening details after reload must not need a human continuation')
-    h.turn('继续')
-    assert.equal((await h.state()).source.text, '修改文章中的一处错字')
-    assert.equal(h.call('edit'), undefined)
+    await h.close(); h = await host(); await h.state('root')
+    h.agent.options.model = 'another-high'
     assert.deepEqual((await h.state()).decision, original)
-    h.turn('还要同步调整另一个文档')
+    h.turn('还要同步调整另一个文档', '3')
     assert.equal((await h.state()).source.messageId, original.requestId)
     assert.match(h.call('edit'), /delegation_decide/)
-    assert.equal((await h.state()).decisionCurrent, false)
-    await decide('补充后共两处对应文字，直接修改后逐一读取核对。')
+    await decide({ relation: 'update', mode: 'direct', reason: '补充后共两处对应文字，直接修改后逐一读取核对。' })
     assert.equal((await h.state()).decision.model.model, 'another-high')
     assert.equal(h.call('edit'), undefined)
-    h.turn('排查另一个项目的登录错误')
-    assert.equal((await h.state()).decision, null)
-    assert.match(h.call('edit'), /delegation_decide/)
+    h.turn('排查另一个项目的登录错误', '4')
+    assert.equal((await h.state()).source.messageId, original.requestId)
+    await decide({ relation: 'new', mode: 'direct', reason: '新项目先读取登录实现再定位错误。' })
+    assert.equal((await h.state()).source.messageId, '4')
   } finally { await h.close() }
 })
 
@@ -178,7 +256,7 @@ test('direct execution exposes current activity without creating a managed plan 
   const h = await host(); await h.state()
   try {
     h.turn('评审文章并改写后生成分享文档')
-    const route = (await h.state()).route.route
+    const route = (await h.state()).route
     h.call('read', 'read-article', h.agent, { file_path: 'article.md' })
     let state = await h.state()
     assert.equal(state.execution.running, true)
@@ -189,7 +267,7 @@ test('direct execution exposes current activity without creating a managed plan 
     state = await h.state()
     assert.equal(state.execution.activity.kind, 'waiting_model')
     assert.equal(state.execution.lastResult.tool, 'read')
-    assert.equal(state.route.route, route)
+    assert.equal(state.route, route)
     assert.equal(state.turnStats.delegated, 0)
     h.emit('session/event', { id: 'root' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
     assert.equal((await h.state()).execution.running, false)
@@ -260,12 +338,14 @@ test('direct failures and the repair allowance follow continuations but never le
     h.result('edit', { isError: true, content: [{ type: 'text', text: 'old_string was not found' }] }, 'failed-edit')
     await h.stopping()
     h.turn('继续')
+    await h.decide(undefined, 'continue')
     let state = await h.state()
     assert.equal(state.execution.unresolvedChanges.length, 1)
     assert.equal(state.execution.repairUsed, 1)
     await h.stopping()
     assert.equal(h.injections.length, 1)
     h.turn('请核对另一份采购合同')
+    await h.decide()
     state = await h.state()
     assert.deepEqual(state.execution.unresolvedChanges, [])
     assert.equal(state.execution.repairUsed, 0)
@@ -436,8 +516,10 @@ test('plans retain the original human request across approval turns and state is
   try {
     await h.state()
     h.turn('修复登录失败提示，并补充测试')
+    await h.decide()
     h.turn('可以，开始执行')
-    const plan = await h.definitions.get('delegation_plan').execute({ goal: '模型整理后的目标', tasks: [{
+    await h.decide(undefined, 'continue')
+    const plan = await h.definitions.get('delegation_plan').execute({ goal: '模型整理后的目标', decisionReason: '执行者核对文件后由主控独立验收。', tasks: [{
       id: 'a', title: '核对文件', instructions: '读取测试文件', scope: '测试数据', outputs: ['fixture.txt'], writes: [],
       complexity: 'routine', criteria: ['内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'fixture.txt' } }],
     }] }, { agent: h.agent, callId: 'plan', signal: new AbortController().signal })
@@ -454,13 +536,14 @@ test('plans retain the original human request across approval turns and state is
     assert.equal(body.plans.length, 1)
     assert.equal(body.plans[0].source.messageId, '1')
     h.turn('再补充账号锁定的测试')
+    await h.definitions.get('delegation_decide').execute({ relation: 'update', mode: 'delegate', reason: '补充锁定场景，继续由原执行任务完成。' }, { agent: h.agent, signal: new AbortController().signal })
     const ongoing = await h.definitions.get('delegation_status').execute({},
       { agent: h.agent, callId: 'status', signal: new AbortController().signal })
     assert.equal(ongoing.plan.source.text, '修复登录失败提示，并补充测试')
     await h.definitions.get('delegation_cancel').execute({},
       { agent: h.agent, callId: 'cancel', signal: new AbortController().signal })
     h.turn('修改首页标题')
-    const next = await h.definitions.get('delegation_plan').execute({ goal: '新任务', tasks: plan.plan.tasks },
+    const next = await h.definitions.get('delegation_plan').execute({ goal: '新任务', relation: 'new', decisionReason: '新任务交给执行者，主控核对最终文件。', tasks: plan.plan.tasks },
       { agent: h.agent, callId: 'next-plan', signal: new AbortController().signal })
     assert.equal(next.plan.source.text, '修改首页标题')
     assert.equal(next.plan.source.messageId, '4')
@@ -485,52 +568,29 @@ test('a result from a blocked native delegation cannot count as managed dispatch
   assert.equal((await h.state()).delegated, 0)
   await h.close()
 })
-test('continue preserves the previous complex task', async () => {
-  const h = await host(); await h.state(); h.turn(complex); h.turn('继续')
-  await h.decide()
-  assert.equal((await h.state()).difficulty.level, 'complex')
+test('continuation follows the coordinator decision rather than the wording of the request', async () => {
+  const h = await host(); await h.state(); h.turn(complex); await h.decide()
+  const original = (await h.state()).decision
+  h.turn('还是这个任务，接着完善')
+  await h.decide(undefined, 'continue')
+  assert.deepEqual((await h.state()).decision, original)
+  assert.equal((await h.state()).route, null)
   assert.equal(h.call('edit'), undefined)
   await h.close()
 })
-test('a simple change is not blocked by the automatic budget', async () => {
-  const h = await host(); await h.state(); h.turn('修改页面标题')
-  await h.decide()
-  for (let i = 0; i < 5; i++) assert.equal(h.call('edit', String(i)), undefined)
-  await h.close()
-})
-test('a short multi-feature request is not classified as simple', async () => {
-  const h = await host(); await h.state(); h.turn('实现用户登录注册、短信校验、密码重置和权限控制')
-  assert.notEqual((await h.state()).difficulty.level, 'simple')
-  await h.close()
-})
 
-test('actual short implementation and review requests are not treated as simple questions', async () => {
+test('task wording, length and feature lists never produce automatic scores or dispatches', async () => {
   const h = await host(); await h.state()
-  for (const text of [
-    '改成左树右表的。看起来方便，还有缺少weknora基础配置模块',
-    '默认把文档推送到weknora啊，然后能推送，自动创建的就最好，我只需要维护一个配置页面就行',
-    '你评审下代码，看看是否可以优化',
-    '改成exe呢',
-  ]) {
-    h.turn(text)
-    assert.notEqual((await h.state()).difficulty.level, 'simple', text)
-  }
-  await h.close()
-})
-
-test('short approvals and follow-up requirements retain task context, while new questions reset it', async () => {
-  const h = await host(); await h.state(); h.turn(complex)
-  for (const text of ['可以，开始修复', '继续呢', '发给同事用']) {
-    h.turn(text)
-    await h.decide()
-    assert.equal((await h.state()).difficulty.level, 'complex', text)
-    assert.equal(h.call('edit'), undefined)
-  }
-  h.turn('你是什么模型')
-  await h.decide()
-  assert.equal((await h.state()).difficulty.level, 'simple')
-  assert.equal(h.call('edit'), undefined)
-  await h.close()
+  try {
+    for (const text of [complex, '修改页面标题', '审计数据库', '实现用户登录注册、短信校验、密码重置和权限控制', '还要在原需求中补充校验。'.repeat(20)]) {
+      h.turn(text)
+      const state = await h.state()
+      assert.equal(state.difficulty, null)
+      assert.equal(state.route, null)
+      assert.equal(state.source, null)
+      assert.equal(state.turnStats.delegated, 0)
+    }
+  } finally { await h.close() }
 })
 
 test('workload thresholds do not rewrite the initial difficulty or route', async () => {
@@ -554,13 +614,13 @@ test('follow-up turns retain the initial difficulty and allow continued direct e
   const initial = await h.state()
   for (let i = 0; i < 4; i++) assert.equal(h.call('edit', String(i)), undefined)
   h.turn('继续呢')
+  await h.decide(undefined, 'continue')
   assert.equal(h.call('edit', 'fifth'), undefined)
   assert.equal(h.call('edit', 'sixth'), undefined)
   assert.equal(h.call('edit', 'seventh'), undefined)
   const continued = (await h.state()).difficulty
-  assert.equal(continued.level, initial.difficulty.level)
-  assert.equal(continued.score, initial.difficulty.score)
-  assert.ok(initial.difficulty.signals.every(signal => continued.signals.includes(signal)))
+  assert.equal(continued, null)
+  assert.deepEqual((await h.state()).decision, initial.decision)
   await h.close()
 })
 
@@ -576,21 +636,13 @@ test('large read-only context does not alter difficulty or block later direct wo
   await h.close()
 })
 
-test('state exposes an explicit route, reasons, estimate, and confidence', async () => {
-  const h = await host(); await h.state()
-  h.turn(complex)
-  let state = await h.state()
-  assert.equal(state.route.route, 'delegate_parallel')
-  assert.ok(state.route.reasons.includes('high_complexity'))
-  assert.ok(state.route.reasons.includes('parallel_candidates'))
-  assert.ok(state.route.estimatedSteps > 1)
-  assert.ok(state.route.parallelTasks >= 2)
-  assert.ok(state.route.confidence > 0 && state.route.confidence <= 1)
-  h.turn('修改页面标题')
-  state = await h.state()
-  assert.equal(state.route.route, 'direct')
-  assert.ok(state.route.reasons.includes('scope_small'))
-  await h.close()
+test('model-provided identifiers must refer to actual messages in the current session', async () => {
+  const h = await host(); await h.state(); h.turn('修复指定文档')
+  try {
+    await assert.rejects(h.definitions.get('delegation_decide').execute({ relation: 'new', messageId: 'invented', mode: 'direct', reason: '修改后读取并验证。' }, { agent: h.agent }), /真实用户消息/)
+    assert.equal((await h.state()).source, null)
+    assert.match(h.call('edit'), /delegation_decide/)
+  } finally { await h.close() }
 })
 
 test('explicit off and fixed modes keep their own execution policy', async () => {

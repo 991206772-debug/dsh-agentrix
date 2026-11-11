@@ -140,7 +140,7 @@ try {
   assert.equal((await checked('delegation_status', { taskId: 'a', detail: 'full' })).task.report, longReport)
   assert.equal((await call('delegation_status', { detail: 'full' })).isError, true)
   assert.ok(sections.every(section => section.text().split('\n\n')[0].length <= 600))
-  assert.ok(sections.some(section => /delegation_decide.*direct\/delegate.*具体理由/.test(section.text())))
+  assert.ok(sections.some(section => /delegation_decide.*relation.*new\/continue\/update\/question/.test(section.text())))
   assert.ok(sections.some(section => /修改失败须修复并核对原产物/.test(section.text())))
   const evidence = await checked('delegation_verify', { taskId: 'a', checkIndex: 0 })
   assert.equal(evidence.passed, true)

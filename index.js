@@ -35,221 +35,19 @@ const MAX_BODY_BYTES = 64 * 1024
  */
 const DISCIPLINE = [
   "## DSH Agentrix：主控职责",
-  "自动评分仅供建议；小任务直接完成并验证，执行工作多用 delegation_plan/run，复杂任务加独立审查。",
+  "主控按上下文判断需求关联、委派和依赖：小任务直接验证，工作多用 delegation_plan/run，复杂任务加独立审查。",
   "主控定方案，worker执行；审查沿用派发时的主控模型，不走原生派单。托管中主控不重复实现；用 delegation_verify 验证，再用 delegation_review 按证据逐条验收。",
   "默认读摘要，详情指定 taskId。用户补充先答复；变更用 inputIds/additionalCriteria steer 原代理，纯答复用 acknowledge。仅重要问题返工，minor 记录，复查不扩围。",
-  "准备可先 read/grep/glob、inspect/note。正式执行前用 delegation_decide 记录 direct/delegate 和具体理由；建计划可用 decisionReason 一并记录。范围变了更新判断，普通回复不能代替。阶段变化简短告知；修改失败须修复并核对原产物，不为进度多调模型。",
+  "先读文件准备。用 delegation_decide 记录 relation（new/continue/update/question）；新需求或方案变化给 direct/delegate 和理由，继续/询问沿用原决定。普通回复不算记录；阶段变化简短告知，修改失败须修复并核对原产物。",
   "模型错配、重复故障先处理原因；调用量、Token、时间不终止或换代理。等事件，不轮询。短任务交 report；长调查、阶段变化或阻塞记 checkpoint。报告成功后自动释放。",
   "stop 只取消且须传原因。完成以程序回执为准；最后验收后自动结束，无需总结。详见 delegation-first 手册。",
 ].join('\n')
 
-// ---------------------------------------------------------------------------
-// Difficulty assessment
-// ---------------------------------------------------------------------------
-
-/**
- * The buckets the scorer looks for, all taken from the person's own words.
- *
- * Plain substring lists rather than clever patterns on purpose: a Chinese
- * phrase match is readable, and the cost of a false positive here is one point,
- * not a denial.
- */
-const CONNECTIVES = ['并且', '同时', '另外', '然后', '还要', '以及', '分别', '顺便']
-const HEAVY_WORDS = ['重构', '审计', '调研', '迁移', '全量', '所有', '批量', '多文件', '测试套件', '性能优化', '逐个']
-const LIGHT_WORDS = ['看看', '这是啥', '解释一下', '为什么', '是什么']
-const TASK_ACTION = /实现|开发|新增|增加|补充|修复|修改|改成|调整|替换|评审|审核|排查|优化|重构|迁移|对接|集成|结合|推送|上传|部署|打包|自动生成/
-const CONTINUE_ONLY = /^(?:(?:可以|好的?|行)[，,\s]*)?(?:继续(?:呢|吧)?|接着(?:做|吧)?|下一步|continue|go on|可以|好的?|行|开始(?:吧|执行|优化|修复)?|执行)[。.!！\s]*$/i
-const FOLLOWUP = /^(?:(?:可以|好的?|行)[，,]|还有|还要|另外|而且|然后|那就|再(?:把|补充|增加|调整|修改)|这个|这里|这处|它|他|发给)/
-const LEVEL_RANK = { simple: 0, medium: 1, complex: 2 }
-
-/** A numbered or bulleted requirement line. */
-const BULLET_LINE = /^\s*(?:\d+\.|[-*])\s+/
-/** A drive-rooted path, or a bare file name with an extension. */
-const DRIVE_PATH = /[A-Za-z]:[\\/]/g
-const FILE_NAME = /\.\w{1,5}\b/g
-
-/**
- * The conservative reading of "this turn has no input to judge": medium.
- *
- * Not `simple` on purpose — an unscored turn must never unlock the gate. The
- * score stays 0 because nothing was actually counted; only the level is a
- * deliberate default.
- */
-const DEFAULT_DIFFICULTY = { score: 0, level: 'medium', signals: [] }
-
-/**
- * Score one turn's human input.
- *
- * Pure and total: non-string input scores as empty text, nothing here throws,
- * and anything unexpected is still caught by the caller — a scorer that throws
- * would turn the gate into an open one. Buckets are capped on purpose: no single
- * signal may decide the level, and the score is a reading aid, not a metric.
- */
-function scoreTask(text) {
-  const raw = typeof text === 'string' ? text : ''
-  const signals = []
-  let score = 0
-
-  // Volume: a long text is almost always several goals stapled together.
-  if (raw.length >= 120) {
-    score += 1
-    if (raw.length >= 400) score += 1
-    signals.push('体量较大')
-  }
-
-  // Parallel structure: numbered/bulleted lines are a checklist, not one ask.
-  const bullets = raw.split(/\r?\n/).filter((line) => BULLET_LINE.test(line)).length
-  if (bullets >= 2) {
-    score += 2
-    signals.push('多条并列要求')
-  }
-
-  // Connectives: one sentence chaining several actions.
-  const connectives = CONNECTIVES.filter((word) => raw.includes(word)).length
-  if (connectives > 0) {
-    score += Math.min(connectives, 2)
-    signals.push('多目标')
-  }
-
-  // Short feature lists can describe substantial work without any heavy keywords.
-  const features = ['登录', '注册', '短信', '密码重置', '权限', '导入', '导出', '支付', '审批', '通知'].filter(word => raw.includes(word)).length
-  if (features >= 3 && /实现|开发|新增|支持|完成/.test(raw)) {
-    score += Math.min(features, 6)
-    signals.push('多个功能点')
-  }
-
-  // Heavy words: weighed 2 each — a lone "重构" can still be a small fix, but
-  // "重构" plus "所有" is real work. The cap keeps this bucket from deciding
-  // the level on its own.
-  const heavy = HEAVY_WORDS.filter((word) => raw.includes(word)).length
-  if (heavy > 0) {
-    score += Math.min(heavy * 2, 3)
-    signals.push('重任务关键词')
-  }
-
-  // File mentions: two or more paths/names means the change crosses files.
-  const mentions = (raw.match(DRIVE_PATH) ?? []).length + (raw.match(FILE_NAME) ?? []).length
-  if (mentions >= 2) {
-    score += 1
-    signals.push('涉及多个文件')
-  }
-
-  // Light question: short and purely interrogative, so it earns a discount.
-  // Floored at zero — a negative score has no meaning here.
-  if (raw.length < 80 && !TASK_ACTION.test(raw) && LIGHT_WORDS.some((word) => raw.includes(word))) {
-    score = Math.max(0, score - 1)
-    signals.push('轻量提问')
-  }
-
-  // Short implementation requests are not evidence of a small change. Only an
-  // explicitly local wording/style edit keeps the inexpensive direct path.
-  const localEdit = raw.length < 80 && /标题|文案|错别字|拼写|字号|颜色/.test(raw) &&
-    !/模块|功能|接口|配置|同时|另外|还有|然后|以及|并且/.test(raw)
-  if (TASK_ACTION.test(raw) && !localEdit) {
-    score = Math.max(score, 3)
-    signals.push('需要实施或评审')
-  }
-
-  const level = score >= 6 ? 'complex' : score >= 3 ? 'medium' : 'simple'
-  return { score, level, signals }
-}
-
-const LEVEL_LABEL = { simple: '简单', medium: '中等', complex: '复杂' }
-const LEVEL_ADVICE = {
-  simple: '可先处理范围明确的小事；发现多文件或多步骤时重新判断并委派。',
-  medium: '结合实际范围与执行成本判断是否委派；评分仅作建议。',
-  complex: '建议明确方案、拆分执行并独立审查；最终由主控判断。',
-}
-
-const ROUTE_LABEL = { direct: 'direct', delegate: 'delegate', delegate_parallel: 'delegate_parallel' }
-const ROUTE_REASON_LABEL = {
-  scope_small: '范围明确且规模较小',
-  medium_complexity: '复杂度达到中等',
-  high_complexity: '复杂度达到高位',
-  multiple_goals: '存在多个目标或并列要求',
-  multiple_files: '涉及多个文件',
-  heavy_work: '包含重任务关键词',
-  multiple_features: '包含多个功能点',
-  implementation: '需要实施或评审',
-  parallel_candidates: '任务之间可能独立，可并行派发',
-  context_only: '当前只有轻量提问或未形成实施目标',
-}
-
-/**
- * Turn the score into an explicit routing decision the coordinator can see.
- * This remains a recommendation: the task card and actual dependencies are
- * authoritative once the coordinator calls delegation_plan.
- */
-function routeFor(difficulty, text = '') {
-  const level = LEVEL_LABEL[difficulty?.level] ? difficulty.level : 'medium'
-  const signals = new Set(difficulty?.signals ?? [])
-  const reasons = []
-  if (level === 'simple') reasons.push('scope_small')
-  else reasons.push(level === 'complex' ? 'high_complexity' : 'medium_complexity')
-  if (signals.has('多目标') || signals.has('多条并列要求')) reasons.push('multiple_goals')
-  if (signals.has('涉及多个文件')) reasons.push('multiple_files')
-  if (signals.has('重任务关键词')) reasons.push('heavy_work')
-  if (signals.has('多个功能点')) reasons.push('multiple_features')
-  if (signals.has('需要实施或评审')) reasons.push('implementation')
-  if (signals.has('轻量提问') || (!text && level === 'medium')) reasons.push('context_only')
-  const parallel = level !== 'simple' && (signals.has('多目标') || signals.has('多条并列要求') || signals.has('多个功能点') || signals.has('涉及多个文件'))
-  if (parallel) reasons.push('parallel_candidates')
-  const score = Number.isFinite(difficulty?.score) ? difficulty.score : 0
-  const route = level === 'simple' ? 'direct' : parallel ? 'delegate_parallel' : 'delegate'
-  const estimatedSteps = route === 'direct' ? 1 : Math.min(12, Math.max(2, 2 + score))
-  const parallelTasks = route === 'delegate_parallel' ? Math.min(4, Math.max(2, 1 + (signals.has('多目标') ? 1 : 0) + (signals.has('涉及多个文件') ? 1 : 0))) : 1
-  const confidence = score === 0 ? 0.4 : level === 'complex' ? 0.9 : level === 'medium' ? 0.75 : 0.7
-  const uniqueReasons = [...new Set(reasons)]
-  return { route: ROUTE_LABEL[route], reasons: uniqueReasons,
-    reasonLabels: uniqueReasons.map(reason => ROUTE_REASON_LABEL[reason] ?? reason), estimatedSteps, parallelTasks, confidence }
-}
-
-/** The one line that surfaces this turn's judgement to the coordinator's model. */
-function difficultyLine(difficulty) {
-  const level = LEVEL_LABEL[difficulty?.level] ? difficulty.level : 'medium'
-  const signals =
-    Array.isArray(difficulty?.signals) && difficulty.signals.length > 0
-      ? difficulty.signals.join('、')
-      : '无'
-  const score = Number.isFinite(difficulty?.score) ? difficulty.score : 0
-  return `> 本轮任务复杂度：${LEVEL_LABEL[level]}（评分 ${score}；信号：${signals}）→ ${LEVEL_ADVICE[level]}`
-}
-
-function routingLine(route) {
-  if (!route?.route) return ''
-  const reasons = (route.reasons ?? []).map(reason => ROUTE_REASON_LABEL[reason] ?? reason).join('、') || '未记录'
-  return `> 自动路由建议：${route.route}；依据：${reasons}；预计 ${route.estimatedSteps ?? '—'} 步，${route.parallelTasks ?? 1} 个并行任务，置信度 ${Math.round((route.confidence ?? 0) * 100)}%。`
-}
-
 /** Automatic routing is advisory; explicit modes retain their operation gates. */
-function policyFor(level, config) {
+function policyFor(config) {
   if (config.mode === 'strict') return { requireFirst: true, budget: 0 }
   if (config.mode === 'fixed') return { requireFirst: false, budget: config.threshold }
   return { requireFirst: false, budget: null }
-}
-
-/** Preserve the selected mode when no turn assessment is available. */
-function legacyPolicy(config) {
-  if (config.mode === 'strict') return { requireFirst: true, budget: 0 }
-  if (config.mode === 'fixed') return { requireFirst: false, budget: config.threshold }
-  return { requireFirst: false, budget: null }
-}
-
-/**
- * Concatenate the text blocks of one message payload.
- *
- * A plain string is accepted too: the exact shape of an injected message is not
- * this plugin's contract, and a cheap fallback beats dropping the input.
- */
-function messageText(data) {
-  const content = data?.content
-  if (typeof content === 'string') return content.trim()
-  if (!Array.isArray(content)) return ''
-  return content
-    .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
-    .map((block) => block.text)
-    .join('\n')
-    .trim()
 }
 
 /** Hands-on work: things a coordinator should have handed to someone else. */
@@ -470,7 +268,7 @@ function denialMessage(tool, state, config, kind, policy) {
  *
  * Pure on purpose: the policy is the part worth testing, and it must not depend
  * on when the guard happens to run. The per-turn policy is derived from the
- * difficulty assessment and stored on `state` by `assessTurn()`, so this
+ * explicit user-selected mode and stored on `state`, so this
  * function stays a pure reading of `{ state, config }` — a missing policy falls
  * back to the pre-difficulty behaviour.
  *
@@ -482,7 +280,7 @@ function evaluate(name, state, config) {
   if (!state.isCoordinator) return { allow: true }
   if (config.delegationTools.includes(name)) return { allow: true, countsAsDelegation: true }
   if (!config.gatedTools.includes(name)) return { allow: true }
-  const policy = state.policy ?? legacyPolicy(config)
+  const policy = state.policy ?? policyFor(config)
   if (policy.requireFirst && state.delegated === 0) {
     return {
       allow: false,
@@ -568,15 +366,9 @@ export function apply(ctx) {
         difficulty: null,
         route: null,
         policy: null,
-        // Human text collected for the turn that has not started yet.
-        pendingText: '',
-        taskText: restored?.source?.text ?? '',
         source: restored?.source ?? null,
         revision: restored?.revision ?? restored?.source ?? null,
         sessionId,
-        // Message ids already counted. The harness commits the same human input
-        // twice (see `rememberHumanText`), so ids are the only safe dedupe key.
-        humanIds: new Set(),
         delegationPending: new Map(),
         execution: null,
         activeCalls: new Map(),
@@ -588,74 +380,17 @@ export function apply(ctx) {
   }
 
   orchestration = createOrchestrator({ ctx, file: file.replace(/\.json$/, '.runs.json'),
-    getConfig: () => current, getSource: id => states.get(id)?.source ?? null, getRevision: id => states.get(id)?.revision ?? null, getRoute: id => states.get(id)?.route ?? null,
+    getConfig: () => current, getSource: id => states.get(id)?.source ?? null, getRevision: id => states.get(id)?.revision ?? null,
+    onRequestResolved: (id, context) => {
+      const state = stateOf(id), previousId = state.source?.messageId
+      state.source = context.source; state.revision = context.revision
+      if (state.execution) {
+        state.execution.requestId = context.source?.messageId ?? null
+        if (previousId !== context.source?.messageId) { state.execution.unresolvedChanges = []; state.execution.repairUsed = 0 }
+      }
+    },
     onDelegated: id => { stateOf(id).delegated++ } })
   const ready = Promise.all([configReady, orchestration.ready])
-
-  /**
-   * Collect one human message's text for scoring.
-   *
-   * The harness delivers the same message twice: an `agent/inbox/spliced`
-   * commit **before** `turn/start`, and the `user/message` that carries it onto
-   * the surface **after** it. Only the first is in time to be scored when the
-   * turn starts, so both are read and deduped by message id — without the
-   * splice source the judgement would never see a human sentence at all.
-   */
-  const rememberHumanText = (state, data) => {
-    const text = messageText(data)
-    if (!text) return
-    if (!state.source) {
-      const restored = orchestration.requestContext(state.sessionId)
-      state.source = restored?.source ?? null; state.revision = restored?.revision ?? state.source
-      if (state.source) state.taskText = state.source.text
-    }
-    const id = data?.id ? String(data.id) : `text:${text}`
-    if (state.humanIds.has(id)) return
-    state.humanIds.add(id)
-    // Bound the dedupe set: one session can run for thousands of turns.
-    if (state.humanIds.size > 500) {
-      const oldest = state.humanIds.values().next().value
-      if (oldest !== undefined) state.humanIds.delete(oldest)
-    }
-    const followup = CONTINUE_ONLY.test(text.trim()) || (text.length < 120 && FOLLOWUP.test(text.trim()))
-    if (!state.source || !state.pendingText && !followup && !orchestration.hasPending(state.sessionId)) {
-      state.source = { messageId: data?.id ? String(data.id) : null, text: text.slice(0, 4000) }
-    }
-    if (!state.revision || !CONTINUE_ONLY.test(text.trim())) state.revision = { messageId: data?.id ? String(data.id) : null, text: text.slice(0, 4000) }
-    state.pendingText = state.pendingText ? `${state.pendingText}\n${text}` : text
-  }
-
-  /**
-   * Score the text collected for the turn that is starting, and derive the
-   * policy the guard will follow until the next turn.
-   *
-   * Keep a bounded task description across explicit follow-ups. A new request
-   * resets it; a short approval must not erase the work already discovered.
-   */
-  const assessTurn = (state) => {
-    const text = state.pendingText
-    state.pendingText = ''
-    try {
-      const continuing = !text || CONTINUE_ONLY.test(text.trim()) ||
-        (text.length < 120 && FOLLOWUP.test(text.trim())) || orchestration.hasPending(state.sessionId)
-      const previous = continuing ? state.difficulty : null
-      if (!continuing) state.taskText = ''
-      if (text && !CONTINUE_ONLY.test(text.trim())) state.taskText = `${state.taskText}\n${text}`.trim().slice(-4000)
-      let difficulty = state.taskText ? scoreTask(state.taskText) : { ...DEFAULT_DIFFICULTY }
-      if (previous && LEVEL_RANK[previous.level] >= LEVEL_RANK[difficulty.level]) {
-        difficulty = { ...previous, signals: [...previous.signals] }
-      }
-      if (previous && !difficulty.signals.includes('承接前文任务')) difficulty.signals.push('承接前文任务')
-      const policy = policyFor(difficulty.level, current)
-      state.difficulty = difficulty
-      state.route = routeFor(difficulty, state.taskText)
-      state.policy = policy
-    } catch {
-      state.difficulty = null
-      state.route = null
-      state.policy = legacyPolicy(current)
-    }
-  }
 
   /**
    * Whether this call comes from a coordinator or from a worker.
@@ -846,7 +581,7 @@ export function apply(ctx) {
     const state = states.get(agent.id), execution = state?.execution
     if ((execution?.toolCalls > 0 || state?.last?.kind === 'decision') && typeof agent.inject === 'function' && await orchestration.recoverDecision(agent.id)) {
       agent.inject({ id: randomUUID(), role: 'user', source: { kind: 'delegation-decision-recovery' }, content: [{ type: 'text', text:
-        '本次需求尚未记录执行方式或范围已更新。请先用 delegation_decide 记录 direct/delegate 和具体理由，再自动继续原任务；若只读工作已结束，补齐判断即可，不重复执行。不新开分类代理、不要求用户点击继续；普通回复不能代替记录。此类遗漏本次范围只自动补齐一次。' }] })
+        '有待确认的消息关联或尚未记录执行方式。请用 delegation_decide 的 relation 明确 new/continue/update/question；新需求或方案变化提供 direct/delegate 和具体理由，继续或询问沿用原决定。多条消息指定真实 messageId。随后自动继续，不新开分类代理，不要求用户点击继续。每条待关联消息只自动提醒一次。' }] })
       return
     }
     if (!execution?.unresolvedChanges.length || execution.repairUsed >= 1 || typeof agent.inject !== 'function') return
@@ -865,26 +600,22 @@ export function apply(ctx) {
     if (!id) return
     const type = event?.type
 
-    // Human input, source 1 of 2: queued before the turn starts, which is the
-    // only moment the judgement can still be made for this turn.
+    // Orchestrator records factual human messages; no lexical classification occurs here.
     if (type === 'agent/inbox/spliced') {
       const inserted = Array.isArray(event.data?.inserted) ? event.data.inserted : []
       if (inserted.length === 0) return
       const state = stateOf(id)
-      for (const message of inserted) {
-        if (message?.source?.kind === 'user') rememberHumanText(state, message)
-      }
+      state.source = orchestration.sourceOf(id); state.revision = orchestration.revisionOf(id)
       return
     }
 
     // Human input, source 2 of 2: the committed surface message. Arrives after
     // `turn/start` in this harness, so it mostly serves the dedupe of source 1 —
     // and it is what a deployment that injects `user/message` directly relies
-    // on. Harness-injected kinds (`runtime-context`, `agent-message`, …) are not
-    // the person speaking and must not influence the score.
+    // on. Harness-injected kinds are not human input.
     if (type === 'user/message') {
       if (event.data?.source?.kind !== 'user') return
-      rememberHumanText(stateOf(id), event.data)
+      stateOf(id)
       return
     }
 
@@ -915,7 +646,7 @@ export function apply(ctx) {
     }
     state.activeCalls.clear()
     state.delegationAvailability = delegationAvailability(ctx.get('agents')?.get?.(id))
-    assessTurn(state)
+    state.policy = policyFor(current)
   })
 
   const offDisposed = ctx.on('agent/disposed', ({ agent }) => {
@@ -943,8 +674,7 @@ export function apply(ctx) {
       const stored = sanitizeStored(raw === null ? undefined : JSON.parse(raw))
       current = pinned ? { ...environmentConfig, ...orchestrationOptions(stored) } : applyStored(environmentConfig, stored)
       for (const state of states.values()) {
-        state.policy = policyFor(state.difficulty?.level ?? 'medium', current)
-        if (state.difficulty) state.route = routeFor(state.difficulty, state.taskText)
+        state.policy = policyFor(current)
       }
     }
     fileMetadata = { revision, updatedAt, exists: raw !== null }
@@ -996,7 +726,8 @@ export function apply(ctx) {
       supervisionPolicy: orchestration.supervisionPolicy,
       runtimePolicyVersion: 2,
       coordinatorProgressVersion: 1,
-      decisionProtocolVersion: 1,
+      decisionProtocolVersion: 2,
+      requestBindingVersion: 2,
       reviewerModelPolicy: REVIEWER_MODEL_POLICY,
       requestUsage: orchestration.requestUsages(selectedId),
       // No execution here, so this is the global view only — a status probe, not
@@ -1013,7 +744,10 @@ export function apply(ctx) {
       sessions: [...states.entries()].filter(([id]) => selectedId === null || id === selectedId).map(([id, state]) => ({
         sessionId: id,
         sessionTitle: sessionTitleOf(id),
-        source: state.source,
+        source: orchestration.sourceOf(id),
+        requestBindingVersion: 2,
+        pendingMessages: orchestration.pendingMessages(id),
+        messageResolution: orchestration.requestContext(id)?.messageResolution ?? null,
         role: state.isCoordinator ? 'coordinator' : 'worker',
         turn: state.turn,
         direct: state.direct,
@@ -1377,18 +1111,18 @@ export function apply(ctx) {
         // failed) simply means the plain discipline.
         text: () => {
           try {
-            const difficulty = states.get(agentId)?.difficulty
             if (!current.enabled) return ''
             const summary = orchestration.summary(agentId)
-            const route = states.get(agentId)?.route
             const state = states.get(agentId), missing = state?.delegationAvailability?.status === 'unavailable'
               ? '当前会话的委派入口不可用。请明确告知用户并检查插件启用状态，不要宣称已派发子代理。' : ''
             const failures = state?.execution?.unresolvedChanges ?? []
             const unresolved = failures.length ? '尚未成功修改：' + failures.map(item => `${item.target || item.tool}（${item.reason}）`).join('；') : ''
             const decision = orchestration.decisionFor(agentId)
+            const messages = orchestration.pendingMessages(agentId)
+            const pending = messages.length && !summary ? '待关联用户消息（仅事实，尚未归属需求）：' + messages.map(message => message.messageId + '：' + message.text.slice(0, 180)).join('；') + '。用 delegation_decide 的 relation 指明 new/continue/update/question；多条消息分别关联，不能按字数猜测。' : ''
             const choice = orchestration.decisionCurrent(agentId) ? '本需求已记录执行方式：' + decision.mode + '。范围未变无需重复记录。'
               : '本需求尚未记录判断或范围已补充；准备后用 delegation_decide 记录，也可在建计划时提供 decisionReason。'
-            return [DISCIPLINE, !summary && difficulty ? difficultyLine(difficulty) : '', !summary && route ? routingLine(route) : '', choice, missing, unresolved, summary].filter(Boolean).join('\n\n')
+            return [DISCIPLINE, pending, choice, missing, unresolved, summary].filter(Boolean).join('\n\n')
           } catch {
             return DISCIPLINE
           }

@@ -100,6 +100,26 @@ test('the dock shows formal decision reasons and does not treat assistant prose 
   } finally { dock.close(); f.close() }
 })
 
+test('unclassified messages are visible without claiming a scope change or generating rule scores', async () => {
+  const row = { sessionId: 'session-current', requestBindingVersion: 2, source: { messageId: 'original', text: '修复原任务' },
+    decision: { mode: 'direct', reason: '原任务只有一处修改。' }, decisionCurrent: false,
+    messageResolution: { relation: 'new' }, pendingMessages: [{ messageId: 'pending', text: '另外开一个新任务' }],
+    execution: { running: true, toolCalls: 1, activity: { kind: 'tool', tool: 'read' } } }
+  const body = { ok: true, enabled: true, sessionId: 'session-current', requestBindingVersion: 2, plans: [], sessions: [row] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock('session-current'), view = f.mountView('session-current')
+  try {
+    await dock.flush(); await view.flush()
+    assert.match(dock.text(), /待主控确认消息关联.*另外开一个新任务/)
+    assert.doesNotMatch(dock.text(), /需求已补充/)
+    assert.doesNotMatch(view.text(), /置信度|评分 0|预计.*步/)
+    row.pendingMessages = []; row.messageResolution = { relation: 'question' }; row.decisionCurrent = true
+    await dock.tick(); await view.tick()
+    assert.match(dock.text(), /询问进度或普通提问.*沿用原需求/)
+    assert.doesNotMatch(dock.text(), /待主控确认消息关联|需求已补充/)
+  } finally { dock.close(); view.close(); f.close() }
+})
+
 test('direct work is visible in the input dock with actual activity, advisory mismatch and unresolved edits', async () => {
   const execution = { running: true, startedAt: Date.now(), toolCalls: 2, statement: null,
     activity: { kind: 'tool', tool: 'edit', target: 'article.md' },

@@ -55,7 +55,8 @@ export function createUsageLedger() {
       return true
     },
     snapshot: () => [...current.values()].map(clone),
-    restore(entries = []) {
+    restore(entries = [], replace = false) {
+      if (replace) current.clear()
       for (const entry of entries) if (typeof entry?.sessionId === 'string' && typeof entry.requestId === 'string' && Array.isArray(entry.roles)) {
         current.set(entry.sessionId, { ...entry, cursors: entry.cursors ?? {}, messageIds: entry.messageIds ?? [] })
       }

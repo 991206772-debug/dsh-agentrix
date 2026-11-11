@@ -57,7 +57,7 @@ function compactResult(value) {
   if (value.plan) result.plan = { sessionId: value.plan.sessionId, goal: brief(value.plan.goal, 300), status: value.plan.status,
     decision: value.plan.decision,
     activationBudget: value.plan.activationBudget, dispatchWait: value.plan.dispatchWait,
-    coordinatorIssue: value.plan.coordinatorIssue,
+    coordinatorIssue: value.plan.coordinatorIssue, messageResolution: value.plan.messageResolution,
     inputs: (value.plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)).map(input => ({ id: input.id, text: brief(input.text, 400), status: input.status })),
     tasks: value.plan.tasks.map(compactTask) }
   if (value.task) result.task = compactTask(value.task)
@@ -219,9 +219,10 @@ function routeWarnings(route, tasks) {
 }
 
 /** DSH owns Agent lifetimes and tool execution. This module owns task state and acceptance. */
-export function createOrchestrator({ ctx, file, getConfig, getSource = () => null, getRevision = getSource, getRoute = () => null, onDelegated = () => {} }) {
+export function createOrchestrator({ ctx, file, getConfig, getSource = () => null, getRevision = getSource, getRoute = () => null, onRequestResolved = () => {}, onDelegated = () => {} }) {
   const usageLedger = createUsageLedger()
   const decisions = new Map(), decisionWrites = new Set()
+  const coordinatorUsage = new Map()
   const plans = new Map(), live = new Map(), permits = new Map(), expectedRoutes = new Map(), disposers = []
   const noteRequests = new Map(), noteWrites = new Map()
   const stagedResults = new Map(), pendingTransports = new Map(), committing = new Set()
@@ -233,6 +234,31 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   let closed = false, dirty = false, writing, pumping = Promise.resolve(), storageError = null, recoveryFailed = false
   let archiveFailure = null
   const service = name => ctx.get(name)
+  const sourceOf = id => decisions.get(id)?.messages ? decisions.get(id).source : getSource(id) ?? decisions.get(id)?.source ?? null
+  const revisionOf = id => decisions.get(id)?.messages ? decisions.get(id).revision : getRevision(id) ?? decisions.get(id)?.revision ?? null
+  const pendingMessages = id => (decisions.get(id)?.messages ?? []).filter(message => !message.resolution && !message.withdrawn)
+  function receiveHuman(sessionId, message, target = 'next-turn') {
+    if (!message?.id || message.source?.kind !== 'user') return
+    const header = service('sessions')?.get(sessionId)?.header ?? service('agents')?.get(sessionId)?.session?.header ?? {}
+    if (header.origin === 'subagent' || header.parentSession || header.delegationDepth > 0) return
+    const text = (typeof message.content === 'string' ? message.content : textOf(message.content)).trim()
+    if (!text) return
+    let entry = decisions.get(sessionId)
+    if (!entry) {
+      const source = sourceOf(sessionId) ?? plans.get(sessionId)?.source ?? null
+      entry = { sessionId, source: clone(source), revision: clone(getRevision(sessionId) ?? source), decision: null, recoveryUsed: 0 }
+      decisions.set(sessionId, entry)
+    }
+    entry.messages ??= []
+    const existing = entry.messages.find(item => item.messageId === String(message.id))
+    if (existing) {
+      if (existing.withdrawn && !existing.resolution) { existing.withdrawn = false; existing.target = target; waitingParents.get(sessionId)?.wake.resolve(); backgroundSave() }
+      return
+    }
+    entry.messages.push({ messageId: String(message.id), text: text.slice(0, 4000), at: Date.now(), target })
+    waitingParents.get(sessionId)?.wake.resolve()
+    backgroundSave()
+  }
   function usageTarget(sessionId, expected, model = {}) {
     const task = expected?.task
     const config = task?.modelRoute?.actual ?? task?.modelRoute?.resolved ?? service('agents')?.get(sessionId)?.session?.requestHeader?.()?.config
@@ -244,13 +270,30 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (expected) return expected.plan.usage ?? null
     const header = service('agents')?.get(sessionId)?.session?.header
     if (header?.origin === 'subagent' || header?.parentSession || header?.delegationDepth > 0) return null
-    const entry = usageLedger.request(sessionId, getSource(sessionId))
+    const entry = usageLedger.request(sessionId, sourceOf(sessionId))
     const plan = plans.get(sessionId)
     if (entry && plan?.source?.messageId === entry.requestId) {
       plan.usage = entry
       if (!pendingRecords.has(plan.archive.id)) pendingRecords.set(plan.archive.id, { plan, events: [] })
     }
     return entry
+  }
+  function observeCoordinatorUsage(sessionId, kind, target, event) {
+    let binding = coordinatorUsage.get(sessionId)
+    if (kind === 'request') {
+      const message = pendingMessages(sessionId).at(-1)
+      binding = message ? { messageId: message.messageId } : { entry: usageFor(sessionId) }
+      coordinatorUsage.set(sessionId, binding)
+    }
+    if (binding?.messageId) {
+      const context = decisions.get(sessionId)
+      context.pendingUsage ??= []
+      context.pendingUsage.push({ messageId: binding.messageId, kind, target: clone(target), ...(event ? { event: { id: event.id, seq: event.seq, data: { id: event.data?.id, usage: event.data?.usage } } } : {}) })
+      return
+    }
+    const entry = binding?.entry ?? usageFor(sessionId)
+    if (kind === 'request') usageLedger.observeRequest(entry, target)
+    else usageLedger.observeMessage(entry, target, event)
   }
   function clearTaskTimers(handle) {
     clearTimeout(handle.watchdog)
@@ -275,13 +318,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   function runtimeMessage(plan, text, kind = 'delegation-recovery') {
     return { id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { kind, planId: plan.archive.id } }
   }
-  const queuedInputs = plan => (plan.inputs ?? []).filter(input => input.status === 'queued')
-  const unresolvedInputs = plan => (plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status))
+  const queuedInputs = plan => [...(plan.inputs ?? []).filter(input => input.status === 'queued'), ...pendingMessages(plan.sessionId)]
+  const unresolvedInputs = plan => [...(plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)), ...pendingMessages(plan.sessionId).map(message => ({ id: message.messageId, text: message.text, status: 'unclassified' }))]
   function selectInputs(plan, ids = []) {
     const selected = strings(ids, '补充消息编号', true)
     if (new Set(selected).size !== selected.length) throw new Error('补充消息编号重复')
     return selected.map(id => {
-      const input = unresolvedInputs(plan).find(input => input.id === id)
+      const input = (plan.inputs ?? []).find(input => input.id === id && ['queued', 'received'].includes(input.status))
+      if (!input && pendingMessages(plan.sessionId).some(message => message.messageId === id)) throw new Error('请先用 delegation_decide 确认 relation，再同步补充或处理消息')
       if (!input) throw new Error(`补充消息 ${id} 不存在、已处理或已撤回`)
       return input
     })
@@ -299,12 +343,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (inputs.length) remember(plan, 'plan.input_forwarded', '用户补充已同步至任务 ' + task.id, task, { inputIds: inputs.map(input => input.id) })
   }
   function observeInput(session, event) {
-    const plan = plans.get(session?.id)
-    if (!plan || plan.cancelled || planStatus(plan) === 'accepted' || getConfig().enabled === false) return
+    if (!session?.id || getConfig().enabled === false) return
     if (event.type === 'user/message') {
-      const message = event.data?.message ?? event.data
-      const input = plan.inputs?.find(input => input.id === message?.id)
-      if (input?.status === 'queued') { input.status = 'received'; input.receivedAt = Date.now(); backgroundSave() }
+      receiveHuman(session.id, event.data?.message ?? event.data)
       return
     }
     if (event.type !== 'agent/inbox/spliced') return
@@ -312,25 +353,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (!['next-turn', 'next-step'].includes(target)) return
     if (!inboxes.has(session.id)) inboxes.set(session.id, { 'next-turn': [], 'next-step': [] })
     const queue = inboxes.get(session.id)[target], start = data.start ?? queue.length
-    if (queue.length < start) queue.length = start
     const removed = queue.splice(start, data.removedCount ?? 0, ...(data.inserted ?? []).map(message => message.id))
     if (data.outcome === 'canceled') for (const id of removed) {
-      const input = plan.inputs?.find(input => input.id === id)
+      const message = pendingMessages(session.id).find(item => item.messageId === id)
+      if (message) message.withdrawn = true
+      const input = plans.get(session.id)?.inputs?.find(item => item.id === id)
       if (input?.status === 'queued') input.status = 'withdrawn'
     }
-    for (const message of data.inserted ?? []) {
-      if (!message.id || message.source?.kind !== 'user' || message.id === plan.source?.messageId) continue
-      const text = textOf(message.content)
-      if (!text.trim()) continue
-      plan.inputs ??= []
-      let input = plan.inputs.find(input => input.id === message.id)
-      if (!input) {
-        input = { id: message.id, text, at: Date.now(), status: 'queued', target }
-        plan.inputs.push(input)
-        remember(plan, 'plan.input_queued', '收到用户补充，等待原主控处理', undefined, { inputId: input.id })
-      } else if (input.status === 'withdrawn') { input.status = 'queued'; input.target = target }
-    }
-    if (queuedInputs(plan).length) waitingParents.get(session.id)?.wake.resolve()
+    for (const message of data.inserted ?? []) receiveHuman(session.id, message, target)
     backgroundSave()
   }
   function notifyParent(plan, task, handle) {
@@ -454,6 +484,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     const plan = plans.get(agent.id)
     if (!plan || !(plan.protocolVersion >= 2) || plan.wakeSuppressed || plan.cancelled && plan.completion) { truncatedOutputs.delete(agent.id); return }
+    if (pendingMessages(agent.id).length && await recoverDecision(agent.id)) {
+      agent.inject(runtimeMessage(plan, '有尚未关联的真实用户消息。请先用 delegation_decide 的 relation 确认 new/continue/update/question；不要按前缀或字数归类，不新开分类代理，然后继续相应任务。', 'delegation-decision-recovery'))
+      return
+    }
     if (!plan.completion && continueOutput(plan, agent)) { await save(); return }
     const waiter = { signal, wake: Promise.withResolvers() }
     waitingParents.set(agent.id, waiter)
@@ -521,6 +555,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     for (const task of copy.tasks) for (const check of task.checks) delete check.verifying
     copy.activationBudget = budget
+    delete copy.pendingMessages
+    if (plan.source?.messageId === sourceOf(plan.sessionId)?.messageId && pendingMessages(plan.sessionId).length) copy.pendingMessages = clone(pendingMessages(plan.sessionId))
     if (copy.decision) copy.decisionCurrent = ['accepted', 'cancelled'].includes(planStatus(plan)) || decisionCurrent(plan.sessionId)
     if (['accepted', 'cancelled'].includes(planStatus(plan))) copy.dispatchWait = null
     return { ...copy, status: planStatus(plan) }
@@ -584,7 +620,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (stored.version !== 1 || !Array.isArray(stored.plans) || stored.plans.length > MAX_PLANS) throw new Error('任务文件格式不支持')
       usageLedger.restore(stored.requestUsage)
       for (const entry of (stored.decisions ?? []).slice(-100)) {
-        if (typeof entry.sessionId === 'string' && entry.source?.messageId &&
+        if (typeof entry.sessionId === 'string' && (entry.source?.messageId || Array.isArray(entry.messages)) &&
           (!entry.decision || ['direct', 'delegate'].includes(entry.decision.mode) && typeof entry.decision.reason === 'string')) decisions.set(entry.sessionId, entry)
       }
       for (const plan of stored.plans) {
@@ -631,51 +667,86 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return { parent, plan }
   }
   function decisionFor(sessionId) {
-    const entry = decisions.get(sessionId), source = getSource(sessionId)
+    const entry = decisions.get(sessionId), source = sourceOf(sessionId)
     if (decisionWrites.has(sessionId) || !entry || source?.messageId !== entry.source?.messageId) return null
     return clone(entry.decision ?? null)
   }
   function decisionCurrent(sessionId) {
     const decision = decisionFor(sessionId)
-    return Boolean(decision && decision.revisionId === getRevision(sessionId)?.messageId)
+    return Boolean(decision && !pendingMessages(sessionId).length && decision.revisionId === revisionOf(sessionId)?.messageId)
   }
   async function recoverDecision(sessionId) {
     if (decisionCurrent(sessionId) || decisionWrites.has(sessionId)) return false
-    const source = getSource(sessionId), revision = getRevision(sessionId)
-    if (!source?.messageId || !revision?.messageId) return false
-    const previous = decisions.get(sessionId)
-    const sameRevision = previous?.source?.messageId === source.messageId && previous?.revision?.messageId === revision.messageId
-    if (sameRevision && previous.recoveryUsed >= 1) return false
-    decisions.set(sessionId, { sessionId, source: clone(source), revision: clone(revision),
-      decision: previous?.source?.messageId === source.messageId ? previous.decision : null, recoveryUsed: 1 })
-    if (decisions.size > 100) decisions.delete(decisions.keys().next().value)
+    const entry = decisions.get(sessionId), source = sourceOf(sessionId), revision = revisionOf(sessionId)
+    if (!pendingMessages(sessionId).length && entry?.messageResolution?.relation === 'question') return false
+    const key = pendingMessages(sessionId).at(-1)?.messageId ?? revision?.messageId
+    if (!key) return false
+    if (entry?.recoveryKey === key && entry.recoveryUsed >= 1) return false
+    const previous = clone(entry ?? null)
+    decisions.set(sessionId, { ...entry, sessionId, source: clone(source), revision: clone(revision), recoveryKey: key, recoveryUsed: 1 })
     try { await save() }
     catch (error) { if (previous) decisions.set(sessionId, previous); else decisions.delete(sessionId); throw error }
     return true
   }
   async function recordDecision(args, exec) {
-    const parent = own(exec), source = getSource(parent.id), revision = getRevision(parent.id), reason = typeof args.reason === 'string' ? args.reason.trim() : ''
-    if (!['direct', 'delegate'].includes(args.mode) || typeof reason !== 'string' || reason.length < 8 || reason.length > 500) throw new Error('执行方式只能是 direct 或 delegate；理由须为 8—500 字，说明具体范围、风险或委派价值')
-    if (!source?.messageId) throw new Error('尚未取得当前需求编号，请先接收用户需求后记录判断')
-    const plan = plans.get(parent.id)
-    if (args.mode === 'direct' && plan && !['accepted', 'cancelled'].includes(planStatus(plan))) throw new Error('托管计划尚未结束，请监督、返工或明确取消，不能同时改为主控重复实现')
+    const parent = own(exec), previous = clone(decisions.get(parent.id) ?? null)
     if (decisionWrites.has(parent.id)) throw new Error('判断正在保存，请等待本次工具返回')
-    const previous = decisions.get(parent.id)
-    const decision = { mode: args.mode, reason, requestId: source.messageId, revisionId: revision?.messageId ?? source.messageId, at: Date.now(),
-      model: coordinatorModel(parent, 0, 'decision'), recommendation: clone(getRoute(parent.id)) }
-    decisions.set(parent.id, { sessionId: parent.id, source: clone(source), revision: clone(revision ?? source), decision,
-      recoveryUsed: previous?.revision?.messageId === decision.revisionId ? previous.recoveryUsed ?? 0 : 0 })
-    if (decisions.size > 100) decisions.delete(decisions.keys().next().value)
-    decisionWrites.add(parent.id)
-    const previousPlanDecision = plan?.decision
+    const entry = decisions.get(parent.id) ?? { sessionId: parent.id, source: clone(getSource(parent.id)), revision: clone(getRevision(parent.id)) }
+    const pending = pendingMessages(parent.id)
+    if (!args.messageId && pending.length > 1) throw new Error('存在多条待关联消息，请提供真实 messageId 分别确认，不能自动选最后一条')
+    const binding = coordinatorUsage.get(parent.id)
+    const message = args.messageId ? entry.messages?.find(item => item.messageId === args.messageId && !item.withdrawn)
+      : binding ? entry.messages?.find(item => item.messageId === binding.messageId && !item.resolution && !item.withdrawn) : pending[0]
+    if (args.messageId && !message) throw new Error('消息编号不存在于本会话的真实用户消息，不能伪造关联')
+    const relation = args.relation ?? (!entry.source ? 'new' : !message ? 'update' : null)
+    if (!['new', 'continue', 'update', 'question'].includes(relation)) throw new Error('请用 relation 明确 new/continue/update/question；程序不根据措辞猜需求归属')
+    if (['continue', 'update'].includes(relation) && !entry.source) throw new Error('尚无已确认需求，请先用 new 记录')
+    const reason = typeof args.reason === 'string' ? args.reason.trim() : ''
+    const changes = ['new', 'update'].includes(relation) || !entry.decision && relation !== 'question'
+    if (changes && (!['direct', 'delegate'].includes(args.mode) || !reason || reason.length > 500)) throw new Error('新需求、范围或方案变化须提供 direct/delegate 和非空的具体理由，最多 500 字')
+    if (!changes && args.mode && args.mode !== entry.decision?.mode) throw new Error('执行方式变化请使用 update 并说明理由')
+    const source = relation === 'new' || !entry.source ? message ? { messageId: message.messageId, text: message.text } : getSource(parent.id) : entry.source
+    if (!source?.messageId) throw new Error('尚未取得当前需求编号，请先接收用户需求后记录判断')
+    const revision = ['new', 'update'].includes(relation) ? message ? { messageId: message.messageId, text: message.text } : source : entry.revision ?? source
+    const plan = plans.get(parent.id)
+    if (changes && relation !== 'new' && args.mode === 'direct' && plan && !['accepted', 'cancelled'].includes(planStatus(plan))) throw new Error('托管计划尚未结束，请监督、返工或明确取消，不能同时改为主控重复实现')
+    const model = coordinatorModel(parent, 0, 'decision'), at = Date.now()
+    const decision = changes ? { mode: args.mode, reason, requestId: source.messageId, revisionId: revision.messageId, at, model } : entry.decision ?? null
+    const resolution = { messageId: message?.messageId ?? revision.messageId, requestId: source.messageId, relation, at, model, ...(reason ? { reason } : {}) }
+    const next = { ...entry, source: clone(source), revision: clone(revision), decision, messageResolution: resolution }
+    if (message) {
+      next.messages = entry.messages.map(item => item.messageId === message.messageId ? { ...item, resolution } : item)
+    }
+    decisions.set(parent.id, next); decisionWrites.add(parent.id)
+    const previousPlanDecision = plan?.decision, previousResolution = plan?.messageResolution, previousInputs = clone(plan?.inputs ?? null), previousUsage = usageLedger.snapshot()
     if (plan?.source?.messageId === source.messageId) {
-      plan.decision = clone(decision)
-      remember(plan, 'decision.recorded', (decision.mode === 'delegate' ? '主控决定委派：' : '主控决定直接执行：') + reason)
+      if (changes) plan.decision = clone(decision)
+      plan.messageResolution = clone(resolution)
+      if (message && relation === 'update' && message.messageId !== plan.source.messageId) {
+        plan.inputs ??= []
+        if (!plan.inputs.some(input => input.id === message.messageId)) plan.inputs.push({ id: message.messageId, text: message.text, at: message.at, status: 'received', target: message.target })
+      }
+      remember(plan, 'decision.recorded', '主控确认消息关联：' + relation + (reason ? '；' + reason : ''))
+    }
+    if (message) {
+      const usage = usageLedger.request(parent.id, source)
+      for (const item of next.pendingUsage ?? []) if (item.messageId === message.messageId) {
+        if (item.kind === 'request') usageLedger.observeRequest(usage, item.target)
+        else usageLedger.observeMessage(usage, item.target, item.event)
+      }
+      next.pendingUsage = (next.pendingUsage ?? []).filter(item => item.messageId !== message.messageId)
+      if (plan?.source?.messageId === source.messageId) plan.usage = usage
     }
     try { await save() }
-    catch (error) { if (previous) decisions.set(parent.id, previous); else decisions.delete(parent.id); if (plan) plan.decision = previousPlanDecision; throw error }
-    finally { decisionWrites.delete(parent.id) }
-    return { decision: clone(decision) }
+    catch (error) {
+      if (previous) decisions.set(parent.id, previous); else decisions.delete(parent.id)
+      usageLedger.restore(previousUsage, true)
+      if (plan) { plan.decision = previousPlanDecision; plan.messageResolution = previousResolution; if (previousInputs) plan.inputs = previousInputs; else delete plan.inputs; plan.usage = usageLedger.request(parent.id) }
+      throw error
+    } finally { decisionWrites.delete(parent.id) }
+    if (message && coordinatorUsage.get(parent.id)?.messageId === message.messageId) coordinatorUsage.set(parent.id, { entry: usageFor(parent.id) })
+    onRequestResolved(parent.id, clone(next))
+    return { decision: clone(decision), source: clone(source), messageResolution: clone(resolution), pendingMessages: clone(pendingMessages(parent.id)) }
   }
   function taskOf(plan, id) {
     const task = plan.tasks.find(item => item.id === id)
@@ -1075,7 +1146,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (event?.type === 'assistant/message') {
       const expected = expectedRoutes.get(session?.id)
       if (!closed && getConfig().enabled !== false && (expected || service('agents')?.get(session?.id))) {
-        if (usageLedger.observeMessage(usageFor(session.id, expected), usageTarget(session.id, expected), event)) backgroundSave()
+        if (expected) usageLedger.observeMessage(usageFor(session.id, expected), usageTarget(session.id, expected), event)
+        else observeCoordinatorUsage(session.id, 'message', usageTarget(session.id), event)
+        backgroundSave()
       }
       if (expected && !closed && !expected.plan.cancelled && !expected.handle.settling) {
         const alert = observeUsage(expected.task, event, Date.now())
@@ -1131,7 +1204,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (!expected) {
       const parentPlan = plans.get(request.sessionId)
       if (!closed && getConfig().enabled !== false && service('agents')?.get(request.sessionId)) {
-        usageLedger.observeRequest(usageFor(request.sessionId), usageTarget(request.sessionId, null, request))
+        observeCoordinatorUsage(request.sessionId, 'request', usageTarget(request.sessionId, null, request))
         backgroundSave()
       }
       return parentPlan && !parentPlan.cancelled && !parentPlan.completion
@@ -1197,7 +1270,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const invocation = { name: tool, arguments: clone(args), callId,
         rootCallId: exec.rootCallId ?? exec.callId, parent: exec.token, agent: parent,
         ...(exec.toolSet ? { toolSet: exec.toolSet } : {}),
-        signal: AbortSignal.any([exec.signal, AbortSignal.timeout(60_000)]) }
+        signal: exec.signal }
       // Current DSH dispatches complete batches, including a single verification call.
       const result = typeof ctx.tools.selectExecutor === 'function'
         ? (await ctx.tools.execute({ calls: [{ id: callId, name: tool, arguments: JSON.stringify(args) }],
@@ -1323,8 +1396,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
             remember(plan, 'task.acceptance_rejected', '验收未通过实际工具管线确认，尚未生成完成回执', task)
             await save()
           } })
-        if (completion) exec.concludeTurn()
-        return { status: planStatus(proposed), task: clone(proposed.tasks.find(item => item.id === task.id)), completion }
+        const continuation = completion && sourceOf(plan.sessionId)?.messageId && sourceOf(plan.sessionId).messageId !== plan.source?.messageId
+          ? '旧需求计划已验收；当前还有另一项已确认需求：' + sourceOf(plan.sessionId).text + '。请继续处理当前需求，旧回执不代表新需求已完成。' : null
+        if (completion && !continuation && !pendingMessages(plan.sessionId).length) exec.concludeTurn()
+        return { status: planStatus(proposed), task: clone(proposed.tasks.find(item => item.id === task.id)), completion, ...(continuation ? { continuation } : {}) }
       }
       closeIssues(); task.review = acceptedReview; task.status = 'accepted'
       remember(plan, 'task.accepted', '主 Agent 已逐条验收通过', task, { findings: task.review.findings })
@@ -1416,13 +1491,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const object = properties => ({ type: 'object', properties, additionalProperties: false })
   const routeTool = (name, description, properties, required, execute, child = false) => {
     const definition = { name, description, parameters: { ...object(properties), required },
-      output: { schema: { type: 'object', additionalProperties: true }, render: (args, value) => [{ type: 'text', text: value.completion ? completionText(value.completion) : JSON.stringify(args.detail === 'full' ? value : compactResult(value)) }] },
+      output: { schema: { type: 'object', additionalProperties: true }, render: (args, value) => [{ type: 'text', text: value.completion ? [completionText(value.completion), value.continuation].filter(Boolean).join('\n') : JSON.stringify(args.detail === 'full' ? value : compactResult(value)) }] },
       async execute(args, exec) { await ready; if (committing.size) await Promise.all(committing); if (!child) own(exec); return execute(args, exec) } }
     disposers.push(ctx.tools.register(definition))
   }
-  routeTool('delegation_decide', '主控正式执行前记录 direct（直接执行）或 delegate（委派）及具体理由。先读文件准备；系统建议委派而选择直接做时，说明为何直接做更合适。身份、需求、模型和时间由插件绑定；普通正文不能代替记录。', {
-    mode: { type: 'string', enum: ['direct', 'delegate'] }, reason: { type: 'string', description: '8—500 字的具体判断依据。' },
-  }, ['mode', 'reason'], recordDecision)
+  routeTool('delegation_decide', '主控结合上下文确认消息关联：new 新需求、continue 继续、update 补充或调整、question 询问进度或提问。新需求/方案变化同时提供 direct/delegate 和理由；继续/询问沿用原决定。messageId 只能引用本会话真实消息，多条待关联时必填。先读文件准备，普通正文不能代替记录。', {
+    relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
+    mode: { type: 'string', enum: ['direct', 'delegate'] }, reason: { type: 'string', description: '新需求或方案变化时给出具体理由，最多 500 字；继续和进度询问沿用原判断。' },
+  }, [], recordDecision)
   routeTool('delegation_checkpoint', '托管执行者或只读审查者在长调查、阶段转换或阻塞时记录结论、下一步和成功工具证据。短任务只交最终报告；阶段记录不能代替验收或其他任务的记录。', {
     phase: { type: 'string', enum: ['investigation', 'implementation', 'verification'] }, summary: string, nextStep: string, evidence: array(string),
   }, ['phase', 'summary', 'nextStep', 'evidence'], async (args, exec) => {
@@ -1524,7 +1600,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (Object.keys(args).some(key => !['kind', 'content'].includes(key))) throw new Error('记录参数只接受 kind 和 content，文件路径由插件确定')
     if (!['task_plan', 'findings', 'progress'].includes(args.kind)) throw new Error('记录文件 kind 只能是 task_plan、findings 或 progress')
     if (typeof args.content !== 'string' || Buffer.byteLength(args.content, 'utf8') > 64 * 1024) throw new Error('记录内容必须是最多 64 KiB 的文字')
-    const parent = own(exec), source = getSource(parent.id)
+    const parent = own(exec), source = sourceOf(parent.id)
     if (!noteRequests.has(parent.id)) noteRequests.set(parent.id, randomUUID())
     const requestId = source?.messageId ?? source?.text ?? noteRequests.get(parent.id)
     const hash = value => createHash('sha256').update(String(value)).digest('hex')
@@ -1554,7 +1630,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return { path: target, sessionId: parent.id, requestId: source?.messageId ?? null, kind: args.kind }
   })
   routeTool('delegation_plan', '主控提交可验证的任务拆分。包含依赖、可修改路径、验收标准和主控验证工具参数；不开始执行。', {
-    goal: string, decisionReason: { type: 'string', description: '8—500 字；可在建计划时一并记录委派理由，省去单独调用 delegation_decide；不填写时需在 run 前记录。' }, tasks: array({ ...object({ id: string, title: string, instructions: string, scope: string,
+    goal: string, relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
+    decisionReason: { type: 'string', description: '非空，最多 500 字；可在建计划时一并记录委派理由及 relation；不填写时需在 run 前记录。' }, tasks: array({ ...object({ id: string, title: string, instructions: string, scope: string,
       outputs: array(string), writes: array(string), dependsOn: array(string), complexity: { type: 'string', enum: ['routine', 'complex'] }, complexityReason: string,
       criteria: array(string), checks: array({ ...object({ tool: { type: 'string', enum: CHECK_TOOLS }, arguments: { type: 'object', additionalProperties: true } }), required: ['tool', 'arguments'] }) }),
       required: ['id', 'title', 'instructions', 'scope', 'outputs', 'writes', 'complexity', 'criteria', 'checks'] }),
@@ -1562,9 +1639,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const parent = own(exec), previous = plans.get(parent.id)
     if (storageError) throw new Error(`任务保存或恢复异常，请先处理：${storageError}`)
     if (previous && !['accepted', 'cancelled'].includes(planStatus(previous))) throw new Error('当前计划尚未验收；请监督、返工或取消后再建新计划')
+    if (pendingMessages(parent.id).length && args.decisionReason === undefined) throw new Error('建立计划前须明确消息关联；可在本次 delegation_plan 一并提供 relation/messageId/decisionReason，或先用 delegation_decide 确认')
     const validated = validatePlan(args)
     validateChecks(validated.tasks, parent, exec.toolSet)
-    if (args.decisionReason !== undefined) await recordDecision({ mode: 'delegate', reason: args.decisionReason }, exec)
+    if (args.decisionReason !== undefined) await recordDecision({ mode: 'delegate', reason: args.decisionReason, relation: args.relation, messageId: args.messageId }, exec)
     if (!previous && plans.size >= MAX_PLANS) {
       const oldest = [...plans.values()].filter(plan => ['accepted', 'cancelled'].includes(planStatus(plan))).sort((a, b) => a.updatedAt - b.updatedAt)[0]
       if (!oldest) throw new Error(`已有 ${MAX_PLANS} 个未完成计划，请先完成或取消`)
@@ -1572,10 +1650,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     const cwd = parent.session?.header?.cwd
     if (cwd) for (const task of validated.tasks) task.writes = task.writes.map(value => path.resolve(cwd, value))
-    const source = getSource(parent.id)
+    const source = sourceOf(parent.id)
     const routing = getRoute(parent.id)
     const sessionTitle = service('sessionTitle')?.get(parent.session)?.title
-    const plan = { ...validated, protocolVersion: 2, decisionProtocolVersion: 1, decision: decisionCurrent(parent.id) ? decisionFor(parent.id) : null,
+    const plan = { ...validated, protocolVersion: 2, decisionProtocolVersion: 2, messageResolution: clone(decisions.get(parent.id)?.messageResolution ?? null), decision: decisionCurrent(parent.id) ? decisionFor(parent.id) : null,
       completion: null, recovery: { used: 0, limit: RECOVERY_LIMIT }, source: source ? clone(source) : null,
       usage: usageLedger.request(parent.id, source),
       ...(routing ? { routing: clone(routing), routingWarnings: routeWarnings(routing, validated.tasks) } : {}),
@@ -1696,7 +1774,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     await save(); return { status: 'cancelled', completion: plan.completion ?? null }
   })
   return {
-    ready, snapshot, observe, allowsVerification, decisionFor, decisionCurrent, recoverDecision,
+    ready, snapshot, observe, allowsVerification, decisionFor, decisionCurrent, recoverDecision, sourceOf, revisionOf,
+    pendingMessages: id => clone(pendingMessages(id)),
     requestContext: sessionId => clone(decisions.get(sessionId) ?? null), supervisionPolicy: SUPERVISION_POLICY,
     requestUsage(sessionId) { const entry = usageFor(sessionId); return entry ? clone(entry) : null },
     requestUsages(sessionId = null) { return usageLedger.snapshot().filter(entry => sessionId === null || entry.sessionId === sessionId) },
@@ -1727,7 +1806,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     archiveWarningFor(sessionId) { return sessionId === null || archiveFailure?.sessionId === sessionId ? archiveFailure?.message ?? null : null },
     summary(sessionId) {
       const plan = plans.get(sessionId)
-      const source = getSource(sessionId)
+      const source = sourceOf(sessionId)
       if (!plan || source?.messageId && source.messageId !== plan.source?.messageId) return ''
       const failures = targetsOf(plan).filter(task => task.error).map(task => `${task.id}${task.role === 'reviewer' ? '（独立审查）' : ''}：${brief(task.error, 600)}`)
       const paused = !plan.cancelled && !plan.autoDispatch && targetsOf(plan).some(task => ['failed', 'blocked'].includes(task.status))
@@ -1735,11 +1814,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const waiting = plan.dispatchWait ? `正在等待：${plan.dispatchWait.message}` : ''
       const budget = activationBudget(plan, getConfig().maxActivations)
       const issue = pendingServiceIssue(plan)
-      const inputs = unresolvedInputs(plan)
+      const inputs = (plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status))
+      const unclassified = pendingMessages(sessionId)
+      const association = unclassified.length ? '尚未归属需求的真实用户消息：\n' + unclassified.map(message => `${message.messageId}：${brief(message.text, 180)}`).join('\n') +
+        '\n先用 delegation_decide(relation,messageId) 确认 new/continue/update/question；多条消息分别确认，不按措辞归属，也不自动取消旧任务。' : ''
       const pending = inputs.length ? '待处理用户补充：\n' + inputs.map(input => `${input.id}（${input.status}）：${brief(input.text, 400)}`).join('\n') +
         '\n先说明理解与影响；执行变更用 delegation_control steer(inputIds,additionalCriteria,message) 同步原代理；结果已返回则核对后 delegation_review rework。纯答复用 acknowledge(inputIds,message) 记录，不改变交付标准。未处理前不能验收。' : ''
       return [`当前计划：${brief(plan.goal, 200)}\n状态：${planStatus(plan)}；${plan.tasks.map(task => `${task.id}=${task.status}${task.audit ? '（独立审查=' + task.audit.status + '）' : ''}`).join('，')}。启动预算：${budget.used}/${budget.limit}，剩余 ${budget.remaining}（含独立审查）。调用 delegation_status 获取证据并继续监督；最终交付结论以程序回执为准，最后一次验收后自动结束，不用 stop 清理。`, plan.completion ? completionText(plan.completion) : '', issue ? issue.message + '。' + issue.action : '', pending, waiting, paused,
-        failures.length ? `失败原因：\n${failures.join('\n')}` : ''].filter(Boolean).join('\n')
+        association, failures.length ? `失败原因：\n${failures.join('\n')}` : ''].filter(Boolean).join('\n')
     },
     hasPending: sessionId => { const plan = plans.get(sessionId); return Boolean(plan && !['accepted', 'cancelled'].includes(planStatus(plan))) },
     async dispose() {

@@ -18,6 +18,40 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('verification follows host cancellation without adding a plugin execution deadline', async () => {
+  const controller = new AbortController(), f = await fixture({ signal: controller.signal })
+  await f.plan([card('long-check')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  let received
+  const original = f.ctx.tools.execute
+  f.ctx.tools.execute = async exec => { received = exec.signal; return original(exec) }
+  await f.execute('delegation_verify', { taskId: 'long-check', checkIndex: 0 })
+  assert.equal(received, controller.signal, 'the host signal must be forwarded without a hidden 60-second deadline')
+  controller.abort()
+  assert.equal(received.aborted, true)
+})
+
+test('a model-confirmed new request never cancels or rewrites the existing worker plan', async () => {
+  const f = await fixture(); await f.plan([card('old')]); await f.execute('delegation_run')
+  const originalSource = f.snapshot().source
+  const message = { id: 'new-request', source: { kind: 'user' }, content: [{ type: 'text', text: '另外开个新任务' }] }
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { inserted: [message] } })
+  assert.equal(f.snapshot().inputs?.length ?? 0, 0)
+  await f.execute('delegation_decide', { relation: 'new', mode: 'direct', reason: '新任务先读取资料，不替换旧任务的执行。' })
+  assert.equal(f.engine.sourceOf('parent').messageId, 'new-request')
+  assert.deepEqual(f.snapshot().source, originalSource)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.snapshot().cancelled, false)
+  assert.equal(f.pending[0].receipt.disposeCount, undefined)
+  assert.equal(f.calls.length, 1)
+  await assert.rejects(f.plan([card('new')]), /当前计划尚未验收/)
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'old', checkIndex: 0 })
+  await f.execute('delegation_review', { taskId: 'old', verdict: 'accept', findings: [{ criterion: 0, finding: '旧需求交付已独立核对', evidence: [proof.callId] }] })
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+  assert.equal(f.conclusions.includes('parent'), false, 'finishing the old plan cannot end the coordinator handling the new request')
+})
+
 test('the delegation decision is recorded separately from planning and actual child activation', async () => {
   const f = await fixture()
   const decision = await f.execute('delegation_decide', { mode: 'delegate', reason: '执行需要逐份核对多份文件，交给执行模型后由主控验证。' })
@@ -37,7 +71,7 @@ test('new plans cannot start without a valid delegation reason; legacy queued pl
   await f.execute('delegation_plan', { goal: '先准备再决定', tasks: [card('a')] })
   await assert.rejects(f.execute('delegation_run'), /delegation_decide/)
   assert.equal(f.calls.length, 0)
-  await assert.rejects(f.execute('delegation_decide', { mode: 'delegate', reason: '简单' }), /8—500/)
+  await assert.rejects(f.execute('delegation_decide', { mode: 'delegate', reason: '' }), /非空/)
   await assert.rejects(f.execute('delegation_decide', { mode: 'other', reason: '执行核对工作后由主控验收。' }), /direct.*delegate/)
   await assert.rejects(f.execute('delegation_decide', { mode: 'direct', reason: '准备直接重复修改这些交付文件。' }), /不能同时/)
   assert.equal(f.calls.length, 0)
@@ -975,7 +1009,7 @@ async function fixture(options = {}) {
   cleanup.push(() => engine.dispose())
   const invoke = async (name, args, agent) => {
     let concluded = false
-    const exec = { name, arguments: args, agent, callId: `outer-${++count}`, token: {}, signal: new AbortController().signal,
+    const exec = { name, arguments: args, agent, callId: `outer-${++count}`, token: {}, signal: options.signal ?? new AbortController().signal,
       concludeTurn() { concluded = true; conclusions.push(agent.id) } }
     try {
       const value = await tools.get(name).execute(args, exec)
@@ -1534,8 +1568,8 @@ test('a human supplement wakes the waiting coordinator and survives retargeting 
   f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', start: 0, inserted: [message] } })
   const woke = await Promise.race([stopping.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 100))])
   assert.equal(woke, true, 'queued human input must release the stopping hook before the child finishes')
-  assert.equal(f.snapshot().inputs.length, 1)
-  assert.equal(f.snapshot().inputs[0].status, 'queued')
+  assert.equal(f.engine.pendingMessages('parent').length, 1)
+  assert.equal(f.snapshot().inputs?.length ?? 0, 0, 'receiving a message does not assign it to the plan')
   assert.equal(f.snapshot().recovery.used, 0)
   assert.equal(f.pending.length, 1)
   assert.equal(f.pending[0].receipt.disposed, undefined)
@@ -1547,6 +1581,7 @@ test('supplements are explicitly forwarded with acceptance criteria or acknowled
   const message = { id: 'new-requirement', source: { kind: 'user' }, content: [{ type: 'text', text: '操作人员不懂技术，请提供引导。' }] }
   f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', inserted: [message] } })
   f.emit('session/event', f.parent, { type: 'user/message', data: message })
+  await f.execute('delegation_decide', { relation: 'update', mode: 'delegate', reason: '将操作引导补充进原任务，执行者继续处理。' })
   await assert.rejects(f.execute('delegation_control', { taskId: 'a', action: 'steer', message: '完善交付体验', inputIds: [message.id] }), /验收标准|additionalCriteria/)
   await f.execute('delegation_control', { taskId: 'a', action: 'steer', message: '增加面向交付人员的操作引导',
     inputIds: [message.id], additionalCriteria: ['页面提供无需技术背景的操作引导'] })
@@ -1561,7 +1596,8 @@ test('supplements are explicitly forwarded with acceptance criteria or acknowled
   f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', inserted: [question] } })
   const accept = () => f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [0, 1].map(criterion => ({ criterion, finding: '按本次要求实际核对通过', evidence: [proof.callId] })) })
   await assert.rejects(accept(), /补充|消息/)
-  await f.execute('delegation_control', { action: 'acknowledge', inputIds: [question.id], message: '本条为进度询问，已说明当前验收进展，不改变交付要求。' })
+  await f.execute('delegation_decide', { relation: 'question' })
+  assert.equal(f.snapshot().inputs.some(input => input.id === question.id), false)
   await accept()
   assert.equal(f.snapshot().status, 'accepted')
 })
@@ -1583,7 +1619,8 @@ test('a supplement arriving during acceptance defers the receipt and reaches bou
   assert.equal(f.snapshot().completion, null)
   assert.equal(f.snapshot().tasks[0].pendingAcceptance, undefined)
   await f.reload()
-  assert.equal(f.snapshot().inputs[0].text, message.content[0].text)
+  assert.equal(f.engine.pendingMessages('parent')[0].text, message.content[0].text)
+  await f.execute('delegation_decide', { relation: 'update', mode: 'delegate', reason: '补充交付操作引导，在原任务中返工完成。' })
   assert.match(f.engine.summary('parent'), /delivery-guidance.*交付操作员/)
   await f.execute('delegation_review', { taskId: 'a', verdict: 'rework', inputIds: [message.id],
     additionalCriteria: ['页面提供面向操作员的引导'], feedback: '落实新增交付要求' })
