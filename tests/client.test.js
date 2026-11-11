@@ -18,13 +18,33 @@ test('input progress defaults to one short summary and keeps raw diagnostics ins
     const details = dock.nodes('details')[0], summary = dock.nodes('summary')[0]
     assert.ok(details, 'progress must be collapsible')
     assert.notEqual(details.props.open, true)
-    assert.match(JSON.stringify(summary), /继续处理中.*agentrix-multi-agent-blog\.md/)
-    assert.doesNotMatch(JSON.stringify(summary), /old_string|D:\/demo|这句话|修改未完成/)
+    assert.match(JSON.stringify(summary), /正在处理异常/)
+    assert.doesNotMatch(JSON.stringify(summary), /old_string|D:\/demo|agentrix-multi-agent-blog|这句话|修改未完成/)
     assert.match(dock.text(), /old_string was not found/)
     assert.ok(!dock.nodes('section').some(node => node.props.role === 'alert'), 'a running repair is not a terminal error')
     execution.running = false
     await dock.tick()
     assert.match(JSON.stringify(dock.nodes('summary')[0]), /修改未完成/)
+  } finally { dock.close(); f.close() }
+})
+
+test('composer labels stay short and distinguish coordinator work from actual child execution', async () => {
+  const row = { sessionId: 'session-current', source: { messageId: 'request-one', text: '调整文章案例' },
+    execution: { running: true, startedAt: 100, toolCalls: 2, activity: { kind: 'waiting_model_response' }, unresolvedChanges: [] } }
+  const body = { ok: true, sessionId: 'session-current', plans: [], sessions: [row] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock('session-current')
+  try {
+    await dock.flush()
+    assert.match(JSON.stringify(dock.nodes('summary')[0]), /主控处理中/)
+    assert.doesNotMatch(JSON.stringify(dock.nodes('summary')[0]), /主控直接执行|等待模型响应|详情.*隐藏/)
+    assert.equal(dock.nodes('button').find(node => node.props['aria-label'] === '隐藏进度提示')?.props.className, 'ddf-dock-hide')
+    body.plans = [{ sessionId: 'session-current', source: row.source, status: 'running', tasks: [
+      { id: 'a', status: 'running' }, { id: 'b', status: 'running' }, { id: 'c', status: 'queued' },
+    ] }]
+    await dock.tick()
+    assert.match(JSON.stringify(dock.nodes('summary')[0]), /2 个子任务执行中/)
+    assert.doesNotMatch(JSON.stringify(dock.nodes('summary')[0]), /主控处理中|已验收|协作进度/)
   } finally { dock.close(); f.close() }
 })
 

@@ -64,6 +64,7 @@ const directSession = { sessionId: plans[0].sessionId, source: { messageId: 'dir
     lastResult: { tool: 'read', target: 'D:/demo/articles/agentrix-article.md', at: Date.now() },
     unresolvedChanges: [{ callId: 'demo-edit-failed', target: 'D:/demo/articles/agentrix-article.md',
       reason: 'Error: old_string was not found in D:/demo/articles/agentrix-article.md' }] } }
+if (process.argv.includes('--direct-healthy')) directSession.execution.unresolvedChanges = []
 if (process.argv.includes('--supplement')) {
   Object.assign(plans[0], { protocolVersion: 2, status: 'running', goal: '开发面向交付人员的可视化调试页面',
     routing: { route: 'direct', reasons: ['scope_small'] },

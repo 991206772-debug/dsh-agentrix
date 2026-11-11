@@ -669,7 +669,10 @@ window.__ModuleLoader__.load({
 
     Object.assign(zh, {
       'direct.title': '主控直接执行', 'direct.incomplete': '修改未完成',
-      'direct.repairing': '修改遇错，继续处理中', 'dock.details': '详情', 'dock.hide': '隐藏进度提示',
+      'direct.repairing': '修改遇错，继续处理中', 'dock.details': '执行详情', 'dock.hide': '隐藏进度提示',
+      'dock.hideLabel': '隐藏提示', 'dock.coordinator': '主控处理中', 'dock.repairing': '正在处理异常',
+      'dock.workers': '{count} 个子任务执行中', 'dock.audit': '独立审查中', 'dock.review': '待验收 {count} 项',
+      'dock.unavailable': '协作暂不可用', 'dock.offline': '状态暂不可用',
       'direct.advice': '系统建议委派，当前尚未启动子代理', 'direct.reasonMissing': '主控尚未说明本次直接执行的原因',
       'direct.statement': '主控最近说明', 'direct.calls': '本轮工具调用 {count} 次',
       'direct.unavailable': '委派入口不可用', 'direct.checkPlugin': '请检查 DSH Agentrix 插件是否启用，以及宿主的子代理功能是否可用；当前没有通过这些入口启动协作。',
@@ -678,7 +681,10 @@ window.__ModuleLoader__.load({
     })
     Object.assign(en, {
       'direct.title': 'Coordinator executing directly', 'direct.incomplete': 'File changes remain incomplete',
-      'direct.repairing': 'Handling a failed change', 'dock.details': 'Details', 'dock.hide': 'Hide progress notice',
+      'direct.repairing': 'Handling a failed change', 'dock.details': 'Execution details', 'dock.hide': 'Hide progress notice',
+      'dock.hideLabel': 'Hide notice', 'dock.coordinator': 'Coordinator working', 'dock.repairing': 'Handling an issue',
+      'dock.workers': '{count} subtasks running', 'dock.audit': 'Independent review', 'dock.review': '{count} awaiting acceptance',
+      'dock.unavailable': 'Delegation unavailable', 'dock.offline': 'Status unavailable',
       'direct.advice': 'Delegation was suggested; no child agent has started', 'direct.reasonMissing': 'The coordinator has not explained its choice to execute directly',
       'direct.statement': 'Latest coordinator statement', 'direct.calls': '{count} tool calls this turn',
       'direct.unavailable': 'Delegation tools unavailable', 'direct.checkPlugin': 'Check that DSH Agentrix is enabled and the host supports subagents. These entry points have not started collaboration.',
@@ -1100,18 +1106,20 @@ window.__ModuleLoader__.load({
 .ddf-chat-notice[data-kind="progress"] .ddf-chat-notice-heading { color:var(--dsw-alias-brand-primary,#4f6ef7); }
 .ddf-chat-live-task + .ddf-chat-live-task { margin-top:8px; padding-top:8px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-chat-live-meta { color:var(--dsw-alias-label-secondary,#646a73); }
-.ddf-chat-dock { --ddf-dock-tone:var(--dsw-alias-brand-primary,#4f6ef7); position:relative; min-width:0; max-width:100%; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:7px; background:var(--dsw-alias-bg-layer-1,#fff); color:var(--dsw-alias-label-secondary,#646a73); font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif; }
+.ddf-chat-dock { --ddf-dock-tone:var(--dsw-alias-state-business-primary,#4f6ef7); position:relative; isolation:isolate; width:fit-content; min-width:0; max-width:calc(100% - 24px); margin:0 auto 6px; padding:4px 0; color:var(--dsw-alias-label-primary,#1f2329); font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif; }
 .ddf-chat-dock[data-tone="supervision"] { --ddf-dock-tone:var(--dsw-alias-state-warning-primary,#b7791f); }
 .ddf-chat-dock[data-tone="service"] { --ddf-dock-tone:var(--dsw-alias-state-error-primary,#f54a45); }
-.ddf-dock-disclosure>summary { box-sizing:border-box; display:flex; align-items:center; gap:8px; height:34px; padding:0 38px 0 10px; cursor:pointer; list-style:none; }
+.ddf-dock-disclosure { width:fit-content; max-width:240px; }
+.ddf-dock-disclosure>summary { box-sizing:border-box; display:flex; align-items:center; gap:8px; height:28px; padding:0 10px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:999px; background:var(--dsw-alias-bg-layer-1,#fff); cursor:pointer; list-style:none; user-select:none; }
+.ddf-dock-disclosure>summary:hover,.ddf-dock-disclosure[open]>summary { background:var(--dsw-alias-bg-layer-2,#f5f6f7); }
 .ddf-dock-disclosure>summary::-webkit-details-marker { display:none; }
 .ddf-dock-dot { flex:none; width:5px; height:5px; border-radius:50%; background:var(--ddf-dock-tone); }
-.ddf-dock-text { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-.ddf-dock-toggle { flex:none; color:var(--dsw-alias-label-secondary,#646a73); }
-.ddf-dock-toggle::after { content:'⌄'; display:inline-block; margin-left:4px; }
-.ddf-dock-disclosure[open] .ddf-dock-toggle::after { transform:rotate(180deg); }
-.ddf-dock-details { max-height:min(28vh,220px); overflow:auto; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
-.ddf-dock-hide { position:absolute; top:5px; right:5px; width:24px; height:24px; padding:0; border:0; border-radius:4px; background:transparent; color:inherit; font:16px/1 system-ui,sans-serif; cursor:pointer; }
+.ddf-dock-text { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-weight:500; }
+.ddf-dock-toggle { flex:none; width:4px; height:4px; margin:-3px 1px 0 2px; border-right:1px solid currentColor; border-bottom:1px solid currentColor; transform:rotate(45deg); color:var(--dsw-alias-label-secondary,#646a73); }
+.ddf-dock-disclosure[open] .ddf-dock-toggle { margin-top:2px; transform:rotate(225deg); }
+.ddf-dock-details { position:absolute; z-index:1; bottom:calc(100% + 6px); left:50%; transform:translateX(-50%); width:min(380px,calc(100vw - 32px)); max-height:min(45vh,340px); overflow:auto; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:12px; background:var(--dsw-alias-bg-layer-1,#fff); box-shadow:0 8px 28px color-mix(in srgb,var(--dsw-alias-label-primary,#1f2329) 12%,transparent); }
+.ddf-dock-panel-head { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:8px 12px; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-dock-hide { padding:3px 6px; border:0; border-radius:4px; background:transparent; color:var(--dsw-alias-label-secondary,#646a73); font:inherit; cursor:pointer; }
 .ddf-dock-hide:hover { background:var(--dsw-alias-bg-layer-2,#f5f6f7); }
 .ddf-dock-disclosure>summary:focus-visible,.ddf-dock-hide:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7); outline-offset:2px; }
 .ddf-chat-dock .ddf-chat-notice { margin:0; }
@@ -1249,6 +1257,19 @@ window.__ModuleLoader__.load({
       // transition also refreshes a terminal snapshot when the next turn starts.
       const result = useChatProgress(progress, sessionId, true, session?.running)
       const [dismissed, setDismissed] = useState(null)
+      const dockRef = useRef(null)
+      useEffect(() => {
+        if (typeof document === 'undefined') return
+        const close = event => {
+          const disclosure = dockRef.current?.querySelector('details')
+          if (!disclosure?.open || event.type === 'keydown' && event.key !== 'Escape' || event.type === 'pointerdown' && dockRef.current.contains(event.target)) return
+          disclosure.open = false
+          if (event.type === 'keydown') disclosure.querySelector('summary')?.focus()
+        }
+        document.addEventListener('pointerdown', close)
+        document.addEventListener('keydown', close)
+        return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', close) }
+      }, [sessionId])
       const plan = currentPlanOf(result.data, sessionId)
       const state = result.data?.sessions?.find(item => item.sessionId === sessionId)
       const availability = state?.delegationAvailability
@@ -1262,37 +1283,34 @@ window.__ModuleLoader__.load({
       if (!backendMissing && !missing && (plan ? terminal : !execution?.running && !failures.length)) return null
       let summary, content, tone = 'progress'
       if (backendMissing) {
-        summary = t('direct.backendMissing'); tone = 'service'
-        content = h('section', { className: 'ddf-chat-notice', role: 'alert' }, h('strong', null, summary),
+        summary = t('dock.offline'); tone = 'service'
+        content = h('section', { className: 'ddf-chat-notice', role: 'alert' }, h('strong', null, t('direct.backendMissing')),
           h('p', null, t('direct.backendHint')), h('p', null, result.error))
       } else if (missing) {
-        summary = t('direct.unavailable'); content = missing; tone = 'service'
+        summary = t('dock.unavailable'); content = missing; tone = 'service'
       } else if (plan) {
         const tasks = plan.tasks ?? [], status = chatStatusKey(plan), done = tasks.filter(task => task.status === 'accepted').length
         const running = tasks.filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
-        summary = t('live.title') + ' · ' + fill(t(status === 'running' ? 'chat.activeAcceptedSummary' : 'chat.acceptedSummary'), {
-          running, done, total: tasks.length, status: status === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t('chat.' + status) })
+        summary = running ? fill(t(tasks.some(task => ['starting', 'running'].includes(task.status)) ? 'dock.workers' : 'dock.audit'), { count: running })
+          : status === 'review' ? fill(t('dock.review'), { count: tasks.filter(task => task.status === 'review').length })
+          : status === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t('chat.' + status)
         content = h(ChatPlanNotice, { t, plan, error: result.error })
         tone = serviceProblem(plan) || ['failed', 'blocked'].includes(status) ? 'service' : chatProblem(plan) ? 'supervision' : 'progress'
       } else {
-        const activity = execution.activity
-        const current = activity?.kind === 'tool' ? liveToolLabel(t, activity.tool) : t('supervision.activity.' + (activity?.kind || 'waiting_model_response'))
-        summary = failures.length ? t(execution.running ? 'direct.repairing' : 'direct.incomplete') : t('direct.title') + ' · ' + current
-        const target = failures.at(-1)?.target || activity?.target
-        if (target) summary += ' · ' + String(target).replaceAll('\\', '/').split('/').at(-1)
+        summary = failures.length ? t(execution.running ? 'dock.repairing' : 'direct.incomplete') : t('dock.coordinator')
         content = h(CoordinatorProgress, { t, state, error: result.error })
         tone = failures.length ? execution.running ? 'supervision' : 'service' : 'progress'
       }
       const identity = [sessionId, state?.source?.messageId || plan?.source?.messageId, execution?.startedAt || plan?.createdAt,
         backendMissing ? 'backend' : missing ? 'unavailable' : plan ? plan.status : failures.length ? 'change-failed' : 'direct', failures.map(item => item.callId).join(',')].join(':')
       if (dismissed === identity) return null
-      return h('div', { className: 'ddf-chat-dock', 'data-tone': tone }, h('style', null, CHAT_NOTICE_STYLES),
+      return h('div', { className: 'ddf-chat-dock', 'data-tone': tone, ref: dockRef }, h('style', null, CHAT_NOTICE_STYLES),
         h('details', { className: 'ddf-dock-disclosure', key: identity },
-          h('summary', { title: summary }, h('span', { className: 'ddf-dock-dot', 'aria-hidden': 'true' }),
-            h('span', { className: 'ddf-dock-text', role: 'status' }, summary), h('span', { className: 'ddf-dock-toggle' }, t('dock.details'))),
-          h('div', { className: 'ddf-dock-details' }, content)),
-        h('button', { type: 'button', className: 'ddf-dock-hide', title: t('dock.hide'), 'aria-label': t('dock.hide'),
-          onClick: () => setDismissed(identity) }, '×'))
+          h('summary', { title: t('dock.details'), 'aria-label': summary + '，' + t('dock.details') }, h('span', { className: 'ddf-dock-dot', 'aria-hidden': 'true' }),
+            h('span', { className: 'ddf-dock-text', role: 'status' }, summary), h('span', { className: 'ddf-dock-toggle', 'aria-hidden': 'true' })),
+          h('div', { className: 'ddf-dock-details', role: 'region', 'aria-label': t('dock.details') },
+            h('div', { className: 'ddf-dock-panel-head' }, h('strong', null, t('dock.details')),
+              h('button', { type: 'button', className: 'ddf-dock-hide', 'aria-label': t('dock.hide'), onClick: () => setDismissed(identity) }, t('dock.hideLabel'))), content)))
     }
 
     function CoordinatorProgress({ t, state, error }) {
