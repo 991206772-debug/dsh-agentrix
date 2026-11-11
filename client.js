@@ -670,6 +670,8 @@ window.__ModuleLoader__.load({
     Object.assign(zh, {
       'direct.title': '主控直接执行', 'direct.incomplete': '修改未完成',
       'direct.repairing': '修改遇错，继续处理中', 'dock.details': '执行详情',
+      'dock.execution': '当前执行', 'dock.decision': '执行判断', 'dock.activity': '当前动作',
+      'dock.toolCalls': '本轮工具调用', 'dock.callsUnit': '次', 'dock.unknownModel': '未记录', 'dock.issues': '异常记录',
       'dock.coordinator': '主控处理中', 'dock.repairing': '正在处理异常',
       'dock.workers': '{count} 个子任务执行中', 'dock.audit': '独立审查中', 'dock.review': '待验收 {count} 项',
       'dock.unavailable': '协作暂不可用', 'dock.offline': '状态暂不可用',
@@ -688,6 +690,8 @@ window.__ModuleLoader__.load({
     Object.assign(en, {
       'direct.title': 'Coordinator executing directly', 'direct.incomplete': 'File changes remain incomplete',
       'direct.repairing': 'Handling a failed change', 'dock.details': 'Execution details',
+      'dock.execution': 'Current execution', 'dock.decision': 'Execution decision', 'dock.activity': 'Current activity',
+      'dock.toolCalls': 'Tool calls this turn', 'dock.callsUnit': 'calls', 'dock.unknownModel': 'Not recorded', 'dock.issues': 'Issues',
       'dock.coordinator': 'Coordinator working', 'dock.repairing': 'Handling an issue',
       'dock.workers': '{count} subtasks running', 'dock.audit': 'Independent review', 'dock.review': '{count} awaiting acceptance',
       'dock.unavailable': 'Delegation unavailable', 'dock.offline': 'Status unavailable',
@@ -1119,7 +1123,7 @@ window.__ModuleLoader__.load({
 .ddf-chat-notice[data-kind="progress"] .ddf-chat-notice-heading { color:var(--dsw-alias-brand-primary,#4f6ef7); }
 .ddf-chat-live-task + .ddf-chat-live-task { margin-top:8px; padding-top:8px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-chat-live-meta { color:var(--dsw-alias-label-secondary,#646a73); }
-.ddf-chat-dock { --ddf-dock-tone:var(--dsw-alias-state-business-primary,#4f6ef7); position:relative; isolation:isolate; width:100%; min-width:0; max-width:min(640px,calc(100% - 24px)); margin:0 auto 6px; padding:4px 0; color:var(--dsw-alias-label-primary,#1f2329); font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif; }
+.ddf-chat-dock { --ddf-dock-tone:var(--dsw-alias-state-business-primary,#4f6ef7); position:relative; isolation:isolate; container:ddf-progress / inline-size; width:100%; min-width:0; max-width:min(760px,calc(100% - 24px)); margin:0 auto 6px; padding:4px 0; color:var(--dsw-alias-label-primary,#1f2329); font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif; }
 .ddf-chat-dock[data-tone="supervision"] { --ddf-dock-tone:var(--dsw-alias-state-warning-primary,#b7791f); }
 .ddf-chat-dock[data-tone="service"] { --ddf-dock-tone:var(--dsw-alias-state-error-primary,#f54a45); }
 .ddf-dock-disclosure { width:fit-content; max-width:240px; margin:0 auto; }
@@ -1131,12 +1135,10 @@ window.__ModuleLoader__.load({
 .ddf-dock-toggle { flex:none; width:4px; height:4px; margin:-3px 1px 0 2px; border-right:1px solid currentColor; border-bottom:1px solid currentColor; transform:rotate(45deg); color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-dock-disclosure[open] .ddf-dock-toggle { margin-top:2px; transform:rotate(225deg); }
 .ddf-dock-details { box-sizing:border-box; position:absolute; z-index:1; bottom:calc(100% + 6px); left:50%; transform:translateX(-50%); width:100%; max-height:min(65vh,560px,var(--ddf-dock-available-height,560px)); overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:var(--dsw-alias-label-secondary,#8f959e) var(--dsw-alias-bg-layer-1,#fff); border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:12px; background:var(--dsw-alias-bg-layer-1,#fff); box-shadow:0 8px 28px color-mix(in srgb,var(--dsw-alias-label-primary,#1f2329) 12%,transparent); }
-.ddf-dock-panel-head { position:sticky; top:0; z-index:1; padding:10px 18px; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); background:var(--dsw-alias-bg-layer-1,#fff); font-size:13px; }
+.ddf-dock-panel-head { position:sticky; top:0; z-index:1; padding:14px 20px; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); background:var(--dsw-alias-bg-layer-1,#fff); font-size:16px; }
 .ddf-dock-disclosure>summary:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7); outline-offset:2px; }
 .ddf-chat-dock .ddf-chat-notice { margin:0; }
 .ddf-dock-details .ddf-chat-notice { padding:12px 18px 16px; border:0; border-radius:0; font-size:14px; }
-.ddf-dock-details .ddf-source { margin-top:12px; padding-top:10px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); color:var(--dsw-alias-label-secondary,#646a73); }
-.ddf-coordinator-meta { display:flex; flex-wrap:wrap; column-gap:20px; }
 .ddf-dock-details .ddf-decision { margin-top:12px; padding-top:10px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-dock-details .ddf-decision-choice { font-weight:600; }
 .ddf-chat-notice p { margin:5px 0; white-space:pre-wrap; }
@@ -1144,6 +1146,41 @@ window.__ModuleLoader__.load({
 .ddf-chat-notice-action { display:inline-block; max-width:100%; margin:4px 0 0; padding:0; border:0; background:transparent; color:var(--dsw-alias-brand-primary,#4f6ef7); font:inherit; text-align:left; overflow-wrap:anywhere; cursor:pointer; }
 .ddf-chat-notice-action:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7); outline-offset:2px; }
 .ddf-chat-notice-action:disabled { color:var(--dsw-alias-label-secondary,#646a73); cursor:default; }
+.ddf-dock-details .ddf-coordinator { padding:0 20px; }
+.ddf-execution-row { --ddf-section-tone:var(--ddf-dock-tone); display:grid; grid-template-columns:108px minmax(0,1fr); gap:20px; padding:18px 0; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-execution-row:last-child { border-bottom:0; }
+.ddf-execution-row[data-section="decision"] { --ddf-section-tone:var(--dsw-alias-state-success-primary,#369b83); }
+.ddf-execution-row[data-section="request"] { --ddf-section-tone:var(--dsw-alias-label-secondary,#8f959e); }
+.ddf-execution-row[data-section="issues"] { --ddf-section-tone:var(--dsw-alias-state-warning-primary,#b7791f); }
+.ddf-execution-label h3 { display:flex; align-items:center; gap:9px; margin:0; font-size:14px; font-weight:600; line-height:1.6; }
+.ddf-execution-label h3::before { content:""; flex:none; width:6px; height:6px; border-radius:50%; background:var(--ddf-section-tone); box-shadow:0 0 0 4px color-mix(in srgb,var(--ddf-section-tone) 14%,transparent); }
+.ddf-coordinator .ddf-execution-status { margin:7px 0 0 15px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
+.ddf-execution-content { min-width:0; }
+.ddf-execution-metrics { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1.15fr) minmax(0,.7fr); margin:0; }
+.ddf-execution-metrics>div { min-width:0; padding:0 16px; border-left:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-execution-metrics>div:first-child { padding-left:0; border-left:0; }
+.ddf-execution-metrics>div:last-child { padding-right:0; }
+.ddf-execution-metrics dt { color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
+.ddf-execution-metrics dd { margin:9px 0 0; font-size:16px; font-weight:600; line-height:1.5; overflow-wrap:anywhere; }
+.ddf-execution-metrics .ddf-execution-number { color:var(--ddf-dock-tone); font-size:30px; font-variant-numeric:tabular-nums; line-height:1.2; }
+.ddf-execution-number small { margin-left:4px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; font-weight:400; }
+.ddf-execution-target { display:block; margin-top:5px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; font-weight:400; }
+.ddf-coordinator .ddf-execution-recent { margin:12px 0 0; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
+.ddf-coordinator .ddf-decision { margin:0; padding:0; border:0; }
+.ddf-coordinator .ddf-decision p { margin:0 0 8px; }
+.ddf-coordinator .ddf-decision p:last-child { margin-bottom:0; }
+.ddf-coordinator .ddf-decision-choice { color:var(--dsw-alias-state-success-primary,#369b83); }
+.ddf-coordinator .ddf-chat-live-meta { font-size:12px; }
+.ddf-coordinator .ddf-source { margin:0; }
+@container ddf-progress (max-width:560px) {
+ .ddf-execution-row { grid-template-columns:minmax(0,1fr); gap:12px; padding:16px 0; }
+ .ddf-execution-label { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; }
+ .ddf-coordinator .ddf-execution-status { margin:0; }
+ .ddf-execution-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
+ .ddf-execution-metrics>div { padding:0 10px; }
+ .ddf-execution-metrics dd { font-size:14px; }
+ .ddf-execution-metrics .ddf-execution-number { font-size:26px; }
+}
 `
 
     function completionLabel(t, receipt) {
@@ -1342,7 +1379,7 @@ window.__ModuleLoader__.load({
     }
 
     function DecisionDetails({ t, decision, current = true, preparing = false, resolution, pending = [] }) {
-      if (!decision) return h('div', null, h(AssociationDetails, { t, resolution, pending }), h('p', { className: 'ddf-chat-live-meta' }, t(preparing ? 'decision.pending' : 'decision.unrecorded')))
+      if (!decision) return h('div', { className: 'ddf-decision' }, h(AssociationDetails, { t, resolution, pending }), h('p', { className: 'ddf-chat-live-meta' }, t(preparing ? 'decision.pending' : 'decision.unrecorded')))
       return h('div', { className: 'ddf-decision' },
         h(AssociationDetails, { t, resolution, pending }),
         h('p', { className: 'ddf-decision-choice' }, t('decision.title') + '：' + t('decision.' + decision.mode)),
@@ -1356,22 +1393,36 @@ window.__ModuleLoader__.load({
       const execution = state?.execution
       if (!execution || !execution.running && !execution.unresolvedChanges?.length) return null
       const failures = execution.unresolvedChanges ?? [], activity = execution.activity
-      const current = activity?.kind === 'tool' ? liveToolLabel(t, activity.tool) + (activity.target ? ' · ' + activity.target : '')
+      const current = activity?.kind === 'tool' ? liveToolLabel(t, activity.tool)
         : activity?.kind ? t('supervision.activity.' + activity.kind) : t('live.unknown')
-      return h('section', { className: 'ddf-chat-notice ddf-chat-live', 'data-kind': failures.length ? execution.running ? 'supervision' : 'service' : 'progress', role: failures.length && !execution.running ? 'alert' : 'status' },
-        h('style', null, CHAT_NOTICE_STYLES), h('strong', null, t(failures.length ? execution.running ? 'direct.repairing' : 'direct.incomplete' : state.decision?.mode === 'direct' ? 'direct.title' : 'direct.preparing')),
+      const calls = Number.isFinite(execution.toolCalls) ? execution.toolCalls : null
+      return h('section', { className: 'ddf-chat-notice ddf-chat-live ddf-coordinator', 'data-kind': failures.length ? execution.running ? 'supervision' : 'service' : 'progress', role: failures.length && !execution.running ? 'alert' : 'status' },
+        h('style', null, CHAT_NOTICE_STYLES),
         error ? h('p', null, t('direct.stale')) : null,
-        execution.running ? h('p', null, t('live.current') + '：' + current) : null,
-        h('div', { className: 'ddf-coordinator-meta' },
-          execution.model?.model ? h('p', null, t('role.coordinator') + '：' + execution.model.model) : null,
-          h('p', { className: 'ddf-chat-live-meta' }, fill(t('direct.calls'), { count: execution.toolCalls }))),
-        h(DecisionDetails, { t, decision: state.decision, current: state.decisionCurrent !== false, preparing: execution.running, resolution: state.messageResolution, pending: state.pendingMessages }),
-        state.decision?.mode === 'delegate' && state.decisionCurrent !== false ? h('p', null, t('decision.notStarted'))
-          : state.route?.route && state.route.route !== 'direct' ? h('p', null, t('direct.advice')) : null,
-        execution.lastResult ? h('p', { className: 'ddf-chat-live-meta' }, t('live.recent') + '：' + liveToolLabel(t, execution.lastResult.tool),
-          execution.lastResult.target ? ' · ' + execution.lastResult.target : '', execution.lastResult.failed ? ' · ' + t('live.toolFailed') : '') : null,
-        ...failures.map(item => h('p', { key: item.callId }, (item.target || item.tool) + '：' + item.reason)),
-        state.source?.text ? h('p', { className: 'ddf-source' }, h('strong', null, t('view.request') + '：'), state.source.text) : null)
+        h('div', { className: 'ddf-execution-row', 'data-section': 'current' },
+          h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.execution')),
+            h('p', { className: 'ddf-execution-status' }, t(failures.length ? execution.running ? 'direct.repairing' : 'direct.incomplete' : state.decision?.mode === 'direct' ? 'direct.title' : 'direct.preparing'))),
+          h('div', { className: 'ddf-execution-content' },
+            h('dl', { className: 'ddf-execution-metrics' },
+              h('div', null, h('dt', null, t('dock.activity')), h('dd', { 'data-metric': 'activity' }, execution.running ? current : t('direct.incomplete'),
+                execution.running && activity?.target ? h('span', { className: 'ddf-execution-target' }, activity.target) : null)),
+              h('div', null, h('dt', null, t('role.coordinator')), h('dd', { 'data-metric': 'model' }, execution.model?.model || t('dock.unknownModel'))),
+              h('div', null, h('dt', null, t('dock.toolCalls')), h('dd', { className: 'ddf-execution-number', 'data-metric': 'calls',
+                title: calls === null ? undefined : fill(t('direct.calls'), { count: calls }) }, calls ?? '—', calls === null ? null : h('small', null, t('dock.callsUnit'))))),
+            execution.lastResult ? h('p', { className: 'ddf-execution-recent' }, t('live.recent') + '：' + liveToolLabel(t, execution.lastResult.tool),
+              execution.lastResult.target ? ' · ' + execution.lastResult.target : '', execution.lastResult.failed ? ' · ' + t('live.toolFailed') : '') : null)),
+        h('div', { className: 'ddf-execution-row', 'data-section': 'decision' },
+          h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.decision'))),
+          h('div', { className: 'ddf-execution-content' },
+            h(DecisionDetails, { t, decision: state.decision, current: state.decisionCurrent !== false, preparing: execution.running, resolution: state.messageResolution, pending: state.pendingMessages }),
+            state.decision?.mode === 'delegate' && state.decisionCurrent !== false ? h('p', { className: 'ddf-chat-live-meta' }, t('decision.notStarted'))
+              : state.route?.route && state.route.route !== 'direct' ? h('p', { className: 'ddf-chat-live-meta' }, t('direct.advice')) : null)),
+        failures.length ? h('div', { className: 'ddf-execution-row', 'data-section': 'issues' },
+          h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.issues'))),
+          h('div', { className: 'ddf-execution-content' }, ...failures.map(item => h('p', { key: item.callId }, (item.target || item.tool) + '：' + item.reason)))) : null,
+        state.source?.text ? h('div', { className: 'ddf-execution-row', 'data-section': 'request' },
+          h('div', { className: 'ddf-execution-label' }, h('h3', null, t('view.request'))),
+          h('div', { className: 'ddf-execution-content' }, h('p', { className: 'ddf-source' }, state.source.text))) : null)
     }
 
     function CoordinationIssueNotice({ t, plan }) {

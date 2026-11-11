@@ -47,6 +47,39 @@ test('managed chat keeps an explicit incomplete label through errors and accepta
   } finally { dock.close(); action.close(); f.close() }
 })
 
+test('coordinator overview groups observed activity, model and tool calls separately from its decision and request', async () => {
+  const row = { sessionId: 'session-current', source: { messageId: 'request', text: '核对接口文档并准备调试工具' },
+    decision: { mode: 'direct', reason: '先核对接口与现有代码，再确定实施范围。', model: { model: 'previous/coordinator' } },
+    messageResolution: { relation: 'new' }, execution: { running: true, toolCalls: 7, model: { model: 'current/coordinator' },
+      activity: { kind: 'tool', tool: 'grep', target: 'docs/interface.md' },
+      lastResult: { tool: 'read', target: 'src/client.js', failed: false }, unresolvedChanges: [] } }
+  const body = { ok: true, sessionId: row.sessionId, plans: [], sessions: [row] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock(row.sessionId)
+  try {
+    await dock.flush()
+    assert.deepEqual(dock.nodes('h3').map(node => node.children.join('')), ['当前执行', '执行判断', '本次需求'])
+    const metrics = dock.nodes('dd'), metric = name => metrics.find(node => node.props['data-metric'] === name)
+    assert.match(JSON.stringify(metric('activity')), /检索内容.*grep/)
+    assert.match(JSON.stringify(metric('model')), /current\/coordinator/)
+    assert.doesNotMatch(JSON.stringify(metric('model')), /previous\/coordinator/)
+    assert.equal(metric('calls')?.children[0], 7)
+    assert.match(dock.text(), /docs\/interface.md/)
+    assert.match(dock.text(), /src\/client.js/)
+    assert.ok(dock.text().includes(row.decision.reason))
+    assert.ok(dock.text().includes(row.source.text))
+    assert.doesNotMatch(dock.text(), /估算价值|缓存命中率|tok\/s|隐藏提示/)
+    row.execution.toolCalls = 0
+    delete row.execution.model
+    await dock.tick()
+    assert.equal(dock.nodes('dd').find(node => node.props['data-metric'] === 'calls')?.children[0], 0)
+    assert.match(JSON.stringify(dock.nodes('dd').find(node => node.props['data-metric'] === 'model')), /未记录/)
+    delete row.execution.toolCalls
+    await dock.tick()
+    assert.equal(dock.nodes('dd').find(node => node.props['data-metric'] === 'calls')?.children[0], '—')
+  } finally { dock.close(); f.close() }
+})
+
 test('input progress defaults to one short summary and keeps raw diagnostics inside a closed disclosure', async () => {
   const target = 'D:/demo/articles/agentrix-multi-agent-blog.md'
   const execution = { running: true, startedAt: 100, toolCalls: 2, activity: { kind: 'waiting_model_response' },
