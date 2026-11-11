@@ -18,6 +18,136 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('managed report schemas expose only fields belonging to the current child role', async () => {
+  const f = await fixture({ scopedTools: true })
+  await f.plan([card('a', { complexity: 'complex' })]); await f.execute('delegation_run')
+  const worker = f.definition('delegation_report', 0)
+  assert.equal(worker.parameters.properties.specVerdict, undefined)
+  assert.equal(worker.parameters.properties.qualityVerdict, undefined)
+  assert.equal(worker.parameters.properties.issues, undefined)
+  assert.ok(worker.parameters.properties.concerns)
+  await assert.rejects(f.report(0, { status: 'DONE', summary: '冒充审查', report: '不应通过', specVerdict: 'pass' }), /执行者不能/)
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const reviewer = f.definition('delegation_report', 1)
+  assert.ok(reviewer.parameters.properties.specVerdict)
+  assert.ok(reviewer.parameters.properties.qualityVerdict)
+  assert.ok(reviewer.parameters.properties.issues)
+  await assert.rejects(f.report(1, { status: 'DONE', summary: '缺审查结论', report: '不应通过' }), /独立审查必须/)
+  await f.finishAudit(1, { specVerdict: 'pass', qualityVerdict: 'pass', issues: [] })
+  assert.equal(f.snapshot().tasks[0].audit.status, 'completed')
+})
+
+test('acceptance uses supplied criterion IDs and current-task evidence references across reload', async () => {
+  const f = await fixture()
+  await f.plan([card('a', { criteria: ['结果为 31', '数量为 3'] }), card('b')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  await f.complete(1, { stopReason: 'completed', output: [] })
+  const first = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  assert.match(first.ref ?? '', /^E[0-9a-f]{12}$/)
+  assert.deepEqual(first.criteria, [{ id: 'C1', criterion: 0, text: '结果为 31' }, { id: 'C2', criterion: 1, text: '数量为 3' }])
+  const foreign = await f.execute('delegation_verify', { taskId: 'b', checkIndex: 0 })
+  const findings = ref => ['C1', 'C2'].map(criterionId => ({ criterionId, finding: '已实际核对', evidence: [ref] }))
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: findings(foreign.ref) }), /本次主控验证|当前可用/)
+  const current = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  assert.notEqual(current.ref, first.ref)
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: findings(first.ref) }), /本次主控验证|当前可用/)
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [
+    { criterionId: 'C9', finding: '错误编号', evidence: [current.ref] }, findings(current.ref)[1],
+  ] }), /C1.*C2/)
+  await f.reload()
+  const compact = JSON.parse(f.render('delegation_status', {}, await f.execute('delegation_status')))
+  assert.deepEqual(compact.plan.tasks[0].criteria, first.criteria)
+  assert.equal(compact.plan.tasks[0].checks[0].ref, current.ref)
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: findings(current.ref) })
+  assert.deepEqual(f.snapshot().tasks[0].review.findings.map(item => item.criterion), [0, 1])
+  assert.ok(f.snapshot().tasks[0].review.findings.every(item => item.evidence[0] === current.callId))
+  await f.execute('delegation_review', { taskId: 'b', verdict: 'accept', findings: [{ criterion: 0, finding: '旧格式继续有效', evidence: [foreign.callId] }] })
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+})
+
+test('event waiting returns the first actionable report while other workers keep running', async () => {
+  const f = await fixture()
+  await f.plan([card('a'), card('b')]); const started = await f.execute('delegation_run')
+  assert.equal(started.nextAction.type, 'wait')
+  let returned = false
+  const waiting = f.execute('delegation_wait').then(value => { returned = true; return value })
+  await tick(); assert.equal(returned, false)
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const result = await waiting
+  assert.equal(result.nextAction.type, 'verify')
+  assert.deepEqual(result.nextAction.taskIds, ['a'])
+  assert.equal(f.snapshot().tasks[1].status, 'running')
+  assert.equal(f.pending[1].receipt.disposeCount, undefined)
+  assert.equal(f.snapshot().recovery.used, 0)
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  const accepted = await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '已核对', evidence: [proof.ref] }] })
+  assert.equal(accepted.nextAction.type, 'wait')
+  const incoming = f.execute('delegation_wait')
+  await tick()
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { inserted: [{ id: 'supplement-wait', source: { kind: 'user' }, content: [{ type: 'text', text: '补充检查标准' }] }] } })
+  const updated = await incoming
+  assert.equal(updated.nextAction.type, 'resolve_message')
+  assert.equal(f.calls.length, 2)
+  assert.equal(f.snapshot().tasks[1].status, 'running')
+  await f.execute('delegation_cancel', { reason: '隔离等待测试结束，明确取消剩余任务' })
+})
+
+test('acceptance returns automatic dispatch guidance instead of inviting a duplicate run', async () => {
+  const f = await fixture()
+  await f.plan([card('a'), card('b', { dependsOn: ['a'] })]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  const value = await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '已核对', evidence: [proof.ref] }] })
+  assert.equal(value.nextAction.type, 'wait')
+  assert.match(value.nextAction.message, /自动.*启动|自动.*推进/)
+  await waitFor(() => f.calls.length === 2)
+  assert.equal(f.snapshot().tasks[1].attempts, 1)
+})
+
+test('explicit cancellation ends an event wait without reopening or double releasing the worker', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const waiting = f.execute('delegation_wait')
+  await tick()
+  await f.execute('delegation_cancel', { reason: '用户明确取消隔离测试' })
+  const result = await waiting
+  assert.equal(result.nextAction.type, 'finished')
+  assert.equal(f.snapshot().completion.outcome, 'cancelled')
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+  assert.equal(f.snapshot().recovery.used, 0)
+})
+
+test('reference-based rework still requires new verification and explicit issue resolutions', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const old = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'rework', issues: [
+    { criterionId: 'C1', severity: 'important', finding: '实际产物需要修正', evidence: [old.ref] },
+  ] })
+  await f.complete(1, { stopReason: 'completed', output: [] })
+  const fresh = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  const findings = [{ criterionId: 'C1', finding: '返工产物已实际核对', evidence: [fresh.ref] }]
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings }), /未解决/)
+  const id = f.snapshot().tasks[0].issues.find(issue => issue.status === 'open').id
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings,
+    resolutions: [{ id, status: 'ADDRESSED', evidence: [old.ref] }] }), /本次主控验证/)
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings,
+    resolutions: [{ id, status: 'ADDRESSED', evidence: [fresh.ref] }] })
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+  assert.equal(f.calls.length, 2)
+})
+
+test('failed verification asks for a review of the failure rather than repeated verification', async () => {
+  const f = await fixture(); await f.plan([card('a', { checks: [{ tool: 'pwsh', arguments: { command: 'node verify.mjs' } }] })]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] }); f.setExit(1)
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  assert.equal(proof.passed, false)
+  assert.equal(proof.nextAction.type, 'review')
+  assert.match(proof.nextAction.message, /失败/)
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '不能冒充通过', evidence: [proof.ref] }] }), /主控验证尚未全部通过/)
+  assert.equal(f.snapshot().completion, null)
+})
+
 test('normal results advance three dependent tasks without spending completion recovery', async () => {
   const f = await fixture({ autoConclude: true })
   await f.plan([card('a'), card('b', { dependsOn: ['a'] }), card('c', { dependsOn: ['b'] })])
@@ -1135,13 +1265,22 @@ test('resolved model snapshots stay fixed and actual requests are distinct from 
 async function fixture(options = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'dsh-orchestrator-'))
   cleanup.push(() => rm(directory, { recursive: true, force: true }))
-  const calls = [], pending = [], tools = new Map(), events = new Map(), children = new Map(), conclusions = []
+  const calls = [], pending = [], tools = new Map(), events = new Map(), children = new Map(), conclusions = [], scopedTools = new Map()
   const parent = { id: 'parent', options: { provider: 'local', model: 'parent' }, session: { header: {}, requestHeader: () => undefined },
     status: 'running', injected: [], inject(message) { this.injected.push(message) }, steer(message) { this.injected.push(message) } }
   let engine, count = 0, exitCode = 0
+  const attachScope = agent => {
+    if (!options.scopedTools) return
+    const definitions = new Map(); scopedTools.set(agent.id, definitions)
+    agent.ctx = { tools: {
+      register(definition) { definitions.set(definition.name, definition); return () => { if (definitions.get(definition.name) === definition) definitions.delete(definition.name) } },
+      restrict() { return () => {} },
+    } }
+  }
+  attachScope(parent)
   const config = { enabled: true, ...DEFAULT_OPTIONS, models: { worker: { provider: 'local', model: 'cheap' }, reviewer: { provider: 'local', model: 'deep' } }, ...options }
   const ctx = {
-    get(name) { return { subagents: ctx.subagents, llm: ctx.llm, agents: { get: id => id === parent.id ? parent : children.get(id) } }[name] },
+    get(name) { return { subagents: ctx.subagents, llm: ctx.llm, agents: { get: id => id === parent.id ? parent : children.get(id), list: () => [parent, ...children.values()] } }[name] },
     on(name, fn) { events.set(name, fn); return () => events.delete(name) },
     llm: { async resolveCallConfig(route) {
       if (route.provider === 'retired') throw Object.assign(new Error('no adapter registered for provider "retired"'), { code: 'NO_ADAPTER' })
@@ -1156,6 +1295,8 @@ async function fixture(options = {}) {
         const deferred = Promise.withResolvers()
         children.set(spec.childId, { id: spec.childId, session: { header: { origin: 'subagent', parentSession: parent.id } },
           injected: [], inject(message) { this.injected.push(message) } })
+        attachScope(children.get(spec.childId))
+        await events.get('agent/created')?.({ agent: children.get(spec.childId) })
         const receipt = { childId: spec.childId ?? `child-${calls.length}`, result: deferred.promise, async dispose() { receipt.disposed = true; receipt.disposeCount = (receipt.disposeCount ?? 0) + 1; deferred.resolve({ stopReason: 'aborted', output: [] }) } }
         pending.push({ ...deferred, receipt })
         try { options.onStart?.(spec, ctx) } catch (error) { deferred.reject(error) }
@@ -1166,6 +1307,7 @@ async function fixture(options = {}) {
     },
     tools: {
       get: () => ({}),
+      view: () => ({ restrictableNames: [...tools.keys()] }),
       register(def) { tools.set(def.name, def); return () => tools.delete(def.name) },
       async execute(exec) {
         assert.equal(engine.allowsVerification(exec), true)
@@ -1184,7 +1326,7 @@ async function fixture(options = {}) {
     const exec = { name, arguments: args, agent, callId: `outer-${++count}`, token: {}, signal: options.signal ?? new AbortController().signal,
       concludeTurn() { concluded = true; conclusions.push(agent.id) } }
     try {
-      const value = await tools.get(name).execute(args, exec)
+      const value = await (scopedTools.get(agent.id)?.get(name) ?? tools.get(name)).execute(args, exec)
       await options.beforeResult?.(exec, value)
       const isError = name === 'delegation_report' && options.reportResultError || name === 'delegation_review' && options.reviewResultError
       await events.get('tools/result')?.(exec, { isError: Boolean(isError), value })
@@ -1200,6 +1342,7 @@ async function fixture(options = {}) {
   const plan = tasks => execute('delegation_plan', { goal: '完成任务并由主控验收', decisionReason: '执行者核对隔离文件，主控保留独立上下文验证和验收。', tasks })
   const snapshot = () => engine.snapshot()[0]
   return { get engine() { return engine }, ctx, calls, pending, config, execute, plan, snapshot, directory, file, parent, conclusions,
+    definition: (name, index) => scopedTools.get(index === undefined ? parent.id : pending[index].receipt.childId)?.get(name) ?? tools.get(name),
     render: (name, args, value) => tools.get(name).output.render(args, value).map(block => block.text).join('\n'),
     get children() { return [...children.values()] },
     endTurn: (index, signal = new AbortController().signal) => events.get('agent/turn-stopping')?.({ agent: index === undefined ? parent : children.get(pending[index].receipt.childId), signal }),

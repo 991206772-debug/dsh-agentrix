@@ -685,7 +685,7 @@ window.__ModuleLoader__.load({
       'direct.backendMissing': 'Agentrix 插件服务不可用', 'direct.backendHint': '请检查插件是否启用；进度恢复前无法确认当前执行情况。',
       'direct.stale': '进度暂时无法更新，以下为最近记录',
       'coordination.incomplete': '尚未完成', 'coordination.coordinator': '主控操作未执行', 'coordination.worker': '协作操作未执行',
-      'coordination.active': '协作执行策略已生效（v2）', 'coordination.pending': '协作执行策略等待加载',
+      'coordination.active': '协作执行策略已生效（v3）', 'coordination.pending': '协作执行策略等待加载',
     })
     Object.assign(en, {
       'direct.title': 'Coordinator executing directly', 'direct.incomplete': 'File changes remain incomplete',
@@ -705,7 +705,7 @@ window.__ModuleLoader__.load({
       'direct.backendMissing': 'Agentrix plugin service unavailable', 'direct.backendHint': 'Check that the plugin is enabled. Current execution cannot be confirmed until progress is available.',
       'direct.stale': 'Progress could not be refreshed; the last record is shown',
       'coordination.incomplete': 'Not completed', 'coordination.coordinator': 'Coordinator operation did not succeed', 'coordination.worker': 'Coordination operation did not succeed',
-      'coordination.active': 'Coordination policy active (v2)', 'coordination.pending': 'Coordination policy awaiting reload',
+      'coordination.active': 'Coordination policy active (v3)', 'coordination.pending': 'Coordination policy awaiting reload',
     })
 
     const CONFIG_NUMBERS = ['threshold', 'maxParallel', 'maxAttempts', 'maxActivations', 'taskTimeoutMinutes']
@@ -2300,7 +2300,7 @@ window.__ModuleLoader__.load({
           notice,
           state?.storageError ? h('p', { className: 'ddf-board-inline-notice', 'data-kind': 'error', role: 'alert' }, state.storageError) : null,
           state ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-policy': state.runtimePolicyVersion ?? 'unknown' }, t(state.runtimePolicyVersion >= 2 ? 'runtime.active' : 'runtime.pending')) : null,
-          state ? h('p', { className: 'ddf-board-inline-notice', 'data-coordination-policy': state.coordinationPolicyVersion ?? 'unknown' }, t(state.coordinationPolicyVersion >= 2 ? 'coordination.active' : 'coordination.pending')) : null,
+          state ? h('p', { className: 'ddf-board-inline-notice', 'data-coordination-policy': state.coordinationPolicyVersion ?? 'unknown' }, t(state.coordinationPolicyVersion >= 3 ? 'coordination.active' : 'coordination.pending')) : null,
           h(UsageDetails, { t, usage: state?.requestUsage?.find(entry => entry.sessionId === sessionId && (!request?.messageId || entry.requestId === request.messageId)) ?? plan?.usage }),
           plan || request?.text ? h('section', { className: 'ddf-board-hero' },
             h('div', null, h('p', { className: 'ddf-board-hero-label' }, t(request?.messageId ? 'view.boardRequest' : 'view.recordedRequest')),

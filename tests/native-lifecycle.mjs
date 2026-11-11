@@ -25,8 +25,9 @@ const truncateOutput = process.argv.includes('--truncate-output')
 const continuous = process.argv.includes('--continuous')
 const benchmark = process.argv.includes('--benchmark')
 const baseline = process.argv.includes('--benchmark-baseline')
-const supplement = process.argv.includes('--supplement') || process.argv.includes('--supplement-cancel')
-const cancelSupplement = process.argv.includes('--supplement-cancel')
+const explicitWait = process.argv.includes('--wait-supplement') || process.argv.includes('--wait-cancel')
+const supplement = explicitWait || process.argv.includes('--supplement') || process.argv.includes('--supplement-cancel')
+const cancelSupplement = process.argv.includes('--supplement-cancel') || process.argv.includes('--wait-cancel')
 const nativeDefault = process.argv.includes('--native-default')
 const switchCoordinator = process.argv.includes('--switch-coordinator')
 const coordinatorQuota = process.argv.includes('--coordinator-quota')
@@ -36,8 +37,9 @@ const directRecovery = process.argv.includes('--direct-recovery') || directUnres
 const decisionRecovery = process.argv.includes('--decision-recovery')
 const longVerification = process.argv.includes('--long-verification')
 const coordinationConflict = process.argv.includes('--coordination-conflict')
-const roleTools = process.argv.includes('--role-tools')
-const dependentStages = process.argv.includes('--dependent-stages')
+const ergonomics = process.argv.includes('--ergonomics')
+const roleTools = process.argv.includes('--role-tools') || ergonomics
+const dependentStages = process.argv.includes('--dependent-stages') || ergonomics
 const activeNewRequest = process.argv.includes('--active-new-request')
 const earlyEvidence = process.argv.includes('--early-evidence')
 let followingRequest = false
@@ -87,6 +89,10 @@ class ScriptedAdapter extends LlmAdapter {
       } else {
         for (const name of ['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_status', 'delegation_verify', 'delegation_review', 'delegation_cancel']) assert.ok(!names.includes(name), 'managed child must not see coordinator-only tool ' + name)
         assert.ok(names.includes('delegation_report'))
+        if (ergonomics) {
+          const properties = request.tools.find(tool => tool.name === 'delegation_report').parameters.properties
+          for (const field of ['specVerdict', 'qualityVerdict', 'issues', 'resolutions']) assert.equal(Boolean(properties[field]), role === 'reviewer', 'report fields follow the actual child role')
+        }
         if (role === 'reviewer') assert.ok(names.every(name => ['read', 'grep', 'glob', 'delegation_checkpoint', 'delegation_report'].includes(name)), 'reviewer sees only read and reporting tools')
       }
     }
@@ -145,12 +151,17 @@ class ScriptedAdapter extends LlmAdapter {
         const current = plan?.tasks.find(task => task.status !== 'accepted')
         if (!plan) block = tool('delegation_plan', { goal: '依次验证三个阶段', decisionReason: '每个阶段由执行者检查，主控验证验收后再开始下一阶段。', tasks: ['a', 'b', 'c'].map((id, index, ids) => ({
           id, title: '检查阶段 ' + id, instructions: '读取隔离文件并提交报告', scope: '隔离目录', outputs: [deliverablePath], writes: [],
-          dependsOn: index ? [ids[index - 1]] : [], complexity: 'routine', criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: deliverablePath } }],
+          dependsOn: index ? [ids[index - 1]] : [], complexity: ergonomics && index === 2 ? 'complex' : 'routine', criteria: ergonomics ? ['文件包含 verified', '读取证据可定位'] : ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: deliverablePath } }],
         })) })
         else if (phase === 1) block = tool('delegation_run', {})
-        else if (current?.status === 'review') block = !current.checks[0].result
+        else if (current?.status === 'review' && (!current.checks[0].result || !current.audit || current.audit.status === 'completed')) block = !current.checks[0].result
           ? tool('delegation_verify', { taskId: current.id, checkIndex: 0 })
-          : tool('delegation_review', { taskId: current.id, verdict: 'accept', findings: [{ criterion: 0, finding: '已实际读取并核对', evidence: [current.checks[0].result.callId] }] })
+          : tool('delegation_review', { taskId: current.id, verdict: 'accept', findings: ergonomics ? current.criteria.map((_text, index) => ({ criterionId: 'C' + (index + 1), finding: '已实际读取并核对', evidence: [current.checks[0].result.ref] })) : [{ criterion: 0, finding: '已实际读取并核对', evidence: [current.checks[0].result.callId] }] })
+        else if (ergonomics) {
+          const names = request.tools.map(tool => tool.name)
+          if (current?.status === 'running') assert.ok(!names.includes('delegation_verify') && !names.includes('delegation_review'), 'unavailable acceptance tools are not advertised while waiting')
+          block = tool('delegation_wait', {})
+        }
         else block = { type: 'text', text: '等待当前阶段的原执行者返回报告。' }
       }
       else if (activeNewRequest && phase >= 3) {
@@ -180,6 +191,7 @@ class ScriptedAdapter extends LlmAdapter {
         taskId: 'a', action: 'steer', message: '将交付人员的操作引导纳入任务', inputIds: plan.inputs.filter(input => ['queued', 'received'].includes(input.status)).map(input => input.id),
         additionalCriteria: ['提供面向交付操作员的页面引导'],
       })
+      else if (explicitWait && phase === 2) block = tool('delegation_wait', {})
       else if (phase === 2 || truncateOutput && phase < 5) block = { type: 'text', text: '保留当前输出，继续原计划。' }
       else if (coordinatorQuota) throw new LlmError('429: exceed quota limit', 'QUOTA')
       else if (task.status === 'review' && !task.checks[0].result) block = tool('delegation_verify', { taskId: 'a', checkIndex: 0 })
@@ -207,7 +219,8 @@ class ScriptedAdapter extends LlmAdapter {
     } else if (continuous && request.model === 'low-worker' && phase < 85) block = tool('read', { path: path.join(directory, 'result.txt') })
     else if (continuous && request.model === 'low-worker') block = tool('delegation_report', { status: 'DONE', summary: '隔离产物已检查', report: workerReport })
     else if (truncateOutput && phase < 3) block = { type: 'text', text: '本段输出被模型截断，继续检查已有产物。' }
-    else if (role === 'reviewer' && phase === (truncateOutput ? 3 : 0)) block = tool('delegation_report', { status: 'DONE', summary: '需求与质量均通过', report: '已核对隔离产物与任务要求，等待主控实际验证。', specVerdict: 'pass', qualityVerdict: 'pass', issues: [] })
+    else if (role === 'reviewer' && ergonomics && phase === 0) block = tool('read', { path: fixturePath })
+    else if (role === 'reviewer' && phase === (truncateOutput ? 3 : ergonomics ? 1 : 0)) block = tool('delegation_report', { status: 'DONE', summary: '需求与质量均通过', report: '已核对隔离产物与任务要求，等待主控实际验证。', specVerdict: 'pass', qualityVerdict: 'pass', issues: [] })
     else if (request.model === 'low-worker' && phase === 0) block = { type: 'text', text: '工作已完成，但这次故意漏交正式报告。' }
     else if (phase === (truncateOutput ? 3 : 1)) block = tool('delegation_report', { status: 'DONE', summary: '隔离产物已检查', report: workerReport })
     else throw new Error('Unexpected child request after report')
@@ -293,6 +306,9 @@ try {
   }
   await writeFile(fixturePath, 'verified')
   ctx.on('agent/turn-stopping', ({ agent }) => { if (agent.id === 'root') parentWaiting = true }, { global: true })
+  if (ergonomics || explicitWait) ctx.on('session/event', (session, event) => {
+    if (session.id === 'root' && event.type === 'tool/call' && event.data.name === 'delegation_wait') parentWaiting = true
+  }, { global: true })
   apply(ctx)
   await until(() => routes.has('/dsh-delegation-first/api/state'), 'plugin routes')
   await state()
@@ -327,7 +343,7 @@ try {
     await until(() => parentWaiting || events.some(event => event.id === 'root' && event.type === 'turn/end'), 'coordinator claimed delivery while the worker is still running')
     assert.ok(parentWaiting, JSON.stringify({ requests, events }))
     const running = (await state()).plans[0]
-    assert.equal((await state()).coordinationPolicyVersion, 2)
+    assert.equal((await state()).coordinationPolicyVersion, 3)
     assert.equal(running.status, 'running')
     assert.equal(running.completion, null)
     assert.equal(running.tasks[0].execution, null)
@@ -405,7 +421,7 @@ try {
   } else if (dependentStages || activeNewRequest) {
     assert.equal(plan.completion.outcome, 'completed')
     assert.equal(plan.recovery.used, 0)
-    assert.equal(plan.activationBudget.used, dependentStages ? 3 : 2)
+    assert.equal(plan.activationBudget.used, dependentStages ? ergonomics ? 4 : 3 : 2)
     for (const task of plan.tasks.flatMap(task => task.audit ? [task, task.audit] : [task])) {
       assert.equal(task.release.status, 'released')
       assert.equal(releases.get(task.childId), 1)
@@ -413,7 +429,12 @@ try {
     }
     if (dependentStages) {
       assert.ok(plan.tasks.every(task => task.status === 'accepted'))
-      assert.equal(requests.filter(request => request.role === 'coordinator').length, 11)
+      if (ergonomics) {
+        assert.ok(requests.filter(request => request.role === 'coordinator').length <= 13, 'no status polling requests while the same workers run')
+        assert.equal(plan.tasks[2].audit.status, 'completed')
+        assert.equal(plan.tasks[2].audit.modelRoute.actual.model, 'coordinator')
+        console.log('PASS: role-specific native schemas, three event waits, criterion/evidence references, independent audit and exact-once receipt/release')
+      } else assert.equal(requests.filter(request => request.role === 'coordinator').length, 11)
       assert.equal(requests.filter(request => request.role === 'worker').length, 6)
     }
     console.log('PASS: native ' + (dependentStages ? 'three dependency stages wait, report, verify and accept without completion recovery or replacement workers' : 'new direct demand writes and verifies an unrelated file while the original child continues; overlapping write is denied; the original plan later receives actual acceptance'))

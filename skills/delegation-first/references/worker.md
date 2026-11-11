@@ -29,6 +29,8 @@
 
 结束前必须调用 `delegation_report`，工具会绑定当前子会话、任务和执行次数，并保存完整报告。不得由主控代报，也不能覆盖旧任务的报告。
 
+执行者只填写执行结果字段：status、summary、report，以及按实际情况提供 reason、concerns。specVerdict、qualityVerdict、issues、resolutions 属于独立审查者，执行者的工具参数不会展示这些字段，不要自行补填。
+
 - `DONE`：完成，等待主控验证；不表示已经验收。
 - `DONE_WITH_CONCERNS`：完成但有疑点，必须列 `concerns`，由主控说明如何处理。
 - `NEEDS_CONTEXT`：缺少资料，必须用 `reason` 指出需要什么。

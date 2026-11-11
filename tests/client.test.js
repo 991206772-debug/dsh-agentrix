@@ -6,14 +6,14 @@ import vm from 'node:vm'
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
 test('acceptance distinguishes the current coordination policy from a host still running the previous policy', async () => {
-  for (const version of [1, 2]) {
+  for (const version of [2, 3]) {
     const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
       sessionId: 'session-current', plans: [], sessions: [], coordinationPolicyVersion: version }) }) })
     const view = f.mountView('session-current')
     try {
       await view.flush()
-      assert.match(view.text(), version === 2 ? /协作执行策略已生效（v2）/ : /协作执行策略等待加载/)
-      if (version === 1) assert.doesNotMatch(view.text(), /协作执行策略已生效/)
+      assert.match(view.text(), version === 3 ? /协作执行策略已生效（v3）/ : /协作执行策略等待加载/)
+      if (version === 2) assert.doesNotMatch(view.text(), /协作执行策略已生效/)
     } finally { view.close(); f.close() }
   }
 })

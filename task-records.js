@@ -127,7 +127,7 @@ export function taskSummary(plan) {
       lines.push('', '- 工具：' + check.tool, json(check.arguments))
       const result = check.result
       lines.push(result ? '- 结果：' + (result.passed ? '通过' : '失败或结果不明确') +
-        '；证据：' + result.callId + (result.exitCode !== undefined ? '；退出码：' + result.exitCode : '') : '- 结果：尚未验证')
+        '；证据：' + result.callId + (result.ref ? '；引用编号：' + result.ref : '') + (result.exitCode !== undefined ? '；退出码：' + result.exitCode : '') : '- 结果：尚未验证')
       if (result) lines.push('', result.summary || '（无文本输出）')
     }
     lines.push('', '### 主 Agent 验收结论', '', task.review

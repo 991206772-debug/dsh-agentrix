@@ -2,6 +2,8 @@
 
 本页说明主控与子代理使用的工具、验收规则、记录和接口。安装与模型配置见 [README](../README.md)。
 
+工具结果的 `nextAction` 指明下一步。等待时简短告知用户，再调用 `delegation_wait` 或结束回复等待通知；验收后的依赖任务自动启动，无需重复 `run`。主控验证返回 C1、C2 等标准对照与短证据 `ref`；验收时逐条提交 `criterionId`、`finding`、`evidence:[ref]`，程序校验其归属和有效性，不代写通过结论。旧数字 `criterion` 和原始 `callId` 继续兼容。执行者报告参数不包含独立审查字段。
+
 ## 主 Agent 的工具
 
 | 工具 | 作用 |
@@ -11,6 +13,7 @@
 | `delegation_note` | `kind: task_plan/findings/progress` 和 `content`；保存本会话本需求的专用记录并返回路径，最多 64 KiB |
 | `delegation_plan` | 提交目标、任务卡、依赖、修改路径、任务复杂度、标准和验证步骤；可用 `relation/messageId/decisionReason` 同时记录消息关联与委派理由 |
 | `delegation_run` | 开始调度，无依赖任务自动派出 |
+| `delegation_wait` | 等待现有任务的报告、故障或用户新消息；原代理继续运行，不轮询模型、不消耗纠偏次数 |
 | `delegation_status` | 默认摘要；可选 taskId，detail: summary/full；full 必须指定任务，只返回该任务完整报告和证据 |
 | `delegation_checkpoint` | 执行者或只读审查者在长调查、阶段转换或阻塞时记录结论及成功工具证据；短任务只交最终报告 |
 | `delegation_control` | `steer` 纠偏、`stop` 取消且必须提供原因、`retry` 有依据地重试；正常返回无需 stop |

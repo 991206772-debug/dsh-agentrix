@@ -11,9 +11,9 @@ export const DEFAULT_OPTIONS = Object.freeze({
   models: { worker: null, reviewer: null },
 })
 export const REVIEWER_MODEL_POLICY = 'dispatcher-snapshot'
-export const COORDINATION_POLICY_VERSION = 2
+export const COORDINATION_POLICY_VERSION = 3
 const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork'])
-const COORDINATOR_TOOLS = new Set(['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
+const COORDINATOR_TOOLS = new Set(['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_wait', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
 const EXECUTOR_TOOLS = new Set(['delegation_checkpoint', 'delegation_report'])
 const REVIEW_TOOLS = new Set(['read', 'grep', 'glob', ...EXECUTOR_TOOLS])
 const MAX_PLANS = 12
@@ -35,6 +35,29 @@ const brief = (value, limit = 3000) => String(value ?? '').slice(0, limit)
 const textOf = content => (content ?? []).filter(block => block?.type === 'text').map(block => block.text).join('\n')
 const messageOf = error => brief(error?.message ?? error)
 const isServiceIssue = issue => ['MODEL_SERVICE_QUOTA', 'MODEL_SERVICE_RATE_LIMIT'].includes(issue?.code)
+const criteriaOf = task => task.criteria.map((text, criterion) => ({ id: 'C' + (criterion + 1), criterion, text }))
+const evidenceChoices = task => task.checks.map(check => check.result).filter(result => result?.attempt === task.attempts)
+  .map(result => result.ref ?? result.callId).join('、') || '无，请先运行 delegation_verify'
+function reviewEvidence(task, values) {
+  if (!Array.isArray(values)) return values
+  return values.map(value => {
+    if (!/^E[0-9a-f]{12}$/.test(value)) return value
+    const result = task.checks.map(check => check.result).find(result => result?.ref === value && result.attempt === task.attempts)
+    if (!result) throw new Error('验收证据必须引用本次主控验证实际返回的编号；当前可用：' + evidenceChoices(task))
+    return result.callId
+  })
+}
+function reviewFindings(task, findings) {
+  if (!Array.isArray(findings)) return findings
+  return findings.map(({ criterionId, ...finding }) => {
+    if (criterionId !== undefined) {
+      const item = criteriaOf(task).find(item => item.id === criterionId)
+      if (!item || finding.criterion !== undefined && finding.criterion !== item.criterion) throw new Error('验收标准编号无效或冲突；当前可用：' + criteriaOf(task).map(item => item.id + '=' + item.text).join('；'))
+      finding.criterion = item.criterion
+    }
+    return { ...finding, evidence: reviewEvidence(task, finding.evidence) }
+  })
+}
 function modelServiceIssue(error, role, route = {}) {
   const details = messageOf(error), quota = error?.code === 'QUOTA' || /(?:exceed|insufficient)[^\n]*quota|quota[^\n]*(?:exceed|limit)/i.test(details)
   if (!quota && !['RATE_LIMIT', 'RATE_LIMITED'].includes(error?.code) && Number(error?.status ?? error?.statusCode) !== 429 && !/\b429\b|rate_limit_error/.test(details)) return null
@@ -48,10 +71,11 @@ function modelServiceIssue(error, role, route = {}) {
 // Model output is intentionally separate from the full persisted/UI snapshot.
 function compactTask(task) {
   return { id: task.id, title: task.title, status: task.status, attempts: task.attempts,
+    ...(task.criteria ? { criteria: criteriaOf(task) } : {}),
     model: task.modelRoute?.actual ?? task.modelRoute?.requested ?? task.model, issue: task.issue,
     summary: brief(task.execution?.summary, 300), reportPath: task.execution?.reportPath,
     error: task.error ? brief(task.error, 500) : null,
-    checks: (task.checks ?? []).map((check, index) => ({ index, passed: check.result?.passed ?? null, callId: check.result?.callId })),
+    checks: (task.checks ?? []).map((check, index) => ({ index, passed: check.result?.passed ?? null, ref: check.result?.ref, callId: check.result?.callId })),
     issues: (task.issues ?? []).filter(issue => issue.status === 'open').map(issue => ({ id: issue.id, severity: issue.severity, finding: brief(issue.finding, 300) })),
     evidence: (task.evidence ?? []).map(item => item.callId),
     ...(task.audit ? { audit: { status: task.audit.status, summary: brief(task.audit.execution?.summary, 300),
@@ -60,7 +84,7 @@ function compactTask(task) {
 function compactResult(value) {
   const result = { ...value }
   if (value.plan) result.plan = { sessionId: value.plan.sessionId, goal: brief(value.plan.goal, 300), status: value.plan.status,
-    decision: value.plan.decision,
+    decision: value.plan.decision, nextAction: value.plan.nextAction,
     activationBudget: value.plan.activationBudget, dispatchWait: value.plan.dispatchWait,
     coordinatorIssue: value.plan.coordinatorIssue, coordinationIssue: value.plan.coordinationIssue, messageResolution: value.plan.messageResolution,
     inputs: (value.plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)).map(input => ({ id: input.id, text: brief(input.text, 400), status: input.status })),
@@ -233,6 +257,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const stagedResults = new Map(), pendingTransports = new Map(), committing = new Set()
   const waitingParents = new Map()
   const coordinationFailures = new Set(), coordinationCalls = new Map(), coordinationRestrictions = new Map()
+  const toolDefinitions = new Map(), reportSchemas = new Map()
   const inboxes = new Map()
   const cancellingPlans = new Set()
   const records = createTaskRecords(file), pendingRecords = new Map()
@@ -326,6 +351,23 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   }
   const queuedInputs = plan => [...(plan.inputs ?? []).filter(input => input.status === 'queued'), ...pendingMessages(plan.sessionId)]
   const unresolvedInputs = plan => [...(plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)), ...pendingMessages(plan.sessionId).map(message => ({ id: message.messageId, text: message.text, status: 'unclassified' }))]
+  function nextAction(plan) {
+    if (plan.completion || plan.cancelled) return { type: 'finished', message: '以程序交付回执为准；不要重复启动或清理。' }
+    if (pendingMessages(plan.sessionId).length) return { type: 'resolve_message', message: '先用 delegation_decide 确认新消息与需求的关联。' }
+    if (unresolvedInputs(plan).length) return { type: 'handle_input', message: '先处理用户补充，沿用原代理同步要求。' }
+    const returned = plan.tasks.filter(task => task.status === 'review' && !task.pendingAcceptance)
+    const verify = returned.filter(task => task.checks.some(check => !check.result || check.result.attempt !== task.attempts))
+    if (verify.length) return { type: 'verify', taskIds: verify.map(task => task.id), message: '对已返回任务运行 delegation_verify；其他执行者继续工作。' }
+    const review = returned.filter(task => !task.audit || !['queued', ...LIVE].includes(task.audit.status))
+    if (review.length) return { type: 'review', taskIds: review.map(task => task.id), message: review.some(task => task.checks.some(check => !check.result.passed))
+      ? '验证已有失败结果，请核对原因并用具体证据决定返工；不能验收或原样反复验证。'
+      : '按给出的 criterionId 和证据 ref 逐条 delegation_review。' }
+    if (plan.tasks.some(task => ['failed', 'blocked'].includes(task.status) || ['failed', 'blocked'].includes(task.audit?.status))) return { type: 'handle_failure', message: '核对真实失败原因，处理后再明确重试；不新开代理掩盖错误。' }
+    if (targetsOf(plan).some(task => LIVE.includes(task.status)) || plan.autoDispatch && plan.tasks.some(task => task.status === 'queued' || task.pendingAcceptance || task.audit?.status === 'queued')) return {
+      type: 'wait', message: '计划正在执行或自动推进，下一阶段会自动启动，无需再次 run。简短告知用户后调用 delegation_wait，或结束当前回复等待自动通知；不要轮询 status。',
+    }
+    return { type: 'run', message: '用 delegation_run 启动当前已建立的计划。' }
+  }
   function selectInputs(plan, ids = []) {
     const selected = strings(ids, '补充消息编号', true)
     if (new Set(selected).size !== selected.length) throw new Error('补充消息编号重复')
@@ -374,10 +416,12 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     handle.notified = true
     const parent = service('agents')?.get(plan.sessionId)
     if (parent !== handle.parent) return
-    const text = `托管任务 ${task.id}${task.role === 'reviewer' ? ' 的独立审查' : ''} 已返回：${task.status}。${task.error || task.execution?.summary || ''}。请读取 delegation_status，并通过 delegation_verify/review 完成验收；无需 stop 清理。`
+    const owner = plan.tasks.find(item => item.id === task.id) ?? task
+    const text = `托管任务 ${task.id}${task.role === 'reviewer' ? ' 的独立审查' : ''} 已返回：${task.status}。${task.error || task.execution?.summary || ''}。无需 stop 清理。\n` +
+      JSON.stringify({ task: compactTask(owner), nextAction: nextAction(plan) })
     const waiter = waitingParents.get(plan.sessionId)
     if (waiter) {
-      if (['review', 'completed'].includes(task.status)) waiter.results.push(text)
+      waiter.results.push(text); waiter.wake.resolve()
       return
     }
     const message = runtimeMessage(plan, text, 'delegation-result')
@@ -452,6 +496,22 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     try { await Promise.race([Promise.all(handles.map(handle => handle.done.promise)), cancelled, wake]) }
     finally { signal?.removeEventListener('abort', abort) }
   }
+  async function waitForResults(plan, agent, signal) {
+    if (waitingParents.has(agent.id)) throw new Error('当前主控已经在等待任务事件，不要并行重复等待。')
+    const waiter = { signal, wake: Promise.withResolvers(), results: [] }
+    waitingParents.set(agent.id, waiter)
+    try {
+      while (!closed && !signal?.aborted && !plan.cancelled && !plan.wakeSuppressed) {
+        if (waiter.results.length || nextAction(plan).type !== 'wait' || pendingSupervision(plan).length) break
+        const handles = [...live.values()].filter(handle => handle.planSessionId === agent.id)
+        if (!handles.length) break
+        const wake = waiter.wake
+        await waitForWork(handles, signal, plan, wake.promise)
+        if (waiter.wake === wake) waiter.wake = Promise.withResolvers()
+      }
+    } finally { waitingParents.delete(agent.id) }
+    return waiter.results
+  }
   const truncatedOutputs = new Set()
   function trackOutput(sessionId, stream) {
     truncatedOutputs.delete(sessionId)
@@ -499,23 +559,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       return
     }
     if (!plan.completion && continueOutput(plan, agent)) { await save(); return }
-    const waiter = { signal, wake: Promise.withResolvers(), results: [] }
-    waitingParents.set(agent.id, waiter)
-    try {
-      while (!signal?.aborted) {
-        if (queuedInputs(plan).length) break
-        const handles = [...live.values()].filter(handle => handle.planSessionId === agent.id)
-        if (!handles.length) break
-        if (pendingSupervision(plan).length) break
-        const wake = waiter.wake
-        await waitForWork(handles, signal, plan, wake.promise)
-        if (waiter.wake === wake) waiter.wake = Promise.withResolvers()
-        if (pendingSupervision(plan).length) break
-      }
-    } finally { waitingParents.delete(agent.id) }
+    const results = await waitForResults(plan, agent, signal)
     if (closed || signal?.aborted || plan.wakeSuppressed) return
-    if (waiter.results.length) {
-      agent.inject(runtimeMessage(plan, waiter.results.join('\n'), 'delegation-result'))
+    if (results.length) {
+      agent.inject(runtimeMessage(plan, results.join('\n'), 'delegation-result'))
       await save(); return
     }
     if (queuedInputs(plan).length) { await save(); return }
@@ -578,7 +625,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (plan.source?.messageId === sourceOf(plan.sessionId)?.messageId && pendingMessages(plan.sessionId).length) copy.pendingMessages = clone(pendingMessages(plan.sessionId))
     if (copy.decision) copy.decisionCurrent = ['accepted', 'cancelled'].includes(planStatus(plan)) || decisionCurrent(plan.sessionId)
     if (['accepted', 'cancelled'].includes(planStatus(plan))) copy.dispatchWait = null
-    return { ...copy, status: planStatus(plan) }
+    return { ...copy, status: planStatus(plan), ...(!persist ? { nextAction: nextAction(plan) } : {}) }
   }
   const snapshot = () => [...plans.values()].map(plan => snapshotPlan(plan))
   const completionStage = plan => JSON.stringify(targetsOf(plan).map(task =>
@@ -651,10 +698,34 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (expected) return expected.task.role === 'reviewer' ? !REVIEW_TOOLS.has(name) : COORDINATOR_TOOLS.has(name) || conflictingTool(name)
     const header = agent.session?.header ?? service('sessions')?.get(agent.id)?.header ?? {}
     if (header.origin === 'subagent' || header.parentSession || header.delegationDepth > 0) return false
+    const plan = plans.get(agent.id)
+    if (name === 'delegation_wait') return !plan || !isCurrentPlan(plan) || Boolean(plan.completion)
+    if (plan && isCurrentPlan(plan) && !plan.completion) {
+      if (name === 'delegation_verify') return !plan.tasks.some(task => task.status === 'review' && !task.pendingAcceptance)
+      if (name === 'delegation_review') return !plan.tasks.some(task => task.status === 'review' && !task.pendingAcceptance && task.checks.some(check => check.result))
+    }
     return EXECUTOR_TOOLS.has(name) || Boolean(coordinationContext(agent.id) && conflictingTool(name))
   }
   function refreshCoordinationTools(agent) {
     for (const target of agent ? [agent] : service('agents')?.list?.() ?? []) {
+      const role = getConfig().enabled === false ? null : expectedRoutes.get(target.id)?.task.role === 'reviewer' ? 'reviewer'
+        : expectedRoutes.has(target.id) ? 'worker' : null
+      const schema = reportSchemas.get(target.id), definition = toolDefinitions.get('delegation_report')
+      if (schema?.agent !== target || schema?.role !== role) {
+        schema?.dispose(); reportSchemas.delete(target.id)
+        if (role && definition && target.ctx?.tools?.register) {
+          const properties = { ...definition.parameters.properties }
+          if (role === 'worker') for (const field of ['specVerdict', 'qualityVerdict', 'issues', 'resolutions']) delete properties[field]
+          else {
+            for (const field of ['specVerdict', 'qualityVerdict']) properties[field] = { ...properties[field], description: 'status 为 DONE 或 DONE_WITH_CONCERNS 时必填；无法核查时报告 BLOCKED/NEEDS_CONTEXT 和 reason，不编造通过。' }
+            properties.issues = { ...properties.issues, description: '审查完成时必填；没有问题也必须传 []，不能省略。阻塞或缺资料时可省略。' }
+          }
+          reportSchemas.set(target.id, { agent: target, role, dispose: target.ctx.tools.register({ ...definition,
+            description: role === 'worker' ? '执行者提交正式报告。只填写执行结果、疑点或阻塞原因；不填写独立审查结论。成功后自动结束。'
+              : '独立审查者提交只读核查报告。完成时必须填写 specVerdict、qualityVerdict 和 issues；成功后自动结束。',
+            parameters: { ...definition.parameters, properties } }) })
+        }
+      }
       const previous = coordinationRestrictions.get(target.id)
       const names = target.ctx?.tools?.restrict
         ? [...(ctx.tools.view?.(target)?.restrictableNames ?? [])].filter(name => unavailableTool(target, name)).sort() : []
@@ -667,6 +738,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   disposers.push(ctx.on('agent/created', async ({ agent }) => { await ready; refreshCoordinationTools(agent) }, { global: true }))
   disposers.push(ctx.on('agent/disposed', ({ agent }) => {
     coordinationRestrictions.get(agent.id)?.dispose(); coordinationRestrictions.delete(agent.id)
+    reportSchemas.get(agent.id)?.dispose(); reportSchemas.delete(agent.id)
   }, { global: true }))
   function guardCoordination(exec) {
     const context = coordinationContext(exec.agent?.id)
@@ -883,7 +955,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       '你是执行者，使用配置的执行模型，按主控确定的目标、接口和边界完成任务，不再委派。可自行决定不改变接口、范围和验收要求的局部实现细节；影响需求含义、接口、数据或权限的不确定性，以及缺资料或能力不足，通过 delegation_report 报告 NEEDS_CONTEXT/BLOCKED 交回主控，不自行换模型或扩大范围。',
       `总目标：${plan.goal}`, `任务：${task.title}`, task.instructions, `边界：${task.scope}`,
       `只允许修改：${task.writes.join('、') || '无（只读）'}`, `交付物：${task.outputs.join('、')}`,
-      '验收标准：', ...task.criteria.map((item, i) => `${i + 1}. ${item}`),
+      '验收标准：', ...criteriaOf(task).map(item => `${item.id}：${item.text}`),
       '自测步骤（与主控验证使用同一份任务卡；自测结果不代表已验收）：',
       ...task.checks.map((check, i) => `${i + 1}. ${check.tool} ${JSON.stringify(check.arguments)}`),
       ...plan.tasks.filter(item => task.dependsOn.includes(item.id)).map(item => `已验收前置任务 ${item.id}：${item.execution ? item.execution.summary + '；完整报告：' + item.execution.reportPath : brief(item.report)}`),
@@ -905,7 +977,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       '你是独立的只读审查者，同时核对需求符合性和代码质量。不要修改文件、执行命令或继续委派；主控负责实际运行验证。',
       `总目标：${plan.goal}`, `任务：${task.title}`, task.instructions, `边界：${task.scope}`,
       `可修改范围（仅用于核查越界）：${task.writes.join('、') || '无'}`, `交付物：${task.outputs.join('、')}`,
-      '逐条验收要求：', ...task.criteria.map((item, i) => `${i}. ${item}`),
+      '逐条验收要求：', ...criteriaOf(task).map(item => `${item.id}（criterion=${item.criterion}）：${item.text}`),
       `执行报告文件：${task.execution.reportPath}。报告是待核实的主张，必须读实际交付物核对；不要全库漫游。`,
       '测试通过不能代替需求满足；界面还原需核对原稿与同尺寸实际截图，缺少无法核实的证据必须报告问题，不能默认通过。',
       '结束前调用 delegation_report，提交 status、summary、完整 report，以及 specVerdict/qualityVerdict（pass 或 fail）和 issues。',
@@ -1437,7 +1509,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const shell = ['pwsh', 'bash'].includes(check.tool)
       // Shell success requires an actual exit code. A background job or missing status is inconclusive.
       const passed = !result.isError && (!shell || exitCode === 0)
-      const evidence = { callId, tool: check.tool, passed, at: Date.now(), attempt: task.attempts,
+      const evidence = { callId, ref: 'E' + randomUUID().replaceAll('-', '').slice(0, 12), tool: check.tool, passed, at: Date.now(), attempt: task.attempts,
         summary: brief(textOf(result.content) || JSON.stringify(value), 2000), ...(shell ? { exitCode: exitCode ?? null } : {}) }
       check.result = evidence
       task.evidence = [...task.evidence, evidence].slice(-12)
@@ -1445,12 +1517,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       remember(plan, 'task.verified', '主 Agent 验证' + (passed ? '通过：' : '未通过：') + check.tool,
         task, { evidence })
       await save()
-      return evidence
+      return { ...evidence, criteria: criteriaOf(task), nextAction: '按 C1、C2 等 criterionId 逐条填写 finding，在 evidence 中直接引用 ref；不要拼接 callId 或更改编号。' }
     } finally { delete check.verifying }
   }
   async function review(args, exec) {
     const { plan } = ownPlan(exec), task = taskOf(plan, args.taskId)
     if (task.status !== 'review') throw new Error('只能评审已经返回结果的任务')
+    args = { ...args, findings: reviewFindings(task, args.findings), issues: reviewFindings(task, args.issues),
+      resolutions: Array.isArray(args.resolutions) ? args.resolutions.map(item => ({ ...item, evidence: reviewEvidence(task, item.evidence) })) : args.resolutions }
     if (task.pendingAcceptance) throw new Error('当前验收正在通过工具管线确认，不能重复提交')
     if (task.checks.some(check => check.verifying)) throw new Error('请等待正在执行的验证完成')
     if (args.verdict === 'rework') {
@@ -1496,10 +1570,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (!Array.isArray(args.findings) || args.findings.length !== task.criteria.length) throw new Error('必须逐条提交验收标准的结论和证据')
       const seen = new Set()
       for (const finding of args.findings) {
-        if (!Number.isInteger(finding.criterion) || !task.criteria[finding.criterion] || seen.has(finding.criterion)) throw new Error('验收标准编号缺失或重复')
+        if (!Number.isInteger(finding.criterion) || !task.criteria[finding.criterion] || seen.has(finding.criterion)) throw new Error('验收标准编号缺失或重复；请直接使用 criterionId：' + criteriaOf(task).map(item => item.id).join('、'))
         seen.add(finding.criterion)
         requireText(finding.finding, '验收结论', 1000)
-        if (!Array.isArray(finding.evidence) || !finding.evidence.length || !finding.evidence.every(id => task.evidence.some(item => item.callId === id && item.passed && item.attempt === task.attempts))) throw new Error('验收证据必须引用本次主控验证实际返回的 callId')
+        if (!Array.isArray(finding.evidence) || !finding.evidence.length || !finding.evidence.every(id => task.evidence.some(item => item.callId === id && item.passed && item.attempt === task.attempts))) throw new Error('验收证据必须引用本次主控验证实际返回的 callId 或 ref，不能附带说明；当前可用：' + evidenceChoices(task))
       }
       const closeIssues = () => { for (const resolution of resolutions) {
         const issue = task.issues.find(item => item.id === resolution.id)
@@ -1635,10 +1709,15 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const definition = { name, description, parameters: { ...object(properties), required },
       output: { schema: { type: 'object', additionalProperties: true }, render: (args, value) => [{ type: 'text', text: value.completion ? [completionText(value.completion), value.continuation].filter(Boolean).join('\n') : JSON.stringify(args.detail === 'full' ? value : compactResult(value)) }] },
       async execute(args, exec) {
-        try { await ready; if (committing.size) await Promise.all(committing); if (!child) own(exec); return await execute(args, exec) }
+        try {
+          await ready; if (committing.size) await Promise.all(committing); if (!child) own(exec)
+          const value = await execute(args, exec), plan = plans.get(exec.agent?.id)
+          return !child && plan && value && typeof value === 'object' ? { ...value, nextAction: value.completion ? { type: 'finished', message: completionText(value.completion) } : nextAction(plan) } : value
+        }
         catch (error) { recordCoordinationFailure(exec, messageOf(error)); throw error }
         finally { refreshCoordinationTools(exec.agent) }
       } }
+    toolDefinitions.set(name, definition)
     disposers.push(ctx.tools.register(definition))
   }
   routeTool('delegation_decide', '主控结合上下文确认消息关联：new 新需求、continue 继续、update 补充或调整、question 询问进度或提问。新需求/方案变化同时提供 direct/delegate 和理由；继续/询问沿用原决定。messageId 只能引用本会话真实消息，多条待关联时必填。先读文件准备，普通正文不能代替记录。', {
@@ -1845,7 +1924,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     return { plan: snapshot().find(item => item.sessionId === plan.sessionId), storageError }
   })
-  routeTool('delegation_verify', '主控执行任务卡上指定的验证步骤（checkIndex 从 0 开始）。通过 DSH 工具管线，返回真实证据 callId；不消耗动手预算。', { taskId: string, checkIndex: { type: 'integer' } }, ['taskId', 'checkIndex'], verify)
+  routeTool('delegation_wait', '无其他可验证任务时等待现有子代理的报告或故障事件，不调用模型轮询。第一项结果或用户新消息到达即返回；原代理继续工作，不消耗纠偏次数。用户取消优先。', {}, [], async (_args, exec) => {
+    const { plan, parent } = ownPlan(exec)
+    const notifications = await waitForResults(plan, parent, exec.signal)
+    exec.signal?.throwIfAborted()
+    deliverSupervision(plan, parent)
+    return { plan: snapshotPlan(plan), notifications }
+  })
+  routeTool('delegation_verify', '主控执行任务卡指定的验证步骤（checkIndex 从 0 开始）。返回真实证据 ref 和标准 C1、C2 对照；验收时直接引用这些编号。保留原始 callId，不消耗动手预算。', { taskId: string, checkIndex: { type: 'integer' } }, ['taskId', 'checkIndex'], verify)
   routeTool('delegation_audit', '对已返回任务安排一个独立只读审查，复杂任务会自动安排。重复请求不会重复开启；失败后的重试必须说明已处理的原因，同样受启动预算与次数限制。', {
     taskId: string, message: string,
   }, ['taskId'], async (args, exec) => {
@@ -1877,12 +1963,12 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     await save(); const failure = await pump(); if (failure) throw failure
     return { audit: clone(task.audit) }
   })
-  routeTool('delegation_review', '主控逐条评审。accept 需要验证通过、补充消息已处理且逐条引用证据；最后一项验收后自动生成回执并结束。rework 须提供具体问题及证据，或关联新用户 inputIds、additionalCriteria、feedback；受次数上限约束。', {
+  routeTool('delegation_review', '主控逐条评审。findings 优先填写验证结果给出的 criterionId（C1、C2）、finding 和 evidence（直接复制 ref，不加前缀或说明）。accept 需要验证与独立审查通过；最后验收自动生成回执并结束。rework 须给具体问题及证据。', {
     taskId: string, verdict: { type: 'string', enum: ['accept', 'rework'] }, feedback: string, concernsResolution: string, issueIds: array(string),
     inputIds: array(string), additionalCriteria: array(string),
-    issues: array({ ...object({ criterion: { type: 'integer' }, severity: { type: 'string', enum: ['critical', 'important', 'minor'] }, finding: string, evidence: array(string) }), required: ['criterion', 'severity', 'finding', 'evidence'] }),
+    issues: array({ ...object({ criterion: { type: 'integer', description: '旧格式，从 0 开始；优先使用 criterionId。' }, criterionId: { type: 'string', description: '验证结果提供的标准编号，例如 C1。' }, severity: { type: 'string', enum: ['critical', 'important', 'minor'] }, finding: string, evidence: array(string) }), required: ['severity', 'finding', 'evidence'] }),
     resolutions: array({ ...object({ id: string, status: { type: 'string', enum: ['ADDRESSED'] }, evidence: array(string) }), required: ['id', 'status', 'evidence'] }),
-    findings: array({ ...object({ criterion: { type: 'integer' }, finding: string, evidence: array(string) }), required: ['criterion', 'finding', 'evidence'] }),
+    findings: array({ ...object({ criterion: { type: 'integer', description: '旧格式，从 0 开始；优先使用 criterionId。' }, criterionId: { type: 'string', description: '直接复制 C1、C2 等标准编号，不能自行重新编号。' }, finding: { type: 'string', description: '主控根据实际验证给出的逐条结论；程序不会代填通过。' }, evidence: array({ type: 'string', description: '直接复制本任务本次 delegation_verify 返回的 ref，不添加前缀、文件说明或引号。' }) }), required: ['finding', 'evidence'] }),
   }, ['taskId', 'verdict'], review)
   routeTool('delegation_control', 'steer 同步给原代理；用户补充须关联 inputIds 并提供 additionalCriteria。纯答复用 acknowledge(inputIds,message)，无需 taskId。stop 仅取消；retry 须处理真实原因。', {
     taskId: string, action: { type: 'string', enum: ['steer', 'stop', 'retry', 'acknowledge'] }, message: string, reason: string,
@@ -2006,6 +2092,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       for (const dispose of disposers.reverse()) dispose?.()
       for (const restriction of coordinationRestrictions.values()) restriction.dispose()
       coordinationRestrictions.clear()
+      for (const schema of reportSchemas.values()) schema.dispose()
+      reportSchemas.clear()
       live.clear(); expectedRoutes.clear(); permits.clear(); waitingParents.clear(); inboxes.clear(); if (!recoveryFailed) await save()
     },
   }

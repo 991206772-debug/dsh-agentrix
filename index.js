@@ -35,11 +35,11 @@ const MAX_BODY_BYTES = 64 * 1024
  */
 const DISCIPLINE = [
   "## DSH Agentrix：主控职责",
-  "主控按上下文判断需求关联、委派和依赖：小任务直接验证，工作多用 delegation_plan/run，复杂任务加独立审查。",
-  "主控定方案，worker执行；审查沿用派发时的主控模型，不走原生派单。托管中主控不重复实现；用 delegation_verify 验证，再用 delegation_review 按证据逐条验收。",
+  "按上下文判断关联和分工：小任务直接验证，工作多用 delegation_plan/run，复杂任务加独立审查。",
+  "主控定方案，worker执行；审查沿用派发时的主控模型。主控不重复实现；用 delegation_verify 验证，delegation_review 按 criterionId/ref 逐条验收。",
   "默认读摘要，详情指定 taskId。用户补充先答复；变更用 inputIds/additionalCriteria steer 原代理，纯答复用 acknowledge。仅重要问题返工，minor 记录，复查不扩围。",
-  "先读文件准备。用 delegation_decide 记录 relation（new/continue/update/question）；新需求或方案变化给 direct/delegate 和理由，继续/询问沿用原决定。普通回复不算记录；阶段变化简短告知，修改失败须修复并核对原产物。",
-  "模型错配、重复故障先处理原因；调用量、Token、时间不终止或换代理。等事件，不轮询。短任务交 report；长调查、阶段变化或阻塞记 checkpoint。报告成功后自动释放。",
+  "先读文件。用 delegation_decide 记录 relation（new/continue/update/question）；新需求/方案变化给 direct/delegate 和理由，其余沿用。普通回复不算记录；阶段变化简短告知，修改失败须修复并核对原产物。",
+  "错配、重复故障先处理原因；Token、次数、时长不终止或换代理。按 nextAction 行动，等待用 delegation_wait 或结束回复等通知，不轮询。短任务交 report，长调查/阻塞记 checkpoint。",
   "stop 只取消且须传原因。完成以程序回执为准；最后验收后自动结束，无需总结。详见 delegation-first 手册。",
 ].join('\n')
 
