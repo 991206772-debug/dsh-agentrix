@@ -5,6 +5,57 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('input progress defaults to one short summary and keeps raw diagnostics inside a closed disclosure', async () => {
+  const target = 'D:/demo/articles/agentrix-multi-agent-blog.md'
+  const execution = { running: true, startedAt: 100, toolCalls: 2, activity: { kind: 'waiting_model_response' },
+    lastResult: { tool: 'read', target }, unresolvedChanges: [{ callId: 'edit-failed', target, reason: 'Error: old_string was not found in ' + target }] }
+  const body = { ok: true, sessionId: 'session-current', plans: [], sessions: [{ sessionId: 'session-current',
+    source: { messageId: 'request-one', text: '这句话有问题，换一个合适的说法' }, execution }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock('session-current')
+  try {
+    await dock.flush()
+    const details = dock.nodes('details')[0], summary = dock.nodes('summary')[0]
+    assert.ok(details, 'progress must be collapsible')
+    assert.notEqual(details.props.open, true)
+    assert.match(JSON.stringify(summary), /继续处理中.*agentrix-multi-agent-blog\.md/)
+    assert.doesNotMatch(JSON.stringify(summary), /old_string|D:\/demo|这句话|修改未完成/)
+    assert.match(dock.text(), /old_string was not found/)
+    assert.ok(!dock.nodes('section').some(node => node.props.role === 'alert'), 'a running repair is not a terminal error')
+    execution.running = false
+    await dock.tick()
+    assert.match(JSON.stringify(dock.nodes('summary')[0]), /修改未完成/)
+  } finally { dock.close(); f.close() }
+})
+
+test('hiding the dock survives polling but a new failure or task becomes visible again', async () => {
+  const execution = { running: false, startedAt: 100, activity: {}, toolCalls: 1,
+    unresolvedChanges: [{ callId: 'failed-one', target: 'article.md', reason: 'old_string was not found' }] }
+  const row = { sessionId: 'session-current', source: { messageId: 'request-one', text: '修订文章' }, execution }
+  const body = { ok: true, sessionId: 'session-current', plans: [], sessions: [row] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock('session-current')
+  const hide = async () => {
+    const button = dock.nodes('button').find(node => node.props['aria-label'] === '隐藏进度提示')
+    assert.ok(button, 'the reminder needs a hide action')
+    button.props.onClick(); await dock.flush()
+  }
+  try {
+    await dock.flush(); await hide()
+    assert.equal(dock.text(), '')
+    await dock.tick()
+    assert.equal(dock.text(), '', 'polling must not reopen a hidden reminder')
+    execution.unresolvedChanges.push({ callId: 'failed-two', target: 'other.md', reason: 'cannot write' })
+    await dock.tick()
+    assert.ok(dock.nodes('summary').length)
+    await hide()
+    execution.startedAt = 200; execution.running = true; execution.unresolvedChanges = []
+    row.source = { messageId: 'request-two', text: '核对另一份材料' }
+    await dock.tick()
+    assert.ok(dock.nodes('summary').length)
+  } finally { dock.close(); f.close() }
+})
+
 test('direct work is visible in the input dock with actual activity, advisory mismatch and unresolved edits', async () => {
   const execution = { running: true, startedAt: Date.now(), toolCalls: 2, statement: null,
     activity: { kind: 'tool', tool: 'edit', target: 'article.md' },

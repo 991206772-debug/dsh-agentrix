@@ -669,6 +669,7 @@ window.__ModuleLoader__.load({
 
     Object.assign(zh, {
       'direct.title': '主控直接执行', 'direct.incomplete': '修改未完成',
+      'direct.repairing': '修改遇错，继续处理中', 'dock.details': '详情', 'dock.hide': '隐藏进度提示',
       'direct.advice': '系统建议委派，当前尚未启动子代理', 'direct.reasonMissing': '主控尚未说明本次直接执行的原因',
       'direct.statement': '主控最近说明', 'direct.calls': '本轮工具调用 {count} 次',
       'direct.unavailable': '委派入口不可用', 'direct.checkPlugin': '请检查 DSH Agentrix 插件是否启用，以及宿主的子代理功能是否可用；当前没有通过这些入口启动协作。',
@@ -677,6 +678,7 @@ window.__ModuleLoader__.load({
     })
     Object.assign(en, {
       'direct.title': 'Coordinator executing directly', 'direct.incomplete': 'File changes remain incomplete',
+      'direct.repairing': 'Handling a failed change', 'dock.details': 'Details', 'dock.hide': 'Hide progress notice',
       'direct.advice': 'Delegation was suggested; no child agent has started', 'direct.reasonMissing': 'The coordinator has not explained its choice to execute directly',
       'direct.statement': 'Latest coordinator statement', 'direct.calls': '{count} tool calls this turn',
       'direct.unavailable': 'Delegation tools unavailable', 'direct.checkPlugin': 'Check that DSH Agentrix is enabled and the host supports subagents. These entry points have not started collaboration.',
@@ -1098,8 +1100,22 @@ window.__ModuleLoader__.load({
 .ddf-chat-notice[data-kind="progress"] .ddf-chat-notice-heading { color:var(--dsw-alias-brand-primary,#4f6ef7); }
 .ddf-chat-live-task + .ddf-chat-live-task { margin-top:8px; padding-top:8px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-chat-live-meta { color:var(--dsw-alias-label-secondary,#646a73); }
-.ddf-chat-dock { min-width:0; max-height:min(32vh,260px); overflow:auto; }
+.ddf-chat-dock { --ddf-dock-tone:var(--dsw-alias-brand-primary,#4f6ef7); position:relative; min-width:0; max-width:100%; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:7px; background:var(--dsw-alias-bg-layer-1,#fff); color:var(--dsw-alias-label-secondary,#646a73); font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif; }
+.ddf-chat-dock[data-tone="supervision"] { --ddf-dock-tone:var(--dsw-alias-state-warning-primary,#b7791f); }
+.ddf-chat-dock[data-tone="service"] { --ddf-dock-tone:var(--dsw-alias-state-error-primary,#f54a45); }
+.ddf-dock-disclosure>summary { box-sizing:border-box; display:flex; align-items:center; gap:8px; height:34px; padding:0 38px 0 10px; cursor:pointer; list-style:none; }
+.ddf-dock-disclosure>summary::-webkit-details-marker { display:none; }
+.ddf-dock-dot { flex:none; width:5px; height:5px; border-radius:50%; background:var(--ddf-dock-tone); }
+.ddf-dock-text { flex:1; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.ddf-dock-toggle { flex:none; color:var(--dsw-alias-label-secondary,#646a73); }
+.ddf-dock-toggle::after { content:'⌄'; display:inline-block; margin-left:4px; }
+.ddf-dock-disclosure[open] .ddf-dock-toggle::after { transform:rotate(180deg); }
+.ddf-dock-details { max-height:min(28vh,220px); overflow:auto; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-dock-hide { position:absolute; top:5px; right:5px; width:24px; height:24px; padding:0; border:0; border-radius:4px; background:transparent; color:inherit; font:16px/1 system-ui,sans-serif; cursor:pointer; }
+.ddf-dock-hide:hover { background:var(--dsw-alias-bg-layer-2,#f5f6f7); }
+.ddf-dock-disclosure>summary:focus-visible,.ddf-dock-hide:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7); outline-offset:2px; }
 .ddf-chat-dock .ddf-chat-notice { margin:0; }
+.ddf-dock-details .ddf-chat-notice { border:0; border-radius:0; }
 .ddf-chat-notice p { margin:5px 0; white-space:pre-wrap; }
 .ddf-chat-notice-hint { color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-chat-notice-action { display:inline-block; max-width:100%; margin:4px 0 0; padding:0; border:0; background:transparent; color:var(--dsw-alias-brand-primary,#4f6ef7); font:inherit; text-align:left; overflow-wrap:anywhere; cursor:pointer; }
@@ -1232,23 +1248,51 @@ window.__ModuleLoader__.load({
       // The host mounts the input dock while a turn is still running. Its running
       // transition also refreshes a terminal snapshot when the next turn starts.
       const result = useChatProgress(progress, sessionId, true, session?.running)
+      const [dismissed, setDismissed] = useState(null)
       const plan = currentPlanOf(result.data, sessionId)
       const state = result.data?.sessions?.find(item => item.sessionId === sessionId)
-      if (result.errorStatus === 404 || result.error && !result.data) return h('section', {
-        className: 'ddf-chat-notice', 'data-kind': 'service', role: 'alert',
-      }, h('style', null, CHAT_NOTICE_STYLES), h('strong', null, t('direct.backendMissing')),
-      h('p', null, t('direct.backendHint')), h('p', null, result.error))
       const availability = state?.delegationAvailability
       const missing = availability?.status === 'unavailable' ? h('section', { className: 'ddf-chat-notice', 'data-kind': 'service', role: 'alert' },
         h('style', null, CHAT_NOTICE_STYLES), h('strong', null, t('direct.unavailable')),
         availability.missingTools?.length ? h('p', null, availability.missingTools.join('、')) : null,
         h('p', null, t('direct.checkPlugin'))) : null
-      if (!plan) {
-        if (!missing && !state?.execution?.running && !state?.execution?.unresolvedChanges?.length) return null
-        return h('div', { className: 'ddf-chat-dock' }, missing, h(CoordinatorProgress, { t, state, error: result.error }))
+      const execution = state?.execution, failures = execution?.unresolvedChanges ?? []
+      const backendMissing = result.errorStatus === 404 || result.error && !result.data
+      const terminal = plan && (plan.completion || plan.status === 'accepted') && !(plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled)
+      if (!backendMissing && !missing && (plan ? terminal : !execution?.running && !failures.length)) return null
+      let summary, content, tone = 'progress'
+      if (backendMissing) {
+        summary = t('direct.backendMissing'); tone = 'service'
+        content = h('section', { className: 'ddf-chat-notice', role: 'alert' }, h('strong', null, summary),
+          h('p', null, t('direct.backendHint')), h('p', null, result.error))
+      } else if (missing) {
+        summary = t('direct.unavailable'); content = missing; tone = 'service'
+      } else if (plan) {
+        const tasks = plan.tasks ?? [], status = chatStatusKey(plan), done = tasks.filter(task => task.status === 'accepted').length
+        const running = tasks.filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
+        summary = t('live.title') + ' · ' + fill(t(status === 'running' ? 'chat.activeAcceptedSummary' : 'chat.acceptedSummary'), {
+          running, done, total: tasks.length, status: status === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t('chat.' + status) })
+        content = h(ChatPlanNotice, { t, plan, error: result.error })
+        tone = serviceProblem(plan) || ['failed', 'blocked'].includes(status) ? 'service' : chatProblem(plan) ? 'supervision' : 'progress'
+      } else {
+        const activity = execution.activity
+        const current = activity?.kind === 'tool' ? liveToolLabel(t, activity.tool) : t('supervision.activity.' + (activity?.kind || 'waiting_model_response'))
+        summary = failures.length ? t(execution.running ? 'direct.repairing' : 'direct.incomplete') : t('direct.title') + ' · ' + current
+        const target = failures.at(-1)?.target || activity?.target
+        if (target) summary += ' · ' + String(target).replaceAll('\\', '/').split('/').at(-1)
+        content = h(CoordinatorProgress, { t, state, error: result.error })
+        tone = failures.length ? execution.running ? 'supervision' : 'service' : 'progress'
       }
-      if ((plan.completion || plan.status === 'accepted') && !(plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled)) return missing
-      return h('div', { className: 'ddf-chat-dock' }, missing, h(ChatPlanNotice, { t, plan, error: result.error }))
+      const identity = [sessionId, state?.source?.messageId || plan?.source?.messageId, execution?.startedAt || plan?.createdAt,
+        backendMissing ? 'backend' : missing ? 'unavailable' : plan ? plan.status : failures.length ? 'change-failed' : 'direct', failures.map(item => item.callId).join(',')].join(':')
+      if (dismissed === identity) return null
+      return h('div', { className: 'ddf-chat-dock', 'data-tone': tone }, h('style', null, CHAT_NOTICE_STYLES),
+        h('details', { className: 'ddf-dock-disclosure', key: identity },
+          h('summary', { title: summary }, h('span', { className: 'ddf-dock-dot', 'aria-hidden': 'true' }),
+            h('span', { className: 'ddf-dock-text', role: 'status' }, summary), h('span', { className: 'ddf-dock-toggle' }, t('dock.details'))),
+          h('div', { className: 'ddf-dock-details' }, content)),
+        h('button', { type: 'button', className: 'ddf-dock-hide', title: t('dock.hide'), 'aria-label': t('dock.hide'),
+          onClick: () => setDismissed(identity) }, '×'))
     }
 
     function CoordinatorProgress({ t, state, error }) {
@@ -1257,8 +1301,8 @@ window.__ModuleLoader__.load({
       const failures = execution.unresolvedChanges ?? [], activity = execution.activity
       const current = activity?.kind === 'tool' ? liveToolLabel(t, activity.tool) + (activity.target ? ' · ' + activity.target : '')
         : activity?.kind ? t('supervision.activity.' + activity.kind) : t('live.unknown')
-      return h('section', { className: 'ddf-chat-notice ddf-chat-live', 'data-kind': failures.length ? 'service' : 'progress', role: failures.length ? 'alert' : 'status' },
-        h('style', null, CHAT_NOTICE_STYLES), h('strong', null, t(failures.length ? 'direct.incomplete' : 'direct.title')),
+      return h('section', { className: 'ddf-chat-notice ddf-chat-live', 'data-kind': failures.length ? execution.running ? 'supervision' : 'service' : 'progress', role: failures.length && !execution.running ? 'alert' : 'status' },
+        h('style', null, CHAT_NOTICE_STYLES), h('strong', null, t(failures.length ? execution.running ? 'direct.repairing' : 'direct.incomplete' : 'direct.title')),
         state.source?.text ? h('p', null, state.source.text.slice(0, 160)) : null,
         error ? h('p', null, t('direct.stale')) : null,
         execution.running ? h('p', null, t('live.current') + '：' + current) : null,

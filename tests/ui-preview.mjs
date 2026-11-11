@@ -9,7 +9,8 @@ if (!assetDirectory) throw new Error('Provide a directory containing react.js an
 const invalid = process.argv.includes('--invalid')
 const loadError = process.argv.includes('--load-error')
 const nextRequest = process.argv.includes('--next-request')
-const liveProgress = process.argv.includes('--live-progress')
+const directProgress = process.argv.includes('--direct-progress')
+const liveProgress = process.argv.includes('--live-progress') || directProgress
 let config = { ok: true, modelRouting: 'roles', reviewerModelPolicy: 'dispatcher-snapshot', mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS, locked: false,
   models: { worker: { provider: invalid ? 'retired-demo' : 'demo', model: 'routine-model' }, reviewer: null }, file: 'C:/isolated-test/delegation-first/default.json',
   defaults: { mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS }, ranges: { threshold: { min: 0, max: 20 }, ...OPTION_RANGES },
@@ -57,6 +58,12 @@ if (liveProgress) {
         activity: { kind: 'tool', tool: 'edit', at: now } } }],
   })
 }
+const directSession = { sessionId: plans[0].sessionId, source: { messageId: 'direct-demo', text: '调整分享文章的案例，并核对生成的文档' },
+  execution: { running: !process.argv.includes('--direct-ended'), startedAt: Date.now(), toolCalls: 2,
+    model: { model: 'demo/coordinator' }, activity: { kind: 'waiting_model_response' },
+    lastResult: { tool: 'read', target: 'D:/demo/articles/agentrix-article.md', at: Date.now() },
+    unresolvedChanges: [{ callId: 'demo-edit-failed', target: 'D:/demo/articles/agentrix-article.md',
+      reason: 'Error: old_string was not found in D:/demo/articles/agentrix-article.md' }] } }
 if (process.argv.includes('--supplement')) {
   Object.assign(plans[0], { protocolVersion: 2, status: 'running', goal: '开发面向交付人员的可视化调试页面',
     routing: { route: 'direct', reasons: ['scope_small'] },
@@ -199,7 +206,7 @@ const server = http.createServer(async (request, response) => {
       if (loadError) { response.statusCode = 503; response.end(JSON.stringify({ ok: false, error: '本地任务服务暂不可用（隔离测试）' })); return }
       const sessionId = url.searchParams.get('sessionId')
       if (process.argv.includes('--slow') && sessionId === plans[0].sessionId) await new Promise(resolve => setTimeout(resolve, 1500))
-      response.end(JSON.stringify({ ok: true, sessionId, mode: config.mode, runtimePolicyVersion: nextRequest || liveProgress ? 2 : undefined, plans: plans.filter(plan => plan.sessionId === sessionId), sessions: liveProgress ? [
+      response.end(JSON.stringify({ ok: true, sessionId, mode: config.mode, runtimePolicyVersion: nextRequest || liveProgress ? 2 : undefined, plans: directProgress ? [] : plans.filter(plan => plan.sessionId === sessionId), sessions: directProgress ? [directSession].filter(row => row.sessionId === sessionId) : liveProgress ? [
         { sessionId: plans[0].sessionId, source: plans[0].source, turnStats: { direct: 0, delegated: 1, denied: 0 } },
       ] : nextRequest ? [
         { sessionId: plans[0].sessionId, source: { messageId: 'request-new', text: '核查代码实际调用了哪些密码接口' }, route: { route: 'direct', reasons: ['scope_small'] },
