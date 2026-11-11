@@ -12,6 +12,7 @@ const moduleRoot = process.env.DSH_MODULE_ROOT
 if (!moduleRoot) throw new Error('DSH_MODULE_ROOT is required')
 const native = async name => import(pathToFileURL(path.join(moduleRoot, name, 'lib/index.js')).href)
 const { Context } = await native('cordis')
+const { createScope } = await native('dsh-scope')
 const { ToolRuntime, defineTool, assertSupportedJsonSchema } = await native('dsh-tools')
 const { LlmRuntime, LlmAdapter } = await native('dsh-llm')
 const { NativeToolExecutor } = await native('dsh-tool-executor-native')
@@ -20,6 +21,7 @@ process.env.DSH_HOME = directory
 delete process.env.DSH_DELEGATION_FIRST
 const ctx = new Context(), routes = new Map(), children = [], outputs = [], sections = [], childAgents = new Map()
 const parent = { id: 'root', options: { provider: 'test', model: 'parent' }, session: { header: {}, requestHeader: () => undefined }, ctx }
+parent.ctx = createScope(ctx, parent).ctx
 ctx.provide('systemPrompt', { tools() {}, section(section) { sections.push(section); return () => {} } })
 ctx.provide('sessions', { get: id => id === 'root' ? parent.session : childAgents.get(id)?.session })
 ctx.provide('agents', { get: id => id === 'root' ? parent : childAgents.get(id), list: () => [parent, ...childAgents.values()] })
@@ -40,7 +42,9 @@ ctx.provide('subagents', {
     assert.equal(spec.provider, 'spawn')
     assert.ok(spec.childId)
     children.push(spec)
-    childAgents.set(spec.childId, { id: spec.childId, options: spec.request.agentOptions, session: { header: { origin: 'subagent', parentSession: parent.id } }, ctx })
+    const child = { id: spec.childId, options: spec.request.agentOptions, session: { header: { origin: 'subagent', parentSession: parent.id } } }
+    child.ctx = createScope(ctx, child).ctx
+    childAgents.set(spec.childId, child)
     const output = Promise.withResolvers()
     outputs.push(output)
     if (probeMismatch) {

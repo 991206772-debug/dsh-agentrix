@@ -63,7 +63,7 @@ const GATED_TOOLS = [
 
 /** A call of one of these means work left this context. */
 const DELEGATION_TOOLS = ['spawn_teammate', 'subagent', 'subagent_fork']
-const MANAGED_ENTRY_POINTS = ['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_status', 'delegation_report', 'delegation_verify', 'delegation_review']
+const MANAGED_ENTRY_POINTS = ['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_status', 'delegation_verify', 'delegation_review']
 const CHANGE_TOOLS = ['write', 'edit', 'apply_patch', 'multi_edit', 'notebook_edit']
 
 /**
@@ -453,6 +453,7 @@ export function apply(ctx) {
     try {
       const names = new Set((tools ?? ctx.tools.schemas(agent)).map(tool => tool.name))
       const missingTools = MANAGED_ENTRY_POINTS.filter(name => !names.has(name))
+      if (!ctx.tools.get('delegation_report')) missingTools.push('delegation_report')
       const nativeAvailable = canDelegate({ agent })
       return { status: missingTools.length || !nativeAvailable ? 'unavailable' : 'available', missingTools, nativeAvailable }
     } catch { return { status: 'unknown', missingTools: [] } }
@@ -503,12 +504,12 @@ export function apply(ctx) {
       state.last = { tool: name, kind: 'managed-dispatch', message, at: Date.now() }
       return message
     }
-    if (current.enabled && orchestration.hasPending(role.agentId) && current.gatedTools.includes(name)) {
+    const managedBlock = current.enabled && current.gatedTools.includes(name) && orchestration.coordinatorWriteBlock(exec)
+    if (managedBlock) {
       state.denied++; state.turnDenied++
-      state.last = { tool: name, kind: 'managed-plan', at: Date.now() }
-      const message = '[DSH Agentrix] 当前计划尚未验收。请监督或返工任务；主控验证通过 delegation_verify 执行，避免与子 Agent 重复修改。'
-      orchestration.recordCoordinationFailure(exec, message)
-      return message
+      state.last = { tool: name, kind: 'managed-plan', message: managedBlock, at: Date.now() }
+      orchestration.recordCoordinationFailure(exec, managedBlock)
+      return managedBlock
     }
     const verdict = canDelegate(exec) ? evaluate(name, state, current) : { allow: true }
     if (verdict.countsAsDelegation) {

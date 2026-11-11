@@ -11,8 +11,11 @@ export const DEFAULT_OPTIONS = Object.freeze({
   models: { worker: null, reviewer: null },
 })
 export const REVIEWER_MODEL_POLICY = 'dispatcher-snapshot'
-export const COORDINATION_POLICY_VERSION = 1
+export const COORDINATION_POLICY_VERSION = 2
 const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork'])
+const COORDINATOR_TOOLS = new Set(['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
+const EXECUTOR_TOOLS = new Set(['delegation_checkpoint', 'delegation_report'])
+const REVIEW_TOOLS = new Set(['read', 'grep', 'glob', ...EXECUTOR_TOOLS])
 const MAX_PLANS = 12
 const MAX_TASKS = 16
 const MIN_ACTIVATIONS = 1
@@ -369,10 +372,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   function notifyParent(plan, task, handle) {
     if (handle.notified || closed || plan.cancelled || plan.wakeSuppressed || plans.get(plan.sessionId) !== plan) return
     handle.notified = true
-    if (waitingParents.has(plan.sessionId)) return
     const parent = service('agents')?.get(plan.sessionId)
     if (parent !== handle.parent) return
     const text = `托管任务 ${task.id}${task.role === 'reviewer' ? ' 的独立审查' : ''} 已返回：${task.status}。${task.error || task.execution?.summary || ''}。请读取 delegation_status，并通过 delegation_verify/review 完成验收；无需 stop 清理。`
+    const waiter = waitingParents.get(plan.sessionId)
+    if (waiter) {
+      if (['review', 'completed'].includes(task.status)) waiter.results.push(text)
+      return
+    }
     const message = runtimeMessage(plan, text, 'delegation-result')
     if (parent.status === 'running') parent.inject?.(message)
     else parent.steer?.(message)
@@ -486,13 +493,13 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       return
     }
     const plan = plans.get(agent.id)
-    if (!plan || !(plan.protocolVersion >= 2) || plan.wakeSuppressed || plan.cancelled && plan.completion) { truncatedOutputs.delete(agent.id); return }
+    if (!plan || !(plan.protocolVersion >= 2) || !isCurrentPlan(plan) || plan.wakeSuppressed || plan.cancelled && plan.completion) { truncatedOutputs.delete(agent.id); return }
     if (pendingMessages(agent.id).length && await recoverDecision(agent.id)) {
       agent.inject(runtimeMessage(plan, '有尚未关联的真实用户消息。请先用 delegation_decide 的 relation 确认 new/continue/update/question；不要按前缀或字数归类，不新开分类代理，然后继续相应任务。', 'delegation-decision-recovery'))
       return
     }
     if (!plan.completion && continueOutput(plan, agent)) { await save(); return }
-    const waiter = { signal, wake: Promise.withResolvers() }
+    const waiter = { signal, wake: Promise.withResolvers(), results: [] }
     waitingParents.set(agent.id, waiter)
     try {
       while (!signal?.aborted) {
@@ -507,12 +514,19 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       }
     } finally { waitingParents.delete(agent.id) }
     if (closed || signal?.aborted || plan.wakeSuppressed) return
+    if (waiter.results.length) {
+      agent.inject(runtimeMessage(plan, waiter.results.join('\n'), 'delegation-result'))
+      await save(); return
+    }
     if (queuedInputs(plan).length) { await save(); return }
     if (deliverSupervision(plan, agent)) { await save(); return }
     if (finishPlan(plan)) { await save(); return }
     plan.recovery ??= { used: 0, limit: RECOVERY_LIMIT }
+    const stage = completionStage(plan)
+    if (plan.recovery.stage && plan.recovery.stage !== stage) plan.recovery.used = 0
+    plan.recovery.stage = stage
     if (plan.recovery.used >= RECOVERY_LIMIT) {
-      finishPlan(plan, '两次自动补流程后仍未完成验收，已停止自动续跑；交付物和证据保留。')
+      finishPlan(plan, '当前阶段两次自动补流程后仍未完成验收，已停止自动续跑；交付物和证据保留。')
       plan.autoDispatch = false
       await save(); return
     }
@@ -547,7 +561,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     return Promise.all(transactions.map(transaction => commitToolResult(transaction, !result.isError)))
   }, { global: true }))
-  const snapshotPlan = plan => {
+  const snapshotPlan = (plan, persist = false) => {
     const budget = activationBudget(plan, getConfig().maxActivations)
     const copy = clone(plan)
     const parent = service('agents')?.get(plan.sessionId)
@@ -558,6 +572,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       } catch { /* No live parent or usable configuration: leave unknown information explicit. */ }
     }
     for (const task of copy.tasks) for (const check of task.checks) delete check.verifying
+    if (!persist) for (const task of targetsOf(copy)) if (task.supervision) delete task.supervision.evidenceIndex
     copy.activationBudget = budget
     delete copy.pendingMessages
     if (plan.source?.messageId === sourceOf(plan.sessionId)?.messageId && pendingMessages(plan.sessionId).length) copy.pendingMessages = clone(pendingMessages(plan.sessionId))
@@ -565,15 +580,35 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (['accepted', 'cancelled'].includes(planStatus(plan))) copy.dispatchWait = null
     return { ...copy, status: planStatus(plan) }
   }
-  const snapshot = () => [...plans.values()].map(snapshotPlan)
+  const snapshot = () => [...plans.values()].map(plan => snapshotPlan(plan))
+  const completionStage = plan => JSON.stringify(targetsOf(plan).map(task =>
+    [task.id, task.role, task.attempts, task.status, task.checks?.map(check => Boolean(check.result?.passed))]))
   const coordinationStage = (plan, taskId) => JSON.stringify(targetsOf(plan).filter(task => !taskId || task.id === taskId).map(task =>
     [task.id, task.role, task.attempts, task.status, task.execution?.commitState, task.checks?.map(check => [check.result?.callId, check.result?.passed])]))
+  const pendingPlan = sessionId => {
+    const plan = plans.get(sessionId)
+    return plan && !['accepted', 'cancelled'].includes(planStatus(plan)) ? plan : null
+  }
+  function isCurrentPlan(plan) {
+    const source = sourceOf(plan.sessionId)
+    return !source?.messageId || source.messageId === plan.source?.messageId
+  }
+  function coordinatorWriteBlock(exec) {
+    const plan = pendingPlan(exec.agent.id)
+    if (!plan) return
+    if (isCurrentPlan(plan)) return '[DSH Agentrix] 当前计划尚未验收。请监督或返工任务；主控验证通过 delegation_verify 执行，避免与子 Agent 重复修改。'
+    const target = exec.arguments?.file_path ?? exec.arguments?.path ?? exec.arguments?.notebook_path
+    if (typeof target !== 'string' || !target.trim()) return
+    const writes = [path.resolve(exec.agent.session?.header?.cwd ?? plan.cwd ?? process.cwd(), target)]
+    const conflict = plan.tasks.find(task => !['accepted', 'cancelled'].includes(task.status) && overlaps({ writes }, task))
+    if (conflict) return `[DSH Agentrix] 另一项需求的任务 ${conflict.id} 尚未验收，当前写入与原需求产物重叠：${target}。请同步给原执行者，或等待原任务验收后修改。`
+  }
   function coordinationContext(sessionId) {
     if (closed || getConfig().enabled === false) return null
     const expected = expectedRoutes.get(sessionId)
     if (expected && !expected.plan.cancelled && !expected.plan.completion) return expected
-    const plan = plans.get(sessionId), source = sourceOf(sessionId)
-    return plan && !plan.cancelled && !plan.completion && (!source?.messageId || source.messageId === plan.source?.messageId)
+    const plan = plans.get(sessionId)
+    return plan && !plan.cancelled && !plan.completion && isCurrentPlan(plan)
       ? { plan, task: null } : null
   }
   function coordinationNext(plan, task, worker = false) {
@@ -610,11 +645,19 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     backgroundSave()
   }
   const conflictingTool = name => COORDINATION_CONFLICT_TOOLS.has(name) || (getConfig().delegationTools ?? []).includes(name)
+  function unavailableTool(agent, name) {
+    if (getConfig().enabled === false) return false
+    const expected = expectedRoutes.get(agent.id)
+    if (expected) return expected.task.role === 'reviewer' ? !REVIEW_TOOLS.has(name) : COORDINATOR_TOOLS.has(name) || conflictingTool(name)
+    const header = agent.session?.header ?? service('sessions')?.get(agent.id)?.header ?? {}
+    if (header.origin === 'subagent' || header.parentSession || header.delegationDepth > 0) return false
+    return EXECUTOR_TOOLS.has(name) || Boolean(coordinationContext(agent.id) && conflictingTool(name))
+  }
   function refreshCoordinationTools(agent) {
     for (const target of agent ? [agent] : service('agents')?.list?.() ?? []) {
       const previous = coordinationRestrictions.get(target.id)
-      const names = coordinationContext(target.id) && target.ctx?.tools?.restrict
-        ? [...(ctx.tools.view?.(target)?.restrictableNames ?? [])].filter(conflictingTool).sort() : []
+      const names = target.ctx?.tools?.restrict
+        ? [...(ctx.tools.view?.(target)?.restrictableNames ?? [])].filter(name => unavailableTool(target, name)).sort() : []
       const key = JSON.stringify(names)
       if (previous?.agent === target && previous.key === key) continue
       previous?.dispose(); coordinationRestrictions.delete(target.id)
@@ -661,10 +704,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         while (dirty) {
           dirty = false
           const batch = [...pendingRecords.entries()].map(([id, entry]) =>
-            ({ id, entry, plan: snapshotPlan(entry.plan), events: entry.events.slice() }))
+            ({ id, entry, plan: snapshotPlan(entry.plan, true), events: entry.events.slice() }))
           await mkdir(path.dirname(file), { recursive: true })
           const temporary = `${file}.tmp`
-          await writeFile(temporary, JSON.stringify({ version: 1, plans: snapshot(), requestUsage: usageLedger.snapshot(), decisions: [...decisions.values()] }), 'utf8')
+          await writeFile(temporary, JSON.stringify({ version: 1, plans: [...plans.values()].map(plan => snapshotPlan(plan, true)), requestUsage: usageLedger.snapshot(), decisions: [...decisions.values()] }), 'utf8')
           await rename(temporary, file)
           for (const item of batch) {
             try {
@@ -837,10 +880,12 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   }
   function workerPrompt(plan, task) {
     return [
-      '你是执行者，使用配置的执行模型，只按主控已确定的方案完成以下任务；不要再委派。遇到未决定的设计问题、缺资料或能力不足时，通过 delegation_report 报告 NEEDS_CONTEXT/BLOCKED 交回主控，不猜测、不自行换模型或扩大范围。',
+      '你是执行者，使用配置的执行模型，按主控确定的目标、接口和边界完成任务，不再委派。可自行决定不改变接口、范围和验收要求的局部实现细节；影响需求含义、接口、数据或权限的不确定性，以及缺资料或能力不足，通过 delegation_report 报告 NEEDS_CONTEXT/BLOCKED 交回主控，不自行换模型或扩大范围。',
       `总目标：${plan.goal}`, `任务：${task.title}`, task.instructions, `边界：${task.scope}`,
       `只允许修改：${task.writes.join('、') || '无（只读）'}`, `交付物：${task.outputs.join('、')}`,
       '验收标准：', ...task.criteria.map((item, i) => `${i + 1}. ${item}`),
+      '自测步骤（与主控验证使用同一份任务卡；自测结果不代表已验收）：',
+      ...task.checks.map((check, i) => `${i + 1}. ${check.tool} ${JSON.stringify(check.arguments)}`),
       ...plan.tasks.filter(item => task.dependsOn.includes(item.id)).map(item => `已验收前置任务 ${item.id}：${item.execution ? item.execution.summary + '；完整报告：' + item.execution.reportPath : brief(item.report)}`),
       task.feedback ? `主控返工要求：${task.feedback}` : '',
       task.reworkIds?.length ? '只修复以下问题及其直接回归，不扩展任务：\n' + JSON.stringify(task.issues.filter(issue => task.reworkIds.includes(issue.id))) : '',
@@ -1610,7 +1655,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (!['investigation', 'implementation', 'verification'].includes(args.phase)) throw new Error('阶段无效')
     const summary = requireText(args.summary, '阶段结论', 2000), nextStep = requireText(args.nextStep, '下一步', 1000)
     const evidence = strings(args.evidence, '阶段证据')
-    if (evidence.length > 8 || evidence.some(id => !task.supervision.evidence.some(item => item.callId === id && !item.failed))) throw new Error('阶段证据必须来自当前子任务本次执行成功返回的工具')
+    if (evidence.length > 8 || evidence.some(id => {
+      const item = Object.hasOwn(task.supervision.evidenceIndex ?? {}, id) ? task.supervision.evidenceIndex[id]
+        : task.supervision.evidence.find(item => item.callId === id)
+      return !item || item.failed
+    })) throw new Error('阶段证据必须来自当前子任务本次执行成功返回的工具')
     task.supervision.checkpoint = { phase: args.phase, summary, nextStep, evidence, at: Date.now(), verified: false }
     task.supervision.lastProgressAt = task.supervision.checkpoint.at
     task.supervision.lastActivityAt = task.supervision.checkpoint.at
@@ -1789,7 +1838,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const { plan } = ownPlan(exec)
     if (args.detail !== undefined && !['summary', 'full'].includes(args.detail)) throw new Error('detail 只能是 summary 或 full')
     if (args.detail === 'full' && !args.taskId) throw new Error('完整详情必须指定 taskId，只读取一个任务')
-    if (args.taskId) return { status: planStatus(plan), task: clone(taskOf(plan, args.taskId)), coordinationIssue: clone(plan.coordinationIssue ?? null), storageError }
+    if (args.taskId) {
+      const task = clone(taskOf(plan, args.taskId))
+      for (const target of task.audit ? [task, task.audit] : [task]) if (target.supervision) delete target.supervision.evidenceIndex
+      return { status: planStatus(plan), task, coordinationIssue: clone(plan.coordinationIssue ?? null), storageError }
+    }
     return { plan: snapshot().find(item => item.sessionId === plan.sessionId), storageError }
   })
   routeTool('delegation_verify', '主控执行任务卡上指定的验证步骤（checkIndex 从 0 开始）。通过 DSH 工具管线，返回真实证据 callId；不消耗动手预算。', { taskId: string, checkIndex: { type: 'integer' } }, ['taskId', 'checkIndex'], verify)
@@ -1876,7 +1929,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   })
   return {
     ready, snapshot, observe, allowsVerification, decisionFor, decisionCurrent, recoverDecision, sourceOf, revisionOf,
-    refreshCoordinationTools, guardCoordination, recordCoordinationFailure,
+    refreshCoordinationTools, guardCoordination, coordinatorWriteBlock, recordCoordinationFailure,
     pendingMessages: id => clone(pendingMessages(id)),
     requestContext: sessionId => clone(decisions.get(sessionId) ?? null), supervisionPolicy: SUPERVISION_POLICY,
     requestUsage(sessionId) { const entry = usageFor(sessionId); return entry ? clone(entry) : null },
@@ -1888,9 +1941,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         ? '[DSH Agentrix] 报告已提交，子回合正在结束，不能继续执行工具。' : '[DSH Agentrix] 报告正在确认，不能继续执行工具。'
       if (!expected) return undefined
       if (task.protocolVersion >= 2 && exec.name === 'send_message') return '[DSH Agentrix] 托管任务必须通过 delegation_report 提交正式报告；普通消息不能代替报告。'
-      if (['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'].includes(exec.name)) return '[DSH Agentrix] 此入口仅供主控。子代理读取使用 read/grep/glob，阶段进度使用 delegation_checkpoint，最终结果使用 delegation_report。'
+      if (COORDINATOR_TOOLS.has(exec.name)) return '[DSH Agentrix] 此入口仅供主控。子代理读取使用 read/grep/glob，阶段进度使用 delegation_checkpoint，最终结果使用 delegation_report。'
       if (['subagent', 'subagent_fork', 'spawn_teammate', ...(getConfig().delegationTools ?? [])].includes(exec.name)) return '[DSH Agentrix] 执行者和审查者不能继续委派。'
-      if (expected.task.role === 'reviewer' && !['read', 'grep', 'glob', 'delegation_checkpoint', 'delegation_report'].includes(exec.name)) return '[DSH Agentrix] 独立审查只允许只读检索、阶段记录和最终报告；命令与实际验证由主控执行。'
+      if (expected.task.role === 'reviewer' && !REVIEW_TOOLS.has(exec.name)) return '[DSH Agentrix] 独立审查只允许只读检索、阶段记录和最终报告；命令与实际验证由主控执行。'
       if (task.supervision) { task.supervision.lastActivityAt = Date.now(); task.supervision.activity = { kind: 'tool', tool: exec.name, at: Date.now() }; backgroundSave() }
     },
     async history(before) { await ready; if (writing) await writing; return records.history(before) },
@@ -1927,7 +1980,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       return [`当前计划：${brief(plan.goal, 200)}\n状态：${planStatus(plan)}；${plan.tasks.map(task => `${task.id}=${task.status}${task.audit ? '（独立审查=' + task.audit.status + '）' : ''}`).join('，')}。启动预算：${budget.used}/${budget.limit}，剩余 ${budget.remaining}（含独立审查）。调用 delegation_status 获取证据并继续监督；最终交付结论以程序回执为准，最后一次验收后自动结束，不用 stop 清理。`, plan.completion ? completionText(plan.completion) : '尚未完成。报告由原执行者提交，主控等待通知后验证验收；团队看板和 list_agents 不是托管任务的完成依据。', coordination, issue ? issue.message + '。' + issue.action : '', pending, waiting, paused,
         association, failures.length ? `失败原因：\n${failures.join('\n')}` : ''].filter(Boolean).join('\n')
     },
-    hasPending: sessionId => { const plan = plans.get(sessionId); return Boolean(plan && !['accepted', 'cancelled'].includes(planStatus(plan))) },
+    hasPending: sessionId => { const plan = pendingPlan(sessionId); return Boolean(plan && isCurrentPlan(plan)) },
     async dispose() {
       if (closed) return
       closed = true

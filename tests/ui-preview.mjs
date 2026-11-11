@@ -234,7 +234,7 @@ const server = http.createServer(async (request, response) => {
       if (loadError) { response.statusCode = 503; response.end(JSON.stringify({ ok: false, error: '本地任务服务暂不可用（隔离测试）' })); return }
       const sessionId = url.searchParams.get('sessionId')
       if (process.argv.includes('--slow') && sessionId === plans[0].sessionId) await new Promise(resolve => setTimeout(resolve, 1500))
-      response.end(JSON.stringify({ ok: true, sessionId, mode: config.mode, coordinationPolicyVersion: coordinationConflict ? 1 : undefined, requestBindingVersion: process.argv.includes('--model-relationship') ? 2 : undefined, runtimePolicyVersion: nextRequest || liveProgress ? 2 : undefined, plans: directProgress ? [] : plans.filter(plan => plan.sessionId === sessionId), sessions: directProgress ? [directSession].filter(row => row.sessionId === sessionId) : liveProgress ? [
+      response.end(JSON.stringify({ ok: true, sessionId, mode: config.mode, coordinationPolicyVersion: coordinationConflict ? 2 : undefined, requestBindingVersion: process.argv.includes('--model-relationship') ? 2 : undefined, runtimePolicyVersion: nextRequest || liveProgress ? 2 : undefined, plans: directProgress ? [] : plans.filter(plan => plan.sessionId === sessionId), sessions: directProgress ? [directSession].filter(row => row.sessionId === sessionId) : liveProgress ? [
         { sessionId: plans[0].sessionId, source: plans[0].source, turnStats: { direct: 0, delegated: 1, denied: 0 } },
       ] : nextRequest ? [
         { sessionId: plans[0].sessionId, source: { messageId: 'request-new', text: '核查代码实际调用了哪些密码接口' }, route: { route: 'direct', reasons: ['scope_small'] },

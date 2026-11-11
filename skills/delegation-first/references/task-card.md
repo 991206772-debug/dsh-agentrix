@@ -37,7 +37,7 @@
     "complexityReason": "沿用现有测试结构补充明确的失败场景",
     "criteria": ["覆盖密码错误和账号锁定两条路径", "相关测试退出码为 0"],
     "checks": [
-      {"tool": "read", "arguments": {"path": "tests/login.failures.test.js"}},
+      {"tool": "read", "arguments": {"file_path": "tests/login.failures.test.js"}},
       {"tool": "pwsh", "arguments": {"description": "Run login failure tests", "command": "node --test tests/login.failures.test.js"}}
     ]
   }]

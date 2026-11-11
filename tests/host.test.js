@@ -78,6 +78,29 @@ export async function host() {
 
 const complex = '1. 重构所有模块并且迁移数据\n2. 批量修复接口同时补充测试套件'
 
+test('a new direct request can write unrelated files while the previous plan keeps its deliverables protected', async () => {
+  const h = await host(); await h.state()
+  try {
+    h.turn('生成原需求产物', 'old-demand')
+    await h.definitions.get('delegation_plan').execute({ goal: '生成原需求产物', relation: 'new', decisionReason: '原任务交给执行模型。',
+      tasks: [{ id: 'old', title: '原任务', instructions: '生成 old.js', scope: 'old.js', outputs: ['old.js'], writes: ['old.js'],
+        complexity: 'routine', criteria: ['文件存在'], checks: [{ tool: 'read', arguments: { file_path: 'old.js' } }] }] }, { agent: h.agent, callId: 'plan-old' })
+    h.turn('另外修改独立便签', 'new-demand')
+    await h.decide('新需求仅修改另一份便签，主控直接处理。', 'new')
+    assert.equal(h.call('write', 'new-write', h.agent, { file_path: 'new-note.md' }), undefined)
+    assert.match(h.call('edit', 'overlapping-write', h.agent, { file_path: 'old.js' }), /原需求|另一项需求/)
+    h.result('write', { isError: true, content: [{ type: 'text', text: 'new-note.md write failed' }] }, 'new-write')
+    await h.stopping()
+    assert.ok(h.injections.some(message => message.source.kind === 'delegation-direct-recovery'), 'the new request retains direct-write recovery')
+    assert.equal(h.injections.filter(message => message.source.kind === 'delegation-recovery').length, 0, 'finishing the new request must not force recovery of the previous plan')
+    const result = await new Promise(resolve => h.routes.get('/dsh-delegation-first/api/state')({ method: 'GET', url: '/dsh-delegation-first/api/state?sessionId=root' },
+      { writeHead() {}, end(text) { resolve(JSON.parse(text)) } }))
+    assert.equal(result.plans[0].source.messageId, 'old-demand')
+    assert.equal(result.plans[0].tasks[0].status, 'queued')
+    assert.equal(result.sessions[0].source.messageId, 'new-demand')
+  } finally { await h.close() }
+})
+
 test('host guards and request tools share managed coordination policy, including denied writes', async () => {
   const h = await host(); await h.state()
   const tools = ['read', 'list_agents', 'team_task_list', 'team_task_create', 'team_task_update', 'wait_agent'].map(name => ({ name }))
@@ -100,7 +123,7 @@ test('host guards and request tools share managed coordination policy, including
     assert.match(h.call('write', 'denied-write', h.agent, { file_path: 'tool.html' }), /尚未验收/)
     const response = await new Promise(resolve => h.routes.get('/dsh-delegation-first/api/state')({ method: 'GET', url: '/dsh-delegation-first/api/state?sessionId=root' },
       { writeHead() {}, end(text) { resolve(JSON.parse(text)) } }))
-    assert.equal(response.coordinationPolicyVersion, 1)
+    assert.equal(response.coordinationPolicyVersion, 2)
     assert.equal(response.plans[0].coordinationIssue.callId, 'denied-write')
     assert.equal(response.plans[0].completion, null)
     assert.equal(h.call('team_task_list'), undefined)

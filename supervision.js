@@ -11,7 +11,7 @@ export function startSupervision(task, now, timeoutMs) {
     idleMs: 10 * 60_000,
     lastProgressAt: now, failure: null, checkpoint: null, activity: { kind: 'waiting_model', at: now },
     limits: { ...EXECUTION_BUDGET }, notices: {},
-    metrics: { requests: 0, inputTokens: 0, outputTokens: 0, contextTokens: 0 }, evidence: [] }
+    metrics: { requests: 0, inputTokens: 0, outputTokens: 0, contextTokens: 0 }, evidence: [], evidenceIndex: {} }
   return task.supervision
 }
 
@@ -49,14 +49,18 @@ export function observeRequest(task, now) {
 export function observeTool(task, exec, result, now) {
   const state = task.supervision
   if (!state || exec.name.startsWith('delegation_')) return null
-  if (typeof exec.callId === 'string' && state.evidence.some(item => item.callId === exec.callId)) return null
+  const index = state.evidenceIndex ??= Object.fromEntries((state.evidence ?? []).map(item => [item.callId, item]))
+  if (typeof exec.callId === 'string' && Object.hasOwn(index, exec.callId)) return null
   const text = (result.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')
   const exitCode = result.value?.exitCode ?? Number(text.match(/\[exit code: (\d+)\]/)?.[1] ?? 0)
   const failed = Boolean(result.isError || exitCode !== 0)
   state.lastActivityAt = now
   state.activity = { kind: 'waiting_model', at: now, tool: exec.name }
   const evidence = { callId: exec.callId, tool: exec.name, at: now, failed }
-  if (typeof exec.callId === 'string') state.evidence = [...state.evidence, evidence].slice(-16)
+  if (typeof exec.callId === 'string') {
+    Object.defineProperty(index, exec.callId, { value: evidence, enumerable: true, configurable: true, writable: true })
+    state.evidence = [...state.evidence, evidence].slice(-16)
+  }
   if (!failed) {
     state.failure = null
     if (['write', 'edit', 'apply_patch'].includes(exec.name) || ['pwsh', 'bash'].includes(exec.name) && result.value?.exitCode === 0) {

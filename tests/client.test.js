@@ -5,12 +5,25 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('acceptance distinguishes the current coordination policy from a host still running the previous policy', async () => {
+  for (const version of [1, 2]) {
+    const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+      sessionId: 'session-current', plans: [], sessions: [], coordinationPolicyVersion: version }) }) })
+    const view = f.mountView('session-current')
+    try {
+      await view.flush()
+      assert.match(view.text(), version === 2 ? /协作执行策略已生效（v2）/ : /协作执行策略等待加载/)
+      if (version === 1) assert.doesNotMatch(view.text(), /协作执行策略已生效/)
+    } finally { view.close(); f.close() }
+  }
+})
+
 test('managed chat keeps an explicit incomplete label through errors and acceptance until a delivery receipt exists', async () => {
   const plan = { protocolVersion: 2, sessionId: 'session-current', status: 'running', completion: null,
     tasks: [{ id: 'a', title: '生成独立工具', status: 'running' }],
     coordinationIssue: { code: 'COORDINATION_OPERATION_FAILED', tool: 'write', callId: 'denied-write', message: '主控写入被拒绝',
       nextAction: '等待原执行者提交正式报告，再验证验收。', at: 100 } }
-  const body = { ok: true, enabled: true, coordinationPolicyVersion: 1, sessionId: 'session-current', plans: [plan], sessions: [] }
+  const body = { ok: true, enabled: true, coordinationPolicyVersion: 2, sessionId: 'session-current', plans: [plan], sessions: [] }
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
   const dock = f.mountDock('session-current'), action = f.mountAction('session-current')
   try {

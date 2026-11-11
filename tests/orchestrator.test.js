@@ -18,6 +18,90 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('normal results advance three dependent tasks without spending completion recovery', async () => {
+  const f = await fixture({ autoConclude: true })
+  await f.plan([card('a'), card('b', { dependsOn: ['a'] }), card('c', { dependsOn: ['b'] })])
+  await f.execute('delegation_run')
+  for (const [index, taskId] of ['a', 'b', 'c'].entries()) {
+    const waiting = f.endTurn()
+    await tick()
+    await f.report(index, { status: 'DONE', summary: taskId + ' 已返回', report: '交付物已检查，等待主控验证' })
+    await waiting
+    assert.equal(f.snapshot().recovery.used, 0, 'a normal result notification is not a missing-step recovery')
+    assert.equal(f.snapshot().completion, null)
+    const proof = await f.execute('delegation_verify', { taskId, checkIndex: 0 })
+    await f.execute('delegation_review', { taskId, verdict: 'accept', findings: [{ criterion: 0, finding: '实际检查通过', evidence: [proof.callId] }] })
+  }
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+  assert.equal(f.calls.length, 3)
+  assert.equal(f.parent.injected.filter(message => message.source.kind === 'delegation-recovery').length, 0)
+  assert.equal(f.parent.injected.filter(message => message.source.kind === 'delegation-result').length, 3)
+  assert.ok(f.pending.every(item => item.receipt.disposeCount === 1))
+})
+
+test('completion recovery is bounded per unchanged stage and advances only with actual validation', async () => {
+  const f = await fixture()
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  await f.endTurn(); await f.endTurn()
+  assert.equal(f.snapshot().recovery.used, 2)
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  assert.equal(proof.passed, true)
+  await f.endTurn()
+  assert.equal(f.snapshot().recovery.used, 1, 'actual verification starts the acceptance stage without inheriting the prior stage cap')
+  assert.equal(f.snapshot().completion, null)
+  await f.execute('delegation_status')
+  await f.endTurn()
+  assert.equal(f.snapshot().recovery.used, 2, 'status reads do not reset the recovery cap')
+  await f.reload()
+  await f.endTurn()
+  assert.equal(f.snapshot().completion.outcome, 'blocked')
+})
+
+test('the worker receives the exact planned verification tools and arguments without changing its model', async () => {
+  const f = await fixture()
+  const checks = [{ tool: 'read', arguments: { file_path: 'src/result.js' } },
+    { tool: 'pwsh', arguments: { command: 'node --test tests/specific-contract.test.js', description: 'Verify the delivery contract' } }]
+  await f.plan([card('a', { checks })]); await f.execute('delegation_run')
+  const prompt = f.calls[0].request.prompt.map(block => block.text).join('\n')
+  for (const check of checks) {
+    assert.ok(prompt.includes(check.tool))
+    assert.ok(prompt.includes(JSON.stringify(check.arguments)), 'planned check arguments are supplied intact')
+  }
+  assert.match(prompt, /局部实现|实现细节/)
+  assert.equal(f.calls[0].request.agentOptions.model, 'cheap')
+  assert.equal(f.snapshot().tasks[0].execution, null)
+})
+
+test('checkpoints retain early successful evidence without exposing the full index or accepting foreign and stale calls', async () => {
+  const f = await fixture()
+  await f.plan([card('a'), card('b')]); await f.execute('delegation_run')
+  for (let i = 0; i < 64; i++) f.engine.observe({ agent: f.children[0], name: 'read', callId: 'read-' + i }, { isError: false, content: [] })
+  f.engine.observe({ agent: f.children[0], name: 'read', callId: 'failed-read' }, { isError: true, content: [{ type: 'text', text: 'file not found' }] })
+  f.engine.observe({ agent: f.children[1], name: 'read', callId: 'foreign-read' }, { isError: false, content: [] })
+  const args = { phase: 'investigation', summary: '已核对早期读取的接口定义', nextStep: '按定义实现', evidence: ['read-0'] }
+  await f.checkpoint(0, args)
+  assert.equal(f.snapshot().tasks[0].supervision.evidence.length, 16, 'recent activity remains compact')
+  assert.equal(f.snapshot().tasks[0].supervision.evidenceIndex, undefined, 'the UI snapshot does not include the internal lookup index')
+  const full = await f.execute('delegation_status', { taskId: 'a', detail: 'full' })
+  assert.equal(full.task.supervision.evidenceIndex, undefined, 'full task reports do not resend all tool metadata')
+  await assert.rejects(f.checkpoint(0, { ...args, evidence: ['failed-read'] }), /证据/)
+  await assert.rejects(f.checkpoint(0, { ...args, evidence: ['foreign-read'] }), /证据/)
+  await f.engine.readArchive(f.snapshot().archive.id)
+  const saved = JSON.parse(await readFile(f.file, 'utf8')).plans[0].tasks[0]
+  assert.equal(saved.supervision.evidenceIndex['read-0'].failed, false, 'the index is persisted, not inferred from the recent window')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'rework', issues: [{ criterion: 0, severity: 'important', finding: '需要修正实际结果', evidence: [proof.callId] }] })
+  await assert.rejects(f.checkpoint(2, args), /证据/, 'the previous attempt does not authorize evidence in the new attempt')
+  f.engine.observe({ agent: f.children[2], name: 'read', callId: 'new-attempt-read' }, { isError: false, content: [] })
+  await f.checkpoint(2, { ...args, evidence: ['new-attempt-read'] })
+  await f.reload()
+  const restored = await f.engine.readArchive(f.snapshot().archive.id)
+  assert.equal(restored.plan.tasks[0].supervision.evidenceIndex['new-attempt-read'].failed, false)
+  assert.equal(restored.plan.tasks[0].supervision.evidenceIndex['read-0'], undefined)
+})
+
 test('managed coordination guards conflicting tools but preserves observers and unrelated agents', async () => {
   const f = await fixture()
   assert.equal(f.engine.guardCoordination({ agent: f.parent, name: 'team_task_create', arguments: {} }), undefined, 'direct work keeps its existing tools')
@@ -392,6 +476,8 @@ test('read-only reviewers keep working and may checkpoint their evidence without
   }
   assert.equal(f.engine.guardChild({ agent: audit, name: 'delegation_checkpoint' }), undefined)
   await f.checkpoint(1, { phase: 'verification', summary: '已核对七份交付物。', nextStep: '提交审查报告。', evidence: ['part-6'] })
+  const full = await f.execute('delegation_status', { taskId: 'a', detail: 'full' })
+  assert.equal(full.task.audit.supervision.evidenceIndex, undefined, 'review evidence lookup stays internal in worker detail too')
   assert.equal(f.snapshot().tasks[0].audit.status, 'running')
   assert.equal(f.snapshot().tasks[0].audit.supervision.used, 0)
   assert.equal(f.snapshot().tasks[0].audit.supervision.pending, null)
@@ -619,7 +705,8 @@ test('coordinator stopping waits on the original child and user cancellation pre
   await f.report(0, { status: 'DONE', summary: '已返回', report: '等待实际验证' })
   await waiting
   assert.equal(f.calls.length, 1)
-  assert.equal(f.parent.injected.filter(message => message.source.kind === 'delegation-recovery').length, 1)
+  assert.equal(f.parent.injected.filter(message => message.source.kind === 'delegation-result').length, 1)
+  assert.equal(f.snapshot().recovery.used, 0)
   const cancelled = await fixture()
   await cancelled.plan([card('b')]); await cancelled.execute('delegation_run')
   const controller = new AbortController(), stop = cancelled.endTurn(undefined, controller.signal)
