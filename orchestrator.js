@@ -11,6 +11,8 @@ export const DEFAULT_OPTIONS = Object.freeze({
   models: { worker: null, reviewer: null },
 })
 export const REVIEWER_MODEL_POLICY = 'dispatcher-snapshot'
+export const COORDINATION_POLICY_VERSION = 1
+const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork'])
 const MAX_PLANS = 12
 const MAX_TASKS = 16
 const MIN_ACTIVATIONS = 1
@@ -57,7 +59,7 @@ function compactResult(value) {
   if (value.plan) result.plan = { sessionId: value.plan.sessionId, goal: brief(value.plan.goal, 300), status: value.plan.status,
     decision: value.plan.decision,
     activationBudget: value.plan.activationBudget, dispatchWait: value.plan.dispatchWait,
-    coordinatorIssue: value.plan.coordinatorIssue, messageResolution: value.plan.messageResolution,
+    coordinatorIssue: value.plan.coordinatorIssue, coordinationIssue: value.plan.coordinationIssue, messageResolution: value.plan.messageResolution,
     inputs: (value.plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)).map(input => ({ id: input.id, text: brief(input.text, 400), status: input.status })),
     tasks: value.plan.tasks.map(compactTask) }
   if (value.task) result.task = compactTask(value.task)
@@ -227,6 +229,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const noteRequests = new Map(), noteWrites = new Map()
   const stagedResults = new Map(), pendingTransports = new Map(), committing = new Set()
   const waitingParents = new Map()
+  const coordinationFailures = new Set(), coordinationCalls = new Map(), coordinationRestrictions = new Map()
   const inboxes = new Map()
   const cancellingPlans = new Set()
   const records = createTaskRecords(file), pendingRecords = new Map()
@@ -532,6 +535,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return operation
   }
   disposers.push(ctx.on('tools/result', (exec, result) => {
+    observeCoordinationResult(exec, result)
     const transactions = pendingTransports.get(exec.token) ?? []
     pendingTransports.delete(exec.token)
     const staged = stagedResults.get(exec)
@@ -562,6 +566,81 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return { ...copy, status: planStatus(plan) }
   }
   const snapshot = () => [...plans.values()].map(snapshotPlan)
+  const coordinationStage = (plan, taskId) => JSON.stringify(targetsOf(plan).filter(task => !taskId || task.id === taskId).map(task =>
+    [task.id, task.role, task.attempts, task.status, task.execution?.commitState, task.checks?.map(check => [check.result?.callId, check.result?.passed])]))
+  function coordinationContext(sessionId) {
+    if (closed || getConfig().enabled === false) return null
+    const expected = expectedRoutes.get(sessionId)
+    if (expected && !expected.plan.cancelled && !expected.plan.completion) return expected
+    const plan = plans.get(sessionId), source = sourceOf(sessionId)
+    return plan && !plan.cancelled && !plan.completion && (!source?.messageId || source.messageId === plan.source?.messageId)
+      ? { plan, task: null } : null
+  }
+  function coordinationNext(plan, task, worker = false) {
+    if (worker) return '继续原任务；读取使用 read/grep/glob，阶段记录用 delegation_checkpoint，正式报告用 delegation_report。不要另建团队任务或再次委派。'
+    const tasks = task ? [task] : plan.tasks
+    if (tasks.some(item => LIVE.includes(item.status) || LIVE.includes(item.audit?.status))) return '等待原执行者或独立审查提交正式报告，收到通知后用 delegation_verify 和 delegation_review 验收；不要重试运行中的任务，也不需要原生 wait_agent。'
+    if (tasks.some(item => item.status === 'review')) return '对已返回任务使用 delegation_verify 实际验证，再用 delegation_review 逐项验收；主控不能代交 delegation_report。'
+    if (tasks.some(item => item.status === 'queued')) return '用 delegation_run 启动已有任务；查看真实执行状态用 delegation_status，纠偏用 delegation_control。'
+    if (tasks.some(item => ['failed', 'blocked', 'cancelled'].includes(item.status))) return '用 delegation_status 核对失败原因，处理后通过 delegation_control 明确重试；不要另建同名团队任务。'
+    return '等待程序确认验收并生成交付回执；团队看板的完成标记不能代替正式验收。'
+  }
+  function resolveCoordinationIssue(plan, exec) {
+    const issue = plan.coordinationIssue
+    if (!issue || issue.resolvedAt) return
+    const matchingSuccess = exec && exec.name === issue.tool && (exec.arguments?.taskId ?? null) === (issue.taskId ?? null)
+    if (!matchingSuccess && issue.stage === coordinationStage(plan, issue.taskId)) return
+    issue.resolvedAt = Date.now()
+    remember(plan, 'plan.coordination_resolved', '协作操作问题已随正确操作或任务进展解决', undefined, { callId: issue.callId, resolvedAt: issue.resolvedAt })
+  }
+  function recordCoordinationFailure(exec, message, code = 'COORDINATION_OPERATION_FAILED') {
+    const context = coordinationContext(exec.agent?.id)
+    if (!context) return
+    const { plan } = context, worker = plan.sessionId !== exec.agent.id
+    const key = `${exec.agent.id}:${exec.callId}`
+    if (exec.callId && (coordinationFailures.has(key) || plan.coordinationIssue?.callId === exec.callId && plan.coordinationIssue.agentId === exec.agent.id)) return
+    if (exec.callId) coordinationFailures.add(key)
+    if (coordinationFailures.size > 1024) coordinationFailures.delete(coordinationFailures.values().next().value)
+    const task = context.task ?? plan.tasks.find(item => item.id === exec.arguments?.taskId) ?? (plan.tasks.length === 1 ? plan.tasks[0] : null)
+    plan.coordinationIssue = { code, tool: exec.name, callId: exec.callId ?? null, agentId: exec.agent.id, role: worker ? modelRole(task) : 'coordinator',
+      ...(task ? { taskId: task.id } : {}), message: brief(message, 1000), nextAction: coordinationNext(plan, task, worker), at: Date.now(),
+      stage: coordinationStage(plan, task?.id) }
+    remember(plan, 'plan.coordination_failed', (worker ? '执行者操作未执行：' : '主控操作未执行：') + exec.name + '；' + brief(message, 500),
+      undefined, { coordinationIssue: clone(plan.coordinationIssue) })
+    backgroundSave()
+  }
+  const conflictingTool = name => COORDINATION_CONFLICT_TOOLS.has(name) || (getConfig().delegationTools ?? []).includes(name)
+  function refreshCoordinationTools(agent) {
+    for (const target of agent ? [agent] : service('agents')?.list?.() ?? []) {
+      const previous = coordinationRestrictions.get(target.id)
+      const names = coordinationContext(target.id) && target.ctx?.tools?.restrict
+        ? [...(ctx.tools.view?.(target)?.restrictableNames ?? [])].filter(conflictingTool).sort() : []
+      const key = JSON.stringify(names)
+      if (previous?.agent === target && previous.key === key) continue
+      previous?.dispose(); coordinationRestrictions.delete(target.id)
+      if (names.length) coordinationRestrictions.set(target.id, { agent: target, key, dispose: target.ctx.tools.restrict({ deny: names }) })
+    }
+  }
+  disposers.push(ctx.on('agent/created', async ({ agent }) => { await ready; refreshCoordinationTools(agent) }, { global: true }))
+  disposers.push(ctx.on('agent/disposed', ({ agent }) => {
+    coordinationRestrictions.get(agent.id)?.dispose(); coordinationRestrictions.delete(agent.id)
+  }, { global: true }))
+  function guardCoordination(exec) {
+    const context = coordinationContext(exec.agent?.id)
+    if (!context || !conflictingTool(exec.name)) return
+    const message = `[DSH Agentrix] 当前任务由 Agentrix 托管，不能使用 ${exec.name} 另建、完成或等待另一套任务。真实状态以 delegation_status 为准。` +
+      coordinationNext(context.plan, context.task, context.plan.sessionId !== exec.agent.id)
+    recordCoordinationFailure(exec, message, 'COORDINATION_TOOL_CONFLICT')
+    return message
+  }
+  function observeCoordinationResult(exec, result) {
+    const context = coordinationContext(exec.agent?.id)
+    if (!context || context.plan.sessionId !== exec.agent.id ||
+      !([...CHECK_TOOLS, 'write', 'edit', 'apply_patch', 'multi_edit', 'notebook_edit'].includes(exec.name) || exec.name?.startsWith('delegation_') || conflictingTool(exec.name))) return
+    if (result.isError || result.value?.passed === false) recordCoordinationFailure(exec, textOf(result.content) || result.value?.summary || '工具没有成功执行')
+    else if (context.plan.coordinationIssue?.callId !== exec.callId && !coordinationFailures.has(`${exec.agent.id}:${exec.callId}`) &&
+      !['delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_decide'].includes(exec.name)) resolveCoordinationIssue(context.plan, exec)
+  }
   function remember(plan, type, message, task, details = {}) {
     records.attach(plan)
     const event = { id: randomUUID(), type, at: Date.now(), message: brief(message, 1000),
@@ -571,6 +650,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     plan.recentEvents = [...(plan.recentEvents || []), { id, type, at, message: event.message, ...(taskId ? { taskId } : {}) }].slice(-8)
     if (!pendingRecords.has(plan.archive.id)) pendingRecords.set(plan.archive.id, { plan, events: [] })
     pendingRecords.get(plan.archive.id).events.push(event)
+    if (!type.startsWith('plan.coordination_')) resolveCoordinationIssue(plan)
+    refreshCoordinationTools()
   }
   const save = () => {
     if (recoveryFailed) return Promise.reject(new Error(`任务文件恢复失败，保留原文件：${storageError}`))
@@ -652,6 +733,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     } catch (error) {
       if (error.code !== 'ENOENT') { recoveryFailed = true; storageError = messageOf(error); console.warn('[dsh-delegation-first] 任务恢复失败：%s', storageError) }
     }
+    refreshCoordinationTools()
   })()
   function own(exec) {
     if (closed) throw new Error('插件已停止')
@@ -1126,6 +1208,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return operation
   }
   function observe(exec, result) {
+    observeCoordinationResult(exec, result)
     const childPlan = [...plans.values()].find(plan => targetsOf(plan).some(task => task.childId === exec.agent?.id && LIVE.includes(task.status)))
     if (childPlan) {
       const task = targetsOf(childPlan).find(task => task.childId === exec.agent.id)
@@ -1142,6 +1225,20 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   // committed error before native cleanup releases the child Agent.
   disposers.push(ctx.on('session/event', (session, event) => {
     observeInput(session, event)
+    if (coordinationContext(session?.id) && plans.has(session.id)) {
+      if (event?.type === 'tool/call') {
+        const call = event.data
+        let args = call.arguments
+        try { if (typeof args === 'string') args = JSON.parse(args) } catch { args = {} }
+        coordinationCalls.set(`${session.id}:${call.callId}`, { name: call.name, callId: call.callId,
+          arguments: { taskId: args?.taskId }, agent: { id: session.id } })
+        if (coordinationCalls.size > 256) coordinationCalls.delete(coordinationCalls.keys().next().value)
+      } else if (event?.type === 'tool/result') {
+        const message = event.data?.message, key = `${session.id}:${message?.toolCallId}`, exec = coordinationCalls.get(key)
+        coordinationCalls.delete(key)
+        if (exec) observeCoordinationResult(exec, message)
+      }
+    }
     const parentPlan = plans.get(session?.id)
     if (event?.type === 'assistant/message') {
       const expected = expectedRoutes.get(session?.id)
@@ -1492,7 +1589,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const routeTool = (name, description, properties, required, execute, child = false) => {
     const definition = { name, description, parameters: { ...object(properties), required },
       output: { schema: { type: 'object', additionalProperties: true }, render: (args, value) => [{ type: 'text', text: value.completion ? [completionText(value.completion), value.continuation].filter(Boolean).join('\n') : JSON.stringify(args.detail === 'full' ? value : compactResult(value)) }] },
-      async execute(args, exec) { await ready; if (committing.size) await Promise.all(committing); if (!child) own(exec); return execute(args, exec) } }
+      async execute(args, exec) {
+        try { await ready; if (committing.size) await Promise.all(committing); if (!child) own(exec); return await execute(args, exec) }
+        catch (error) { recordCoordinationFailure(exec, messageOf(error)); throw error }
+        finally { refreshCoordinationTools(exec.agent) }
+      } }
     disposers.push(ctx.tools.register(definition))
   }
   routeTool('delegation_decide', '主控结合上下文确认消息关联：new 新需求、continue 继续、update 补充或调整、question 询问进度或提问。新需求/方案变化同时提供 direct/delegate 和理由；继续/询问沿用原决定。messageId 只能引用本会话真实消息，多条待关联时必填。先读文件准备，普通正文不能代替记录。', {
@@ -1688,7 +1789,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const { plan } = ownPlan(exec)
     if (args.detail !== undefined && !['summary', 'full'].includes(args.detail)) throw new Error('detail 只能是 summary 或 full')
     if (args.detail === 'full' && !args.taskId) throw new Error('完整详情必须指定 taskId，只读取一个任务')
-    if (args.taskId) return { status: planStatus(plan), task: clone(taskOf(plan, args.taskId)), storageError }
+    if (args.taskId) return { status: planStatus(plan), task: clone(taskOf(plan, args.taskId)), coordinationIssue: clone(plan.coordinationIssue ?? null), storageError }
     return { plan: snapshot().find(item => item.sessionId === plan.sessionId), storageError }
   })
   routeTool('delegation_verify', '主控执行任务卡上指定的验证步骤（checkIndex 从 0 开始）。通过 DSH 工具管线，返回真实证据 callId；不消耗动手预算。', { taskId: string, checkIndex: { type: 'integer' } }, ['taskId', 'checkIndex'], verify)
@@ -1775,6 +1876,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   })
   return {
     ready, snapshot, observe, allowsVerification, decisionFor, decisionCurrent, recoverDecision, sourceOf, revisionOf,
+    refreshCoordinationTools, guardCoordination, recordCoordinationFailure,
     pendingMessages: id => clone(pendingMessages(id)),
     requestContext: sessionId => clone(decisions.get(sessionId) ?? null), supervisionPolicy: SUPERVISION_POLICY,
     requestUsage(sessionId) { const entry = usageFor(sessionId); return entry ? clone(entry) : null },
@@ -1820,7 +1922,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         '\n先用 delegation_decide(relation,messageId) 确认 new/continue/update/question；多条消息分别确认，不按措辞归属，也不自动取消旧任务。' : ''
       const pending = inputs.length ? '待处理用户补充：\n' + inputs.map(input => `${input.id}（${input.status}）：${brief(input.text, 400)}`).join('\n') +
         '\n先说明理解与影响；执行变更用 delegation_control steer(inputIds,additionalCriteria,message) 同步原代理；结果已返回则核对后 delegation_review rework。纯答复用 acknowledge(inputIds,message) 记录，不改变交付标准。未处理前不能验收。' : ''
-      return [`当前计划：${brief(plan.goal, 200)}\n状态：${planStatus(plan)}；${plan.tasks.map(task => `${task.id}=${task.status}${task.audit ? '（独立审查=' + task.audit.status + '）' : ''}`).join('，')}。启动预算：${budget.used}/${budget.limit}，剩余 ${budget.remaining}（含独立审查）。调用 delegation_status 获取证据并继续监督；最终交付结论以程序回执为准，最后一次验收后自动结束，不用 stop 清理。`, plan.completion ? completionText(plan.completion) : '', issue ? issue.message + '。' + issue.action : '', pending, waiting, paused,
+      const coordination = plan.coordinationIssue && !plan.coordinationIssue.resolvedAt
+        ? `协作操作未成功：${plan.coordinationIssue.tool}；${plan.coordinationIssue.message}\n下一步：${plan.coordinationIssue.nextAction}` : ''
+      return [`当前计划：${brief(plan.goal, 200)}\n状态：${planStatus(plan)}；${plan.tasks.map(task => `${task.id}=${task.status}${task.audit ? '（独立审查=' + task.audit.status + '）' : ''}`).join('，')}。启动预算：${budget.used}/${budget.limit}，剩余 ${budget.remaining}（含独立审查）。调用 delegation_status 获取证据并继续监督；最终交付结论以程序回执为准，最后一次验收后自动结束，不用 stop 清理。`, plan.completion ? completionText(plan.completion) : '尚未完成。报告由原执行者提交，主控等待通知后验证验收；团队看板和 list_agents 不是托管任务的完成依据。', coordination, issue ? issue.message + '。' + issue.action : '', pending, waiting, paused,
         association, failures.length ? `失败原因：\n${failures.join('\n')}` : ''].filter(Boolean).join('\n')
     },
     hasPending: sessionId => { const plan = plans.get(sessionId); return Boolean(plan && !['accepted', 'cancelled'].includes(planStatus(plan))) },
@@ -1847,6 +1951,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       await pumping
       await Promise.allSettled([...noteWrites.values()])
       for (const dispose of disposers.reverse()) dispose?.()
+      for (const restriction of coordinationRestrictions.values()) restriction.dispose()
+      coordinationRestrictions.clear()
       live.clear(); expectedRoutes.clear(); permits.clear(); waitingParents.clear(); inboxes.clear(); if (!recoveryFailed) await save()
     },
   }

@@ -5,6 +5,35 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('managed chat keeps an explicit incomplete label through errors and acceptance until a delivery receipt exists', async () => {
+  const plan = { protocolVersion: 2, sessionId: 'session-current', status: 'running', completion: null,
+    tasks: [{ id: 'a', title: '生成独立工具', status: 'running' }],
+    coordinationIssue: { code: 'COORDINATION_OPERATION_FAILED', tool: 'write', callId: 'denied-write', message: '主控写入被拒绝',
+      nextAction: '等待原执行者提交正式报告，再验证验收。', at: 100 } }
+  const body = { ok: true, enabled: true, coordinationPolicyVersion: 1, sessionId: 'session-current', plans: [plan], sessions: [] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock('session-current'), action = f.mountAction('session-current')
+  try {
+    await dock.flush(); await action.flush()
+    assert.match(JSON.stringify(dock.nodes('summary')[0]), /尚未完成.*子任务执行中/)
+    assert.match(action.text(), /尚未完成.*进行中/)
+    assert.match(dock.text(), /主控操作未执行.*主控写入被拒绝.*等待原执行者/)
+    assert.equal(plan.tasks[0].error, undefined)
+    plan.status = 'review'; plan.tasks[0].status = 'review'
+    await dock.tick(); await action.flush()
+    assert.match(JSON.stringify(dock.nodes('summary')[0]), /尚未完成.*待验收/)
+    plan.status = 'accepted'; plan.tasks[0].status = 'accepted'; plan.coordinationIssue.resolvedAt = 200
+    await dock.tick(); await action.flush()
+    assert.match(JSON.stringify(dock.nodes('summary')[0]), /尚未完成.*回执/)
+    assert.doesNotMatch(dock.text(), /主控操作未执行/)
+    plan.completion = { id: 'verified-receipt', outcome: 'completed', accepted: 1, total: 1, evidence: ['actual-proof'], deliverables: [], remaining: [] }
+    await dock.tick(); await action.flush()
+    assert.equal(dock.text(), '')
+    assert.match(action.text(), /已完成/)
+    assert.doesNotMatch(action.text(), /尚未完成/)
+  } finally { dock.close(); action.close(); f.close() }
+})
+
 test('input progress defaults to one short summary and keeps raw diagnostics inside a closed disclosure', async () => {
   const target = 'D:/demo/articles/agentrix-multi-agent-blog.md'
   const execution = { running: true, startedAt: 100, toolCalls: 2, activity: { kind: 'waiting_model_response' },

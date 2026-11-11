@@ -35,8 +35,12 @@ const directUnresolved = process.argv.includes('--direct-unresolved')
 const directRecovery = process.argv.includes('--direct-recovery') || directUnresolved
 const decisionRecovery = process.argv.includes('--decision-recovery')
 const longVerification = process.argv.includes('--long-verification')
+const coordinationConflict = process.argv.includes('--coordination-conflict')
 let followingRequest = false
 const workerGate = Promise.withResolvers()
+const conflictExecutions = new Map(), releases = new Map()
+const fixturePath = path.join(directory, coordinationConflict ? 'input.txt' : 'result.txt')
+const deliverablePath = path.join(directory, 'result.txt')
 let parentWaiting = false
 const supplementText = '交付操作员不懂技术，需要页面操作引导。'
 const workerReport = '读取 result.txt 可验证 verified，等待主控实际验收。' + (benchmark ? '\n证据：result.txt 包含 verified。'.repeat(500) : '')
@@ -114,8 +118,21 @@ class ScriptedAdapter extends LlmAdapter {
         return
       }
       const plan = (await state())?.plans?.[0], task = plan?.tasks?.[0]
-      if (!task) block = tool('delegation_plan', { goal: '高模型规划、低模型执行、高模型审查与验收', decisionReason: '核对工作由执行模型完成，主控保留独立上下文做验证和验收。', tasks: [{ id: 'a', title: '检查隔离产物', instructions: '只读取隔离文件并正式报告', scope: '隔离目录', outputs: [path.join(directory, 'result.txt')], writes: [], complexity: 'complex', criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: path.join(directory, 'result.txt') } }] }] })
+      if (coordinationConflict && task) {
+        const names = request.tools.map(tool => tool.name)
+        for (const name of ['team_task_create', 'team_task_update', 'wait_agent', 'subagent']) assert.ok(!names.includes(name), name + ' must be hidden from the managed coordinator')
+        assert.ok(names.includes('team_task_list'), 'read-only board observation remains available')
+      }
+      if (!task) block = tool('delegation_plan', { goal: '高模型规划、低模型执行、高模型审查与验收', decisionReason: '核对工作由执行模型完成，主控保留独立上下文做验证和验收。', tasks: [{ id: 'a', title: '检查隔离产物', instructions: coordinationConflict ? '读取 input.txt 后生成 result.txt 并正式报告' : '只读取隔离文件并正式报告', scope: '隔离目录', outputs: [deliverablePath], writes: coordinationConflict ? [deliverablePath] : [], complexity: 'complex', criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: deliverablePath } }] }] })
       else if (phase === 1) block = tool('delegation_run', {})
+      else if (coordinationConflict && phase === 2) block = tool('write', { file_path: deliverablePath, content: 'unverified coordinator output' })
+      else if (coordinationConflict && phase === 3) block = tool('delegation_verify', { taskId: 'a', checkIndex: 0 })
+      else if (coordinationConflict && phase === 4) block = tool('delegation_report', { status: 'DONE', summary: '已交付', report: '主控冒充执行者提交成果' })
+      else if (coordinationConflict && phase === 5) block = tool('team_task_create', { title: '检查隔离产物' })
+      else if (coordinationConflict && phase === 6) block = tool('team_task_update', { taskId: 'shadow-task', status: 'completed' })
+      else if (coordinationConflict && phase === 7) block = tool('wait_agent', { agentId: task.childId })
+      else if (coordinationConflict && phase === 8) block = tool('team_task_list', {})
+      else if (coordinationConflict && phase === 9) block = { type: 'text', text: '已交付，任务全部完成。' }
       else if (supplement && (await state()).sessions[0]?.pendingMessages?.length) block = tool('delegation_decide', { relation: 'update', mode: 'delegate', reason: '将补充的操作引导纳入原任务，沿用原执行者完成。' })
       else if (supplement && plan.inputs?.some(input => ['queued', 'received'].includes(input.status))) block = tool('delegation_control', {
         taskId: 'a', action: 'steer', message: '将交付人员的操作引导纳入任务', inputIds: plan.inputs.filter(input => ['queued', 'received'].includes(input.status)).map(input => input.id),
@@ -127,6 +144,13 @@ class ScriptedAdapter extends LlmAdapter {
       else if (task.status === 'review') block = tool('delegation_review', { taskId: 'a', verdict: 'accept', findings: task.criteria.map((_criterion, criterion) => ({ criterion, finding: '已读取隔离文件并核对要求', evidence: [task.checks[0].result.callId] })) })
       else if ((truncateOutput || supplement) && task.status === 'running') block = { type: 'text', text: '等待原子代理报告和独立审查返回。' }
       else throw new Error('Unexpected coordinator request after terminal tool: ' + task.status)
+    } else if (coordinationConflict && request.model === 'low-worker') {
+      const names = request.tools.map(tool => tool.name)
+      for (const name of ['team_task_create', 'team_task_update', 'wait_agent', 'subagent']) assert.ok(!names.includes(name), name + ' must be hidden from the managed worker')
+      if (phase === 0) block = tool('read', { path: fixturePath })
+      else if (phase === 1) block = tool('write', { file_path: deliverablePath, content: 'verified' })
+      else if (phase === 2) block = tool('delegation_report', { status: 'DONE', summary: '原执行者已生成实际文件', report: workerReport })
+      else throw new Error('Unexpected worker request after report')
     } else if ((supplement || switchCoordinator) && request.model === 'low-worker' && phase === 0) block = tool('read', { path: path.join(directory, 'result.txt') })
     else if (supplement && request.model === 'low-worker') {
       assert.ok(JSON.stringify(request.messages).includes(supplementText), 'the original native worker must receive the human supplement')
@@ -158,7 +182,7 @@ try {
   ctx.tools.register(defineTool({ name: 'read', description: 'Read isolated fixture', parameters: { path: { type: 'string' } },
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: value.text }] },
     async execute(args, exec) {
-      assert.equal(args.path, path.join(directory, 'result.txt'))
+      assert.ok([fixturePath, deliverablePath].includes(args.path))
       if (longVerification && exec.agent.id === 'root') {
         const started = Date.now()
         await new Promise((resolve, reject) => {
@@ -168,9 +192,31 @@ try {
         assert.ok(Date.now() - started >= 61_000)
         assert.equal(exec.signal.aborted, false)
       }
-      if ((supplement || switchCoordinator) && exec.agent.id !== 'root' && requests.some(request => request.sessionId === exec.agent.id && request.model === 'low-worker')) await workerGate.promise
+      if ((supplement || switchCoordinator || coordinationConflict) && exec.agent.id !== 'root' && requests.some(request => request.sessionId === exec.agent.id && request.model === 'low-worker')) await workerGate.promise
       return { text: await readFile(args.path, 'utf8') }
     } }))
+  if (coordinationConflict) {
+    for (const name of ['team_task_create', 'team_task_update', 'wait_agent', 'subagent', 'team_task_list']) ctx.tools.register(defineTool({
+      name, description: 'Isolated board and native dispatch fixture', parameters: {
+        title: { type: 'string' }, taskId: { type: 'string' }, status: { type: 'string' }, agentId: { type: 'string' } },
+      output: { schema: { type: 'object', additionalProperties: true }, render: () => [{ type: 'text', text: 'board fixture' }] },
+      execute() { conflictExecutions.set(name, (conflictExecutions.get(name) ?? 0) + 1); return {} },
+    }))
+    ctx.tools.register(defineTool({ name: 'write', description: 'Create isolated deliverable', parameters: {
+      file_path: { type: 'string' }, content: { type: 'string' } },
+      output: { schema: { type: 'object', additionalProperties: true }, render: () => [{ type: 'text', text: 'file generated' }] },
+      async execute(args, exec) {
+        assert.notEqual(exec.agent.id, 'root', 'managed coordinator must not write the worker deliverable')
+        assert.equal(args.file_path, deliverablePath)
+        await writeFile(args.file_path, args.content); return { ok: true }
+      } }))
+    const start = ctx.subagents.startActivation.bind(ctx.subagents)
+    ctx.subagents.startActivation = async (...args) => {
+      const activation = await start(...args), dispose = activation.dispose.bind(activation)
+      activation.dispose = async () => { releases.set(activation.childId, (releases.get(activation.childId) ?? 0) + 1); return dispose() }
+      return activation
+    }
+  }
   if (directRecovery || decisionRecovery) {
     ctx.tools.register(defineTool({ name: 'edit', description: 'Edit isolated fixture', parameters: {
       file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } },
@@ -190,7 +236,7 @@ try {
         await writeFile(args.file_path, args.content); return { ok: true }
       } }))
   }
-  await writeFile(path.join(directory, 'result.txt'), 'verified')
+  await writeFile(fixturePath, 'verified')
   ctx.on('agent/turn-stopping', ({ agent }) => { if (agent.id === 'root') parentWaiting = true }, { global: true })
   apply(ctx)
   await until(() => routes.has('/dsh-delegation-first/api/state'), 'plugin routes')
@@ -205,6 +251,33 @@ try {
   handle = await ctx.agents.create({ sessionId: 'root', meta: { cwd: directory }, agentOptions: { provider: 'scripted', model: 'coordinator' } })
   parent = handle.agent
   parent.followup(createUserMessage({ content: [{ type: 'text', text: '执行隔离任务并验证' }], source: { kind: 'user' } }))
+  if (coordinationConflict) {
+    await until(() => parentWaiting || events.some(event => event.id === 'root' && event.type === 'turn/end'), 'coordinator claimed delivery while the worker is still running')
+    assert.ok(parentWaiting, JSON.stringify({ requests, events }))
+    const running = (await state()).plans[0]
+    assert.equal((await state()).coordinationPolicyVersion, 1)
+    assert.equal(running.status, 'running')
+    assert.equal(running.completion, null)
+    assert.equal(running.tasks[0].execution, null)
+    assert.equal(running.tasks[0].checks[0].result, null)
+    assert.equal(running.tasks[0].status, 'running')
+    assert.equal(running.activationBudget.used, 1)
+    assert.equal(running.recovery.used, 0)
+    assert.equal(releases.size, 0)
+    assert.deepEqual([...conflictExecutions], [['team_task_list', 1]], 'only the read-only board observer can execute')
+    assert.equal(running.coordinationIssue.tool, 'wait_agent')
+    assert.equal(running.coordinationIssue.resolvedAt, undefined)
+    await assert.rejects(readFile(deliverablePath), { code: 'ENOENT' })
+    let failures
+    await until(async () => {
+      const journal = (await readFile(path.join(running.archive.directory, 'events.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+      failures = journal.filter(event => event.type === 'plan.coordination_failed')
+      return failures.length === 6
+    }, 'coordination failures persisted')
+    assert.deepEqual(failures.map(event => event.coordinationIssue.tool), ['write', 'delegation_verify', 'delegation_report', 'team_task_create', 'team_task_update', 'wait_agent'])
+    assert.equal(new Set(failures.map(event => event.coordinationIssue.callId)).size, 6, 'guard and transport observers deduplicate each actual call')
+    workerGate.resolve()
+  }
   if (switchCoordinator) {
     await until(() => parentWaiting, 'coordinator awaiting original worker')
     const dispatched = (await state()).plans[0].tasks[0]
@@ -278,7 +351,7 @@ try {
   } else {
   assert.equal(plan.completion?.outcome, 'completed', JSON.stringify(plan))
   assert.equal(plan.tasks[0].execution.commitState, 'committed')
-  assert.equal(plan.tasks[0].recovery?.used ?? 0, truncateOutput || continuous || supplement || switchCoordinator ? 0 : 1)
+  assert.equal(plan.tasks[0].recovery?.used ?? 0, truncateOutput || continuous || supplement || switchCoordinator || coordinationConflict ? 0 : 1)
   assert.equal(plan.tasks[0].release.status, 'released')
   assert.equal(plan.tasks[0].modelRoute.role, 'worker')
   assert.equal(plan.tasks[0].modelRoute.actual.model, 'low-worker')
@@ -287,7 +360,7 @@ try {
   assert.equal(plan.tasks[0].audit.modelRoute.source, 'dispatcher')
   assert.equal(plan.tasks[0].audit.release.status, 'released')
   assert.equal(new Set(requests.filter(request => request.sessionId !== 'root').map(request => request.sessionId)).size, 2)
-  assert.equal(requests.filter(request => request.model === 'low-worker').length, continuous ? 86 : truncateOutput ? 4 : 2)
+  assert.equal(requests.filter(request => request.model === 'low-worker').length, coordinationConflict ? 3 : continuous ? 86 : truncateOutput ? 4 : 2)
   assert.equal(requests.filter(request => request.role === 'reviewer').length, truncateOutput ? 4 : 1)
   if (!switchCoordinator) assert.ok(requests.filter(request => request.sessionId === 'root').every(request => request.model === 'coordinator'))
   else {
@@ -309,7 +382,19 @@ try {
     inputCharacters: requests.reduce((sum, request) => sum + request.inputCharacters, 0) }))
   const coordinatorCalls = requests.filter(request => request.sessionId === 'root').length
   if (truncateOutput) assert.ok(coordinatorCalls >= 7 && coordinatorCalls <= 8, 'the original coordinator resumes each truncated output and may wait once for the child')
-  else assert.equal(coordinatorCalls, supplement ? 8 : 5, 'a supplement adds one structured relationship confirmation on the original coordinator')
+  else assert.equal(coordinatorCalls, coordinationConflict ? 12 : supplement ? 8 : 5, 'only the scripted operations and existing recovery use the original coordinator')
+  if (coordinationConflict) {
+    assert.deepEqual([...conflictExecutions], [['team_task_list', 1]])
+    assert.ok(plan.coordinationIssue.resolvedAt)
+    assert.equal(plan.activationBudget.used, 2)
+    assert.equal(releases.get(plan.tasks[0].childId), 1)
+    assert.equal(releases.get(plan.tasks[0].audit.childId), 1)
+    const available = ctx.tools.schemas(parent).map(tool => tool.name)
+    for (const name of ['team_task_create', 'team_task_update', 'wait_agent', 'subagent']) assert.ok(available.includes(name), 'scoped restriction is released after the final receipt')
+    const journal = (await readFile(path.join(plan.archive.directory, 'events.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    assert.equal(journal.filter(event => event.type === 'plan.receipt').length, 1)
+    console.log('PASS: native conflicting writes, premature verification, forged report, board completion and wait are rejected; false delivery text leaves the original worker running; actual report, verification and acceptance generate one receipt and release each child once')
+  }
   if (supplement) {
     assert.equal(plan.inputs[0].status, 'forwarded')
     assert.equal(plan.tasks[0].criteria.length, 2)

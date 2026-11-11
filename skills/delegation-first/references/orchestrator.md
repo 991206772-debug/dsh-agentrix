@@ -22,6 +22,8 @@ auto 模式由主控结合上下文确认消息关联与执行方式，程序不
 delegation_control({taskId:'task-a', action:'steer', message:'说明偏离了哪条要求，以及接下来应核对的文件或步骤'})
 ```
 
+托管执行期间不能用 `team_task_create/update` 另建或勾选同名任务，也不使用原生派单及 `wait_agent`。只读团队看板和 `list_agents` 仅用于观察，不是交付依据。操作失败后读取 `coordinationIssue` 的原因和下一步，继续原计划；不能把工具被拒或失败写成已交付，也不要因此取消、另开代理或要求用户额外审批。
+
 不要边派边做同一项实现，不要反复询问“好了吗”。`stop` 只表示取消，必须提供 `reason`；不能用于成功收尾。失败或超时后不要无原因调用整计划 cancel，插件会在执行额度允许时沿用原计划恢复可重试任务；用户明确取消才传 reason。已返回任务由插件自动释放，无需再 stop。确需取消时记录原因；处理真实失败后才用 `retry`，并写明已处理哪个问题。
 
 执行中收到用户补充时，等待钩子让原主控恢复处理，已有子代理继续工作。先向用户说明理解及影响，再按 `delegation_status` 摘要中的 `inputs` 处理：影响当前执行的要求用 `delegation_control({taskId,action:'steer',inputIds,additionalCriteria,message})` 同步给对应的原代理，并登记新增验收标准；不要盲目广播给所有任务。进度询问等不改变交付的消息，用 `delegation_control({action:'acknowledge',inputIds,message})` 记录答复，无需 taskId。结果已返回时先核对，确需新增实现则用 `delegation_review({taskId,verdict:'rework',inputIds,additionalCriteria,feedback})`，不必捏造原功能缺陷；仍受现有执行次数限制。未处理补充前不能验收，撤回的消息不阻止验收。

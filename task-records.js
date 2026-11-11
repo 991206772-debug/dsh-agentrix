@@ -40,6 +40,13 @@ export function taskSummary(plan) {
       incompleteReason(task))) : '全部子任务已验收。',
     '', '本档案提供继续处理所需的记录；重新加载后，活动子任务须先清理，再按现有规则重试。']
   if (plan.completion) lines.push('', '## 程序交付回执', '', completionText(plan.completion))
+  if (plan.coordinationIssue) {
+    const issue = plan.coordinationIssue
+    lines.push('', '## ' + (issue.role === 'coordinator' ? '主控操作未执行' : '协作操作未执行'), '',
+      '- 工具：' + issue.tool, '- 调用编号：' + (issue.callId || '未记录'),
+      '- 原因：' + issue.message, '- 下一步：' + issue.nextAction,
+      '- 发生时间：' + time(issue.at), '- 解决时间：' + time(issue.resolvedAt))
+  }
   if (plan.coordinatorIssue) lines.push('', '## 主控模型服务', '', plan.coordinatorIssue.message,
     '- 服务：' + (plan.coordinatorIssue.provider || '未记录') + ' / ' + (plan.coordinatorIssue.model || '未记录'),
     '- 原始错误：' + plan.coordinatorIssue.details, '- 下一步：' + plan.coordinatorIssue.action,

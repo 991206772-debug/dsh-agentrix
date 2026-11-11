@@ -10,7 +10,8 @@ const invalid = process.argv.includes('--invalid')
 const loadError = process.argv.includes('--load-error')
 const nextRequest = process.argv.includes('--next-request')
 const directProgress = process.argv.includes('--direct-progress')
-const liveProgress = process.argv.includes('--live-progress') || directProgress
+const coordinationConflict = process.argv.includes('--coordination-conflict')
+const liveProgress = process.argv.includes('--live-progress') || directProgress || coordinationConflict
 let config = { ok: true, modelRouting: 'roles', reviewerModelPolicy: 'dispatcher-snapshot', mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS, locked: false,
   models: { worker: { provider: invalid ? 'retired-demo' : 'demo', model: 'routine-model' }, reviewer: null }, file: 'C:/isolated-test/delegation-first/default.json',
   defaults: { mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS }, ranges: { threshold: { min: 0, max: 20 }, ...OPTION_RANGES },
@@ -57,6 +58,14 @@ if (liveProgress) {
       progress: { tool: 'read', at: now - 4000 }, supervision: { startedAt: now - 13 * 60000, lastActivityAt: now,
         activity: { kind: 'tool', tool: 'edit', at: now } } }],
   })
+}
+if (coordinationConflict) {
+  plans[0].goal = '生成独立接口调试页面'
+  plans[0].source.text = '交付可直接打开的接口调试页面，并核对真实文件和运行结果'
+  plans[0].tasks[0].title = '生成调试页面并验证接口参数'
+  plans[0].coordinationIssue = { code: 'COORDINATION_TOOL_CONFLICT', tool: 'team_task_update', callId: 'isolated-conflict', role: 'coordinator',
+    message: '不能通过团队看板将托管任务标为完成；尚未收到执行者正式报告。',
+    nextAction: '原执行者继续工作；收到报告通知后，主控验证真实文件并逐项验收。', at: Date.now() }
 }
 const directSession = { sessionId: plans[0].sessionId, source: { messageId: 'direct-demo', text: '调整分享文章的案例，并核对生成的文档' },
   execution: { running: !process.argv.includes('--direct-ended'), startedAt: Date.now(), toolCalls: 2,
@@ -143,7 +152,7 @@ window.__ModuleLoader__ = {load({factory}) {
   function LiveChat() {
     return React.createElement('div',{className:'preview-other-view','data-fixture-view':'chat'},
       React.createElement('p',null,'工作台保留两个接口，参数自动生成，固定参数改为配置项'),
-      React.createElement('p',null,'主控正在核对当前方案与执行结果。'));
+      React.createElement('p',null,${JSON.stringify(coordinationConflict ? '主控曾输出“已交付”，下方程序状态显示真实进度。' : '主控正在核对当前方案与执行结果。')}));
   }
   function Composer() {
     const dock=entries.get('conversation.input.dock');
@@ -225,7 +234,7 @@ const server = http.createServer(async (request, response) => {
       if (loadError) { response.statusCode = 503; response.end(JSON.stringify({ ok: false, error: '本地任务服务暂不可用（隔离测试）' })); return }
       const sessionId = url.searchParams.get('sessionId')
       if (process.argv.includes('--slow') && sessionId === plans[0].sessionId) await new Promise(resolve => setTimeout(resolve, 1500))
-      response.end(JSON.stringify({ ok: true, sessionId, mode: config.mode, requestBindingVersion: process.argv.includes('--model-relationship') ? 2 : undefined, runtimePolicyVersion: nextRequest || liveProgress ? 2 : undefined, plans: directProgress ? [] : plans.filter(plan => plan.sessionId === sessionId), sessions: directProgress ? [directSession].filter(row => row.sessionId === sessionId) : liveProgress ? [
+      response.end(JSON.stringify({ ok: true, sessionId, mode: config.mode, coordinationPolicyVersion: coordinationConflict ? 1 : undefined, requestBindingVersion: process.argv.includes('--model-relationship') ? 2 : undefined, runtimePolicyVersion: nextRequest || liveProgress ? 2 : undefined, plans: directProgress ? [] : plans.filter(plan => plan.sessionId === sessionId), sessions: directProgress ? [directSession].filter(row => row.sessionId === sessionId) : liveProgress ? [
         { sessionId: plans[0].sessionId, source: plans[0].source, turnStats: { direct: 0, delegated: 1, denied: 0 } },
       ] : nextRequest ? [
         { sessionId: plans[0].sessionId, source: { messageId: 'request-new', text: '核查代码实际调用了哪些密码接口' }, route: { route: 'direct', reasons: ['scope_small'] },

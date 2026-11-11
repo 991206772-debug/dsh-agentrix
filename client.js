@@ -682,6 +682,8 @@ window.__ModuleLoader__.load({
       'direct.unavailable': '委派入口不可用', 'direct.checkPlugin': '请检查 DSH Agentrix 插件是否启用，以及宿主的子代理功能是否可用；当前没有通过这些入口启动协作。',
       'direct.backendMissing': 'Agentrix 插件服务不可用', 'direct.backendHint': '请检查插件是否启用；进度恢复前无法确认当前执行情况。',
       'direct.stale': '进度暂时无法更新，以下为最近记录',
+      'coordination.incomplete': '尚未完成', 'coordination.coordinator': '主控操作未执行', 'coordination.worker': '协作操作未执行',
+      'coordination.active': '任务状态保护已生效', 'coordination.pending': '任务状态保护等待加载',
     })
     Object.assign(en, {
       'direct.title': 'Coordinator executing directly', 'direct.incomplete': 'File changes remain incomplete',
@@ -698,6 +700,8 @@ window.__ModuleLoader__.load({
       'direct.unavailable': 'Delegation tools unavailable', 'direct.checkPlugin': 'Check that DSH Agentrix is enabled and the host supports subagents. These entry points have not started collaboration.',
       'direct.backendMissing': 'Agentrix plugin service unavailable', 'direct.backendHint': 'Check that the plugin is enabled. Current execution cannot be confirmed until progress is available.',
       'direct.stale': 'Progress could not be refreshed; the last record is shown',
+      'coordination.incomplete': 'Not completed', 'coordination.coordinator': 'Coordinator operation did not succeed', 'coordination.worker': 'Coordination operation did not succeed',
+      'coordination.active': 'Task status protection active', 'coordination.pending': 'Task status protection awaiting reload',
     })
 
     const CONFIG_NUMBERS = ['threshold', 'maxParallel', 'maxAttempts', 'maxActivations', 'taskTimeoutMinutes']
@@ -1060,11 +1064,12 @@ window.__ModuleLoader__.load({
       const running = tasks.filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
       const status = chatStatusKey(plan)
       const statusText = status === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${status}`)
-      const baseSummary = result.error && !data ? t('chat.unavailable') : plan
+      const rawSummary = result.error && !data ? t('chat.unavailable') : plan
         ? fill(t(plan.protocolVersion >= 2 || status === 'stopped' ? status === 'running' ? 'chat.activeAcceptedSummary' : 'chat.acceptedSummary'
           : status === 'completed' ? 'chat.completedSummary' : status === 'running' ? 'chat.activeSummary' : 'chat.planSummary'),
           { status: statusText, running, done, total: tasks.length })
         : route?.route === 'direct' ? t('chat.direct') : t('chat.noPlan')
+      const baseSummary = (plan?.protocolVersion >= 2 && !plan.completion ? t('coordination.incomplete') + ' · ' : '') + rawSummary
       const counts = [['queued', 'waitingCount'], ['review', 'reviewCount'], ['failed', 'failedCount'], ['blocked', 'blockedCount']]
         .map(([value, key]) => ({ count: tasks.filter(task => task.status === value && !(value === 'review' && ['queued', 'starting', 'running'].includes(task.audit?.status))).length, key }))
         .concat([{ count: tasks.filter(task => ['starting', 'running'].includes(task.audit?.status)).length, key: 'auditCount' },
@@ -1258,7 +1263,8 @@ window.__ModuleLoader__.load({
       const result = useChatProgress(progress, sessionId, latest, seq)
       if (!latest || !sessionId) return null
       const plan = currentPlanOf(result.data, sessionId)
-      if (!plan?.completion) return null
+      if (!plan) return null
+      if (!plan.completion) return h(ChatPlanNotice, { t, plan, openView, error: result.error })
       if (plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled) return null
       return h(CompletionReceipt, { t, plan, state: result.data })
     }
@@ -1296,7 +1302,7 @@ window.__ModuleLoader__.load({
         h('p', null, t('direct.checkPlugin'))) : null
       const execution = state?.execution, failures = execution?.unresolvedChanges ?? []
       const backendMissing = result.errorStatus === 404 || result.error && !result.data
-      const terminal = plan && (plan.completion || plan.status === 'accepted') && !(plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled)
+      const terminal = plan && (plan.protocolVersion >= 2 ? plan.completion : plan.completion || plan.status === 'accepted') && !(plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled)
       if (!backendMissing && !missing && (plan ? terminal : !execution?.running && !failures.length)) return null
       let summary, content, tone = 'progress'
       if (backendMissing) {
@@ -1311,8 +1317,9 @@ window.__ModuleLoader__.load({
         summary = running ? fill(t(tasks.some(task => ['starting', 'running'].includes(task.status)) ? 'dock.workers' : 'dock.audit'), { count: running })
           : status === 'review' ? fill(t('dock.review'), { count: tasks.filter(task => task.status === 'review').length })
           : status === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t('chat.' + status)
+        if (plan.protocolVersion >= 2 && !plan.completion) summary = t('coordination.incomplete') + ' · ' + summary
         content = h(ChatPlanNotice, { t, plan, error: result.error })
-        tone = serviceProblem(plan) || ['failed', 'blocked'].includes(status) ? 'service' : chatProblem(plan) ? 'supervision' : 'progress'
+        tone = serviceProblem(plan) || ['failed', 'blocked'].includes(status) ? 'service' : chatProblem(plan) || plan.coordinationIssue && !plan.coordinationIssue.resolvedAt ? 'supervision' : 'progress'
       } else {
         summary = failures.length ? t(execution.running ? 'dock.repairing' : 'direct.incomplete') : t('dock.coordinator')
         content = h(CoordinatorProgress, { t, state, error: result.error })
@@ -1367,7 +1374,21 @@ window.__ModuleLoader__.load({
         state.source?.text ? h('p', { className: 'ddf-source' }, h('strong', null, t('view.request') + '：'), state.source.text) : null)
     }
 
+    function CoordinationIssueNotice({ t, plan }) {
+      const issue = plan?.coordinationIssue
+      if (!issue || issue.resolvedAt || plan.completion) return null
+      return h('section', { className: 'ddf-chat-notice', 'data-kind': 'coordination', role: 'status' },
+        h('strong', null, t(issue.role === 'coordinator' || !issue.role ? 'coordination.coordinator' : 'coordination.worker')),
+        h('p', null, issue.tool + '：' + issue.message), h('p', null, t('view.next') + '：' + issue.nextAction))
+    }
+
     function ChatPlanNotice({ t, plan, openView, error }) {
+      return h('div', null,
+        plan?.protocolVersion >= 2 && !plan.completion ? h('p', { role: 'status', className: 'ddf-chat-notice-hint' }, t('coordination.incomplete') + ' · ' + t('chat.' + chatStatusKey(plan))) : null,
+        h(CoordinationIssueNotice, { t, plan }), h(ChatPlanBody, { t, plan, openView, error }))
+    }
+
+    function ChatPlanBody({ t, plan, openView, error }) {
       if (plan?.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled) return h(ServiceIssueNotice, { t, issue: plan.coordinatorIssue })
       const problem = chatProblem(plan)
       if (!problem) return h(ChatLiveProgress, { t, plan, openView, error })
@@ -2228,6 +2249,7 @@ window.__ModuleLoader__.load({
           notice,
           state?.storageError ? h('p', { className: 'ddf-board-inline-notice', 'data-kind': 'error', role: 'alert' }, state.storageError) : null,
           state ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-policy': state.runtimePolicyVersion ?? 'unknown' }, t(state.runtimePolicyVersion >= 2 ? 'runtime.active' : 'runtime.pending')) : null,
+          state ? h('p', { className: 'ddf-board-inline-notice', 'data-coordination-policy': state.coordinationPolicyVersion ?? 'unknown' }, t(state.coordinationPolicyVersion >= 1 ? 'coordination.active' : 'coordination.pending')) : null,
           h(UsageDetails, { t, usage: state?.requestUsage?.find(entry => entry.sessionId === sessionId && (!request?.messageId || entry.requestId === request.messageId)) ?? plan?.usage }),
           plan || request?.text ? h('section', { className: 'ddf-board-hero' },
             h('div', null, h('p', { className: 'ddf-board-hero-label' }, t(request?.messageId ? 'view.boardRequest' : 'view.recordedRequest')),
@@ -2237,6 +2259,7 @@ window.__ModuleLoader__.load({
           plan || session || route ? h(BoardDecision, { t, session, plan, status, running }) : null,
           plan?.routingWarnings?.length ? h('p', { className: 'ddf-board-inline-notice' }, fill(t('plans.routeWarnings'), { warnings: plan.routingWarnings.join('；') })) : null,
           h(CompletionReceipt, { t, plan, state }),
+          h(CoordinationIssueNotice, { t, plan }),
           !plan?.completion && plan?.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled ? h(ServiceIssueNotice, { t, issue: plan.coordinatorIssue }) : null,
           h(InputDetails, { t, plan }),
           plan ? h('section', { className: 'ddf-board-metrics', 'aria-label': t('view.boardProgress') },

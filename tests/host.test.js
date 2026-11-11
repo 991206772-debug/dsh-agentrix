@@ -60,6 +60,11 @@ export async function host() {
       emit('session/event', { id: 'root' }, { type: 'turn/start', data: { turn } })
     },
     call(name, id = 'call', who = agent, args = {}) { return guard({ name, callId: id, agent: who, arguments: args, signal: new AbortController().signal }) },
+    stream(request, next) {
+      const hooks = [...(listeners.get('llm/stream') ?? [])]
+      const run = index => index < hooks.length ? hooks[index](request, () => run(index + 1)) : next()
+      return run(0)
+    },
     result(name, result, id = 'call') { emit('tools/result', { name, callId: id, agent }, result) },
     async request(method, body) {
       let status, payload
@@ -72,6 +77,36 @@ export async function host() {
 }
 
 const complex = '1. 重构所有模块并且迁移数据\n2. 批量修复接口同时补充测试套件'
+
+test('host guards and request tools share managed coordination policy, including denied writes', async () => {
+  const h = await host(); await h.state()
+  const tools = ['read', 'list_agents', 'team_task_list', 'team_task_create', 'team_task_update', 'wait_agent'].map(name => ({ name }))
+  let denied = new Set()
+  h.ctx.tools.view = () => ({ restrictableNames: new Set(tools.map(tool => tool.name)) })
+  h.agent.ctx = { tools: { restrict({ deny }) { denied = new Set(deny); return () => { denied.clear() } } } }
+  try {
+    h.turn('开发独立接口调试工具')
+    await h.definitions.get('delegation_plan').execute({ goal: '交付可验证的独立工具', relation: 'new', decisionReason: '实现交给执行模型，主控检查交付物。',
+      tasks: [{ id: 'a', title: '实现页面', instructions: '只修改工具文件', scope: '隔离工具', outputs: ['tool.html'], writes: ['tool.html'],
+        dependsOn: [], complexity: 'routine', criteria: ['文件可读取'], checks: [{ tool: 'read', arguments: { file_path: 'tool.html' } }] }] },
+    { agent: h.agent, callId: 'plan-coordination' })
+    assert.deepEqual([...denied], ['team_task_create', 'team_task_update', 'wait_agent'])
+    const request = Object.freeze({ sessionId: 'root', provider: 'local', model: 'coordinator', tools: Object.freeze(tools.filter(tool => !denied.has(tool.name))) })
+    let dispatched
+    h.stream(request, () => { dispatched = request.tools })
+    assert.deepEqual(dispatched.map(tool => tool.name), ['read', 'list_agents', 'team_task_list'])
+    assert.equal(tools.length, 6, 'scoped restrictions do not mutate the host tool registry')
+    assert.match(h.call('team_task_update', 'board-complete', h.agent, { action: 'complete' }), /Agentrix/)
+    assert.match(h.call('write', 'denied-write', h.agent, { file_path: 'tool.html' }), /尚未验收/)
+    const response = await new Promise(resolve => h.routes.get('/dsh-delegation-first/api/state')({ method: 'GET', url: '/dsh-delegation-first/api/state?sessionId=root' },
+      { writeHead() {}, end(text) { resolve(JSON.parse(text)) } }))
+    assert.equal(response.coordinationPolicyVersion, 1)
+    assert.equal(response.plans[0].coordinationIssue.callId, 'denied-write')
+    assert.equal(response.plans[0].completion, null)
+    assert.equal(h.call('team_task_list'), undefined)
+    assert.equal(h.call('team_task_create', 'unrelated', { id: 'other' }), undefined)
+  } finally { await h.close() }
+})
 
 test('the coordinator classifies message relationships without prefix or length guesses', async () => {
   const h = await host(); await h.state()

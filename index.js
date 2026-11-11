@@ -3,7 +3,7 @@ import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
-import { createOrchestrator, OPTION_RANGES, orchestrationOptions, REVIEWER_MODEL_POLICY, validateModelRoute } from './orchestrator.js'
+import { createOrchestrator, OPTION_RANGES, orchestrationOptions, REVIEWER_MODEL_POLICY, COORDINATION_POLICY_VERSION, validateModelRoute } from './orchestrator.js'
 
 export const inject = ['tools']
 
@@ -324,6 +324,7 @@ export function apply(ctx) {
   const configReady = loadStored(file).then((stored) => {
     // The environment pins gate mode/budget; model routes and resource limits remain persisted.
     current = pinned ? { ...current, ...orchestrationOptions(stored) } : applyStored(readConfig(), stored)
+    orchestration?.refreshCoordinationTools()
     return current
   })
 
@@ -480,6 +481,13 @@ export function apply(ctx) {
   }
 
   const disposeGuard = ctx.tools.guard((exec) => {
+    const coordinationBlock = orchestration.guardCoordination(exec)
+    if (coordinationBlock) {
+      const state = stateOf(exec.agent.id)
+      state.denied++; state.turnDenied++
+      state.last = { tool: exec.name, kind: 'coordination', message: coordinationBlock, at: Date.now() }
+      return coordinationBlock
+    }
     const childBlock = orchestration.guardChild(exec)
     if (childBlock) return childBlock
     const role = roleOf(exec)
@@ -498,7 +506,9 @@ export function apply(ctx) {
     if (current.enabled && orchestration.hasPending(role.agentId) && current.gatedTools.includes(name)) {
       state.denied++; state.turnDenied++
       state.last = { tool: name, kind: 'managed-plan', at: Date.now() }
-      return '[DSH Agentrix] 当前计划尚未验收。请监督或返工任务；主控验证通过 delegation_verify 执行，避免与子 Agent 重复修改。'
+      const message = '[DSH Agentrix] 当前计划尚未验收。请监督或返工任务；主控验证通过 delegation_verify 执行，避免与子 Agent 重复修改。'
+      orchestration.recordCoordinationFailure(exec, message)
+      return message
     }
     const verdict = canDelegate(exec) ? evaluate(name, state, current) : { allow: true }
     if (verdict.countsAsDelegation) {
@@ -673,6 +683,7 @@ export function apply(ctx) {
     if (revision !== fileMetadata.revision) {
       const stored = sanitizeStored(raw === null ? undefined : JSON.parse(raw))
       current = pinned ? { ...environmentConfig, ...orchestrationOptions(stored) } : applyStored(environmentConfig, stored)
+      orchestration.refreshCoordinationTools()
       for (const state of states.values()) {
         state.policy = policyFor(current)
       }
@@ -727,6 +738,7 @@ export function apply(ctx) {
       runtimePolicyVersion: 2,
       coordinatorProgressVersion: 1,
       decisionProtocolVersion: 2,
+      coordinationPolicyVersion: COORDINATION_POLICY_VERSION,
       requestBindingVersion: 2,
       reviewerModelPolicy: REVIEWER_MODEL_POLICY,
       requestUsage: orchestration.requestUsages(selectedId),

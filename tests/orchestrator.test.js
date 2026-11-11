@@ -18,6 +18,91 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('managed coordination guards conflicting tools but preserves observers and unrelated agents', async () => {
+  const f = await fixture()
+  assert.equal(f.engine.guardCoordination({ agent: f.parent, name: 'team_task_create', arguments: {} }), undefined, 'direct work keeps its existing tools')
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  for (const id of ['parent', f.children[0].id]) {
+    for (const name of ['team_task_create', 'team_task_update', 'wait_agent', 'subagent']) {
+      const message = f.engine.guardCoordination?.({ agent: id === 'parent' ? f.parent : f.children[0], name, callId: `${id}-${name}`, arguments: {} })
+      assert.match(message ?? '', /delegation_status|delegation_control|delegation_report/)
+    }
+    for (const name of ['read', 'team_task_list', 'team_task_get', 'list_agents']) assert.equal(f.engine.guardCoordination({ agent: { id }, name, arguments: {} }), undefined)
+  }
+  assert.equal(f.engine.guardCoordination({ agent: { id: 'another-session' }, name: 'team_task_create', arguments: {} }), undefined)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.snapshot().activationBudget.used, 1)
+  assert.equal(f.pending[0].receipt.disposeCount, undefined)
+  f.config.enabled = false
+  assert.equal(f.engine.guardCoordination?.({ agent: f.parent, name: 'team_task_create', arguments: {} }), undefined)
+})
+
+test('failed coordinator operations cannot complete a running task and resolve only after relevant progress', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  await assert.rejects(f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 }), /待评审/)
+  let issue = f.snapshot().coordinationIssue
+  assert.equal(issue?.tool, 'delegation_verify')
+  assert.equal(issue?.taskId, 'a')
+  assert.match(issue?.nextAction ?? '', /等待.*报告/)
+  assert.equal(issue?.resolvedAt, undefined)
+  await f.execute('delegation_status')
+  assert.equal(f.snapshot().coordinationIssue.resolvedAt, undefined, 'a successful status read does not repair a failed operation')
+  await assert.rejects(f.execute('delegation_report', { status: 'DONE', summary: '已完成', report: '主控声称文件已交付' }), /子会话身份/)
+  issue = f.snapshot().coordinationIssue
+  assert.equal(issue.tool, 'delegation_report')
+  f.emit('session/event', f.parent, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '已交付，任务全部完成。' }] } } })
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.snapshot().completion, null)
+  assert.equal(f.snapshot().tasks[0].execution, null)
+  assert.equal(f.snapshot().recovery.used, 0)
+  await assert.rejects(readFile(path.join(f.directory, 'result.txt')), { code: 'ENOENT' })
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  assert.ok(f.snapshot().coordinationIssue.resolvedAt, 'the actual worker report advances the stage')
+  assert.equal(f.snapshot().completion, null)
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '已核对实际结果', evidence: [proof.callId] }] })
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+})
+
+test('coordination failures deduplicate policy and transport observations and persist across reload', async () => {
+  const f = await fixture(); await f.plan([card('a')])
+  const exec = { agent: f.parent, name: 'team_task_update', callId: 'duplicate-board-completion', arguments: { action: 'complete' } }
+  const denial = f.engine.guardCoordination?.(exec)
+  assert.match(denial ?? '', /Agentrix/)
+  f.engine.guardCoordination(exec)
+  f.engine.observe(exec, { isError: true, content: [{ type: 'text', text: denial }] })
+  await f.engine.readArchive(f.snapshot().archive.id)
+  const saved = JSON.parse(await readFile(f.file, 'utf8')).plans[0]
+  assert.equal(saved.coordinationIssue.callId, exec.callId)
+  assert.equal(saved.recentEvents.filter(event => event.type === 'plan.coordination_failed').length, 1)
+  await f.reload()
+  assert.equal(f.snapshot().coordinationIssue.callId, exec.callId)
+  assert.equal(f.snapshot().completion, null)
+  const archive = await f.engine.readArchive(f.snapshot().archive.id)
+  assert.match(archive.markdown, /主控操作未执行/)
+  assert.match(archive.markdown, /team_task_update/)
+})
+
+test('a failed verification remains unresolved when its successful transport omits the structured failure value', async () => {
+  const f = await fixture()
+  await f.plan([card('a', { checks: [{ tool: 'pwsh', arguments: { command: 'isolated check' } }] })]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  f.setExit(1)
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  assert.equal(proof.passed, false)
+  const issue = f.snapshot().coordinationIssue
+  assert.equal(issue.tool, 'delegation_verify')
+  assert.equal(issue.resolvedAt, undefined)
+  f.emit('session/event', f.parent, { type: 'tool/call', data: { name: 'delegation_verify', callId: issue.callId, arguments: JSON.stringify({ taskId: 'a', checkIndex: 0 }) } })
+  f.emit('session/event', f.parent, { type: 'tool/result', data: { message: { toolCallId: issue.callId, isError: false, content: [{ type: 'text', text: JSON.stringify(proof) }] } } })
+  assert.equal(f.snapshot().coordinationIssue.resolvedAt, undefined, 'transport success cannot turn failed verification into successful progress')
+  assert.equal(f.snapshot().completion, null)
+  f.setExit(0)
+  await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  assert.ok(f.snapshot().coordinationIssue.resolvedAt, 'a new successful verification resolves the original issue')
+})
+
 test('verification follows host cancellation without adding a plugin execution deadline', async () => {
   const controller = new AbortController(), f = await fixture({ signal: controller.signal })
   await f.plan([card('long-check')]); await f.execute('delegation_run')
