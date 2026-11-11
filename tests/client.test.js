@@ -38,7 +38,7 @@ test('composer labels stay short and distinguish coordinator work from actual ch
     await dock.flush()
     assert.match(JSON.stringify(dock.nodes('summary')[0]), /主控处理中/)
     assert.doesNotMatch(JSON.stringify(dock.nodes('summary')[0]), /主控直接执行|等待模型响应|详情.*隐藏/)
-    assert.equal(dock.nodes('button').find(node => node.props['aria-label'] === '隐藏进度提示')?.props.className, 'ddf-dock-hide')
+    assert.ok(!dock.nodes('button').some(node => /隐藏/.test(node.props['aria-label'] ?? '')))
     body.plans = [{ sessionId: 'session-current', source: row.source, status: 'running', tasks: [
       { id: 'a', status: 'running' }, { id: 'b', status: 'running' }, { id: 'c', status: 'queued' },
     ] }]
@@ -48,31 +48,45 @@ test('composer labels stay short and distinguish coordinator work from actual ch
   } finally { dock.close(); f.close() }
 })
 
-test('hiding the dock survives polling but a new failure or task becomes visible again', async () => {
+test('progress stays available across polling and new work without a hide action, with the full request and reason', async () => {
   const execution = { running: false, startedAt: 100, activity: {}, toolCalls: 1,
     unresolvedChanges: [{ callId: 'failed-one', target: 'article.md', reason: 'old_string was not found' }] }
-  const row = { sessionId: 'session-current', source: { messageId: 'request-one', text: '修订文章' }, execution }
+  const request = '核对文档中的接口约定、参数来源与异常处理。'.repeat(10) + '最后生成交付说明。'
+  const reason = '需要先阅读接口文档并核对代码调用，再确定实现范围。'.repeat(8)
+  const row = { sessionId: 'session-current', source: { messageId: 'request-one', text: request }, execution,
+    decision: { mode: 'direct', reason } }
   const body = { ok: true, sessionId: 'session-current', plans: [], sessions: [row] }
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
   const dock = f.mountDock('session-current')
-  const hide = async () => {
-    const button = dock.nodes('button').find(node => node.props['aria-label'] === '隐藏进度提示')
-    assert.ok(button, 'the reminder needs a hide action')
-    button.props.onClick(); await dock.flush()
-  }
   try {
-    await dock.flush(); await hide()
-    assert.equal(dock.text(), '')
+    await dock.flush()
+    assert.ok(dock.text().includes(request), 'the expanded details must retain the entire request')
+    assert.ok(dock.text().includes(reason), 'the decision reason must remain complete')
+    const paragraphs = dock.nodes('p'), reasonIndex = paragraphs.findIndex(node => JSON.stringify(node.children).includes(reason))
+    assert.ok(reasonIndex >= 0 && reasonIndex < paragraphs.findIndex(node => node.props.className === 'ddf-source'), 'current work and reasoning should precede the full request')
+    assert.doesNotMatch(dock.text(), /隐藏提示/)
+    const sizes = new Map()
+    dock.nodes('div').find(node => node.props.className === 'ddf-chat-dock').props.ref.current = {
+      closest: () => ({ getBoundingClientRect: () => ({ top: 180 }) }),
+      getBoundingClientRect: () => ({ top: 600 }),
+      style: { setProperty: (key, value) => sizes.set(key, value) },
+    }
+    dock.nodes('details')[0].props.onToggle()
+    assert.equal(sizes.get('--ddf-dock-available-height'), '404px', 'the panel must fit below the chat clipping boundary')
+    const key = dock.nodes('details')[0].props.key
     await dock.tick()
-    assert.equal(dock.text(), '', 'polling must not reopen a hidden reminder')
+    assert.equal(dock.nodes('details')[0].props.key, key, 'polling should preserve the disclosure identity')
     execution.unresolvedChanges.push({ callId: 'failed-two', target: 'other.md', reason: 'cannot write' })
     await dock.tick()
-    assert.ok(dock.nodes('summary').length)
-    await hide()
+    assert.match(dock.text(), /cannot write/)
     execution.startedAt = 200; execution.running = true; execution.unresolvedChanges = []
     row.source = { messageId: 'request-two', text: '核对另一份材料' }
+    execution.activity = { kind: 'tool', tool: 'grep' }
     await dock.tick()
-    assert.ok(dock.nodes('summary').length)
+    assert.match(JSON.stringify(dock.nodes('summary')[0]), /主控处理中/)
+    assert.match(dock.text(), /核对另一份材料/)
+    assert.match(dock.text(), /检索内容/)
+    assert.doesNotMatch(dock.text(), /cannot write|隐藏提示/)
   } finally { dock.close(); f.close() }
 })
 

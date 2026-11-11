@@ -79,6 +79,10 @@ if (process.argv.includes('--model-relationship')) {
   directSession.pendingMessages = [{ messageId: 'next-demo', text: '另外开一个新任务：核对另一份文档，原任务继续保留。' }]
   directSession.decisionCurrent = false
 }
+if (process.argv.includes('--long-progress')) {
+  directSession.source.text = '先检查项目中已有的接口调用方式，再开发一个便于交付人员使用的接口调试工具。工具应支持选择接口、填写连接地址、自动生成常用参数、查看完整请求与响应，并保存测试记录。目前没有可用的联网环境，请把本地可验证的部分和需要现场联调的部分分别说明。交付人员不熟悉代码，需要清晰的操作引导、错误原因和下一步建议。最后提供可直接运行的产物、使用说明和验证结果。'
+  if (directSession.decision) directSession.decision.reason = '这是一个需要先明确范围的开发需求。主控将先核对接口文档、现有调用代码与配置方式，确认请求参数、认证方式和异常处理，再制定实施计划。准备工作需要共享同一份上下文，先由主控直接完成；确定可独立执行的模块后，再决定是否委派，并保留实际验证和最终验收。'
+}
 if (process.argv.includes('--supplement')) {
   Object.assign(plans[0], { protocolVersion: 2, status: 'running', goal: '开发面向交付人员的可视化调试页面',
     routing: { route: 'direct', reasons: ['scope_small'] },
