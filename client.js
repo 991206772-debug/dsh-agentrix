@@ -673,6 +673,7 @@ window.__ModuleLoader__.load({
       'dock.execution': '当前执行', 'dock.decision': '执行判断', 'dock.activity': '当前动作',
       'dock.toolCalls': '本轮工具调用', 'dock.callsUnit': '次', 'dock.unknownModel': '未记录', 'dock.issues': '异常记录',
       'dock.coordinator': '主控处理中', 'dock.repairing': '正在处理异常',
+      'dock.waiting': '等待', 'dock.accepted': '验收',
       'dock.workers': '{count} 个子任务执行中', 'dock.audit': '独立审查中', 'dock.review': '待验收 {count} 项',
       'dock.unavailable': '协作暂不可用', 'dock.offline': '状态暂不可用',
       'direct.advice': '系统建议委派，当前尚未启动子代理', 'direct.calls': '本轮工具调用 {count} 次',
@@ -693,6 +694,7 @@ window.__ModuleLoader__.load({
       'dock.execution': 'Current execution', 'dock.decision': 'Execution decision', 'dock.activity': 'Current activity',
       'dock.toolCalls': 'Tool calls this turn', 'dock.callsUnit': 'calls', 'dock.unknownModel': 'Not recorded', 'dock.issues': 'Issues',
       'dock.coordinator': 'Coordinator working', 'dock.repairing': 'Handling an issue',
+      'dock.waiting': 'Queued', 'dock.accepted': 'Accepted',
       'dock.workers': '{count} subtasks running', 'dock.audit': 'Independent review', 'dock.review': '{count} awaiting acceptance',
       'dock.unavailable': 'Delegation unavailable', 'dock.offline': 'Status unavailable',
       'direct.advice': 'Delegation was suggested; no child agent has started', 'direct.calls': '{count} tool calls this turn',
@@ -1126,12 +1128,26 @@ window.__ModuleLoader__.load({
 .ddf-chat-dock { --ddf-dock-tone:var(--dsw-alias-state-business-primary,#4f6ef7); position:relative; isolation:isolate; container:ddf-progress / inline-size; width:100%; min-width:0; max-width:min(760px,calc(100% - 24px)); margin:0 auto 6px; padding:4px 0; color:var(--dsw-alias-label-primary,#1f2329); font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif; }
 .ddf-chat-dock[data-tone="supervision"] { --ddf-dock-tone:var(--dsw-alias-state-warning-primary,#b7791f); }
 .ddf-chat-dock[data-tone="service"] { --ddf-dock-tone:var(--dsw-alias-state-error-primary,#f54a45); }
-.ddf-dock-disclosure { width:fit-content; max-width:240px; margin:0 auto; }
-.ddf-dock-disclosure>summary { box-sizing:border-box; display:flex; align-items:center; gap:8px; height:28px; padding:0 10px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:999px; background:var(--dsw-alias-bg-layer-1,#fff); cursor:pointer; list-style:none; user-select:none; }
+.ddf-dock-disclosure { width:fit-content; max-width:100%; margin:0 auto; }
+.ddf-dock-disclosure>summary { box-sizing:border-box; display:flex; align-items:center; gap:9px; max-width:100%; height:34px; padding:0 12px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:12px; background:var(--dsw-alias-bg-layer-1,#fff); font-size:13px; cursor:pointer; list-style:none; user-select:none; }
 .ddf-dock-disclosure>summary:hover,.ddf-dock-disclosure[open]>summary { background:var(--dsw-alias-bg-layer-2,#f5f6f7); }
 .ddf-dock-disclosure>summary::-webkit-details-marker { display:none; }
 .ddf-dock-dot { flex:none; width:5px; height:5px; border-radius:50%; background:var(--ddf-dock-tone); }
 .ddf-dock-text { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-weight:500; }
+.ddf-dock-indicator { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--dsw-alias-label-secondary,#646a73); }
+.ddf-dock-activity { max-width:9em; }
+.ddf-dock-model { max-width:16ch; }
+.ddf-dock-calls,.ddf-dock-accepted,.ddf-dock-queued { display:inline-flex; flex:none; align-items:baseline; gap:4px; overflow:visible; font-variant-numeric:tabular-nums; }
+.ddf-dock-calls,.ddf-dock-accepted { padding-left:9px; border-left:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-dock-indicator strong { color:var(--dsw-alias-state-business-primary,#4f6ef7); font-size:14px; font-weight:600; }
+.ddf-dock-accepted strong { color:var(--dsw-alias-state-success-primary,#369b83); }
+.ddf-dock-indicator small { font-size:12px; }
+.ddf-dock-call-icon { color:var(--dsw-alias-state-business-primary,#4f6ef7); }
+@container ddf-progress (max-width:440px) {
+ .ddf-dock-disclosure>summary { gap:6px; padding:0 9px; font-size:12px; }
+ .ddf-dock-model { max-width:10ch; }
+ .ddf-dock-activity { max-width:6em; }
+}
 .ddf-dock-toggle { flex:none; width:4px; height:4px; margin:-3px 1px 0 2px; border-right:1px solid currentColor; border-bottom:1px solid currentColor; transform:rotate(45deg); color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-dock-disclosure[open] .ddf-dock-toggle { margin-top:2px; transform:rotate(225deg); }
 .ddf-dock-details { box-sizing:border-box; position:absolute; z-index:1; bottom:calc(100% + 6px); left:50%; transform:translateX(-50%); width:100%; max-height:min(65vh,560px,var(--ddf-dock-available-height,560px)); overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:var(--dsw-alias-label-secondary,#8f959e) var(--dsw-alias-bg-layer-1,#fff); border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:12px; background:var(--dsw-alias-bg-layer-1,#fff); box-shadow:0 8px 28px color-mix(in srgb,var(--dsw-alias-label-primary,#1f2329) 12%,transparent); }
@@ -1249,10 +1265,10 @@ window.__ModuleLoader__.load({
         h('small', null, t('completion.id') + '：' + receipt.id))
     }
 
-    function liveToolLabel(t, name) {
+    function liveToolLabel(t, name, compact = false) {
       const key = { read: 'read', grep: 'search', glob: 'glob', edit: 'edit', apply_patch: 'edit', write: 'write',
         pwsh: 'command', bash: 'command', delegation_report: 'report', delegation_checkpoint: 'checkpoint' }[name]
-      return key ? t('live.' + key) + `（${name}）` : name
+      return key ? t('live.' + key) + (compact ? '' : `（${name}）`) : name
     }
 
     function ChatLiveProgress({ t, plan, openView, error }) {
@@ -1342,6 +1358,7 @@ window.__ModuleLoader__.load({
       const terminal = plan && (plan.protocolVersion >= 2 ? plan.completion : plan.completion || plan.status === 'accepted') && !(plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled)
       if (!backendMissing && !missing && (plan ? terminal : !execution?.running && !failures.length)) return null
       let summary, content, tone = 'progress'
+      const indicators = []
       if (backendMissing) {
         summary = t('dock.offline'); tone = 'service'
         content = h('section', { className: 'ddf-chat-notice', role: 'alert' }, h('strong', null, t('direct.backendMissing')),
@@ -1355,19 +1372,34 @@ window.__ModuleLoader__.load({
           : status === 'review' ? fill(t('dock.review'), { count: tasks.filter(task => task.status === 'review').length })
           : status === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t('chat.' + status)
         if (plan.protocolVersion >= 2 && !plan.completion) summary = t('coordination.incomplete') + ' · ' + summary
+        const queued = tasks.filter(task => task.status === 'queued' || task.audit?.status === 'queued').length
+        if (queued) indicators.push({ kind: 'queued', text: t('dock.waiting') + ' ' + queued, prefix: t('dock.waiting'), value: queued })
+        if (tasks.length) indicators.push({ kind: 'accepted', text: t('dock.accepted') + ' ' + done + '/' + tasks.length,
+          prefix: t('dock.accepted'), value: done + '/' + tasks.length })
         content = h(ChatPlanNotice, { t, plan, error: result.error })
         tone = serviceProblem(plan) || ['failed', 'blocked'].includes(status) ? 'service' : chatProblem(plan) || plan.coordinationIssue && !plan.coordinationIssue.resolvedAt ? 'supervision' : 'progress'
       } else {
         summary = failures.length ? t(execution.running ? 'dock.repairing' : 'direct.incomplete') : t('dock.coordinator')
+        const activity = execution.activity, action = activity?.kind === 'tool' ? liveToolLabel(t, activity.tool, true)
+          : activity?.kind ? t('supervision.activity.' + activity.kind) : null
+        if (execution.running && action) indicators.push({ kind: 'activity', text: action })
+        if (execution.model?.model) indicators.push({ kind: 'model', text: execution.model.model })
+        if (Number.isFinite(execution.toolCalls)) indicators.push({ kind: 'calls', text: fill(t('direct.calls'), { count: execution.toolCalls }),
+          value: execution.toolCalls, unit: t('dock.callsUnit') })
         content = h(CoordinatorProgress, { t, state, error: result.error })
         tone = failures.length ? execution.running ? 'supervision' : 'service' : 'progress'
       }
       const identity = [sessionId, state?.source?.messageId || plan?.source?.messageId, execution?.startedAt || plan?.createdAt,
         backendMissing ? 'backend' : missing ? 'unavailable' : plan ? plan.status : failures.length ? 'change-failed' : 'direct', failures.map(item => item.callId).join(',')].join(':')
+      const label = [summary, ...indicators.map(item => item.text), t('dock.details')].join('，')
       return h('div', { className: 'ddf-chat-dock', 'data-tone': tone, ref: dockRef }, h('style', null, CHAT_NOTICE_STYLES),
         h('details', { className: 'ddf-dock-disclosure', key: identity, onToggle: fitDetails },
-          h('summary', { title: t('dock.details'), 'aria-label': summary + '，' + t('dock.details') }, h('span', { className: 'ddf-dock-dot', 'aria-hidden': 'true' }),
-            h('span', { className: 'ddf-dock-text', role: 'status' }, summary), h('span', { className: 'ddf-dock-toggle', 'aria-hidden': 'true' })),
+          h('summary', { title: label, 'aria-label': label }, h('span', { className: 'ddf-dock-dot', 'aria-hidden': 'true' }),
+            h('span', { className: 'ddf-dock-text', role: 'status' }, summary),
+            ...indicators.map(item => h('span', { key: item.kind, className: 'ddf-dock-indicator ddf-dock-' + item.kind, title: item.text },
+              ...(item.value === undefined ? [item.text] : [item.kind === 'calls' ? h('span', { className: 'ddf-dock-call-icon', 'aria-hidden': 'true' }, '↗')
+                : h('small', null, item.prefix), h('strong', null, item.value), item.unit ? h('small', null, item.unit) : null]))),
+            h('span', { className: 'ddf-dock-toggle', 'aria-hidden': 'true' })),
           h('div', { className: 'ddf-dock-details', role: 'region', 'aria-label': t('dock.details') },
             h('div', { className: 'ddf-dock-panel-head' }, h('strong', null, t('dock.details'))), content)))
     }

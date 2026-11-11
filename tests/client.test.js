@@ -80,6 +80,31 @@ test('coordinator overview groups observed activity, model and tool calls separa
   } finally { dock.close(); f.close() }
 })
 
+test('the collapsed strip shows real coordinator activity and switches to child queue and acceptance counts', async () => {
+  const row = { sessionId: 'session-current', execution: { running: true, toolCalls: 12,
+    model: { model: 'observed/coordinator' }, activity: { kind: 'tool', tool: 'grep' }, unresolvedChanges: [] } }
+  const body = { ok: true, sessionId: row.sessionId, plans: [], sessions: [row] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock(row.sessionId)
+  try {
+    await dock.flush()
+    const label = () => dock.nodes('summary')[0].props['aria-label']
+    assert.match(label(), /主控处理中.*检索内容.*observed\/coordinator.*12/)
+    assert.doesNotMatch(label(), /tok\/s|132%|181%/)
+    row.execution.toolCalls = 0
+    delete row.execution.model
+    await dock.tick()
+    assert.match(label(), /本轮工具调用 0 次/)
+    assert.doesNotMatch(label(), /observed\/coordinator|undefined/)
+    body.plans = [{ sessionId: row.sessionId, protocolVersion: 2, status: 'running', tasks: [
+      { id: 'a', status: 'running' }, { id: 'b', status: 'running' }, { id: 'c', status: 'queued' }, { id: 'd', status: 'accepted' },
+    ] }]
+    await dock.tick()
+    assert.match(label(), /尚未完成.*2 个子任务执行中.*等待 1.*验收 1\/4/)
+    assert.doesNotMatch(label(), /observed\/coordinator|本轮工具调用/)
+  } finally { dock.close(); f.close() }
+})
+
 test('input progress defaults to one short summary and keeps raw diagnostics inside a closed disclosure', async () => {
   const target = 'D:/demo/articles/agentrix-multi-agent-blog.md'
   const execution = { running: true, startedAt: 100, toolCalls: 2, activity: { kind: 'waiting_model_response' },
@@ -112,7 +137,8 @@ test('composer labels stay short and distinguish coordinator work from actual ch
   try {
     await dock.flush()
     assert.match(JSON.stringify(dock.nodes('summary')[0]), /主控处理中/)
-    assert.doesNotMatch(JSON.stringify(dock.nodes('summary')[0]), /主控直接执行|等待模型响应|详情.*隐藏/)
+    assert.doesNotMatch(JSON.stringify(dock.nodes('summary')[0]), /主控直接执行|详情.*隐藏/)
+    assert.match(JSON.stringify(dock.nodes('summary')[0]), /等待模型响应/)
     assert.ok(!dock.nodes('button').some(node => /隐藏/.test(node.props['aria-label'] ?? '')))
     body.plans = [{ sessionId: 'session-current', source: row.source, status: 'running', tasks: [
       { id: 'a', status: 'running' }, { id: 'b', status: 'running' }, { id: 'c', status: 'queued' },
