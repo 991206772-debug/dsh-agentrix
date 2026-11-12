@@ -35,12 +35,12 @@ const MAX_BODY_BYTES = 64 * 1024
  */
 const DISCIPLINE = [
   "## Agentrix",
-  "先读文件。小任务直接验证；需委派用 delegation_plan({decisionReason,start:true,...})。小改合批保留逐项标准，独立工作才拆；复杂任务加独立审查。",
-  "主控定方案、验收，不重复实现；worker执行，审查沿用派发时主控模型。模型查 delegation_models。delegation_verify({taskId}) 验证全部检查，再 delegation_review 按 criterionId/ref 逐条验收。",
-  "补充先答复；变更用 inputIds/additionalCriteria steer 原代理，纯答复 acknowledge。重要问题才返工，minor 记录，复查不扩围。",
-  "直接做先 delegation_decide 记 direct/理由；多条消息逐条记 relation(new/continue/update/question)，继续/提问沿用。阶段变化告知，修改失败须修复并核对原产物。",
-  "错配、重复故障先处理；Token、次数、时长不终止或换代理。按 nextAction 行动，用 delegation_wait 等通知，不轮询。短任务交 report，长调查/阻塞记 checkpoint。",
-  "stop 仅取消且须原因。完成以回执为准；验收后自动结束。详见 delegation-first。",
+  "先读文件，小任务直接验证；委派用 delegation_plan({decisionReason,start:true,...})。同类合批，独立才拆。",
+  "主控定方案、验收，不代做；worker执行，审查沿用分发者模型。查 delegation_models。按风险填 reviewPolicy/reviewReason，高风险独审。",
+  "delegation_verify({taskId}) 后 delegation_review 按 criterionId/ref 逐条验收。标准限用户要求及必要验证。重要问题才返工，minor记录；复查不扩围。",
+  "先 delegation_decide 记 direct/理由及 relation(new/continue/update/question)。补充先答复；变更用 inputIds/additionalCriteria steer 原代理，纯答复 acknowledge。报进度；修改失败须修复并核对原产物。",
+  "错配/故障先处理，重复操作核对价值。有进展不因Token、次数、时长停止或换代理。按 nextAction 行动，delegation_wait 等通知，不轮询。交 report，长调查/阻塞记 checkpoint。",
+  "stop仅取消且须原因。达标验收，以回执交付并结束。详见 delegation-first。",
 ].join('\n')
 
 /** Automatic routing is advisory; explicit modes retain their operation gates. */
@@ -737,7 +737,7 @@ export function apply(ctx) {
       archiveWarning: orchestration.archiveWarningFor(selectedId),
       limits: orchestrationOptions(current),
       supervisionPolicy: orchestration.supervisionPolicy,
-      runtimePolicyVersion: 2,
+      runtimePolicyVersion: orchestration.supervisionPolicy.version,
       coordinatorProgressVersion: 1,
       decisionProtocolVersion: 2,
       coordinationPolicyVersion: COORDINATION_POLICY_VERSION,

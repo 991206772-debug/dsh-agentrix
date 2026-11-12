@@ -58,6 +58,8 @@
     "dependsOn": [],
     "complexity": "routine",
     "complexityReason": "按已有实现补充确定的失败测试，无需重新设计",
+    "reviewPolicy": "independent",
+    "reviewReason": "覆盖登录与账号锁定等权限边界，由独立审查核对覆盖范围，主控运行测试并验收",
     "criteria": ["覆盖密码错误和账号锁定", "测试全部通过"],
     "checks": [
       {"tool": "read", "arguments": {"file_path": "tests/login.test.js"}},
@@ -87,7 +89,9 @@ delegation_verify({taskId: 'login-tests', checkIndex: 1})
 
 执行者结束前调用 `delegation_report({status,summary,report,reason?,concerns?})`。`status` 为 `DONE`、`DONE_WITH_CONCERNS`、`NEEDS_CONTEXT` 或 `BLOCKED`；后两项必须说明 `reason`，有疑点必须列 `concerns`。完整 `report` 最多 24000 字符，超限明确报错，不能静默截断。报告保存在任务档案的 `reports/<taskId>/`，实现与审查、不同执行次数分别存放。辅助档案暂时不可写时，必需的任务快照仍保留全文并提示记录问题。
 
-新建的 `complex` 任务返回后自动排队审查；审查者只允许 `read/grep/glob` 和提交报告，禁止修改、命令执行或继续派代理。审查报告必须同时提供 `specVerdict` 与 `qualityVerdict`（`pass/fail`），以及具体 `issues`。审查未结束或有未解决重要问题时不能验收。审查结果是额外检查，主控仍须实际运行验证。测试通过不能代替视觉还原或真实场景验证。
+新任务建议同时填写 `reviewPolicy` 和 `reviewReason`（非空，最多 1000 字）。`coordinator` 由主控实际验证并逐条验收；`independent` 在此基础上增加独立审查。主控按错误风险和独立核查价值决定，不把执行复杂度当成风险：权限、破坏性数据操作、并发等高风险工作使用独立审查。只填一项或填写未知方式会在派发前报错；两者均省略时兼容旧流程，`complex` 自动审查，`routine` 按需审查。历史任务不改写审查合同，新字段保存在任务快照、状态摘要、页面与 Markdown 中。
+
+需要独立审查的任务返回后自动排队；审查者只允许 `read/grep/glob` 和提交报告，禁止修改、命令执行或继续派代理。审查报告必须同时提供 `specVerdict` 与 `qualityVerdict`（`pass/fail`），以及具体 `issues`。审查未结束或有未解决重要问题时不能验收。审查结果是额外检查，主控仍须实际运行验证。测试通过不能代替视觉还原或真实场景验证。
 
 普通任务可用 `delegation_audit({taskId})` 请求审查，重复请求不会重复启动。审查服务失败不会重跑实现；处理原因后用 `delegation_audit({taskId,message:'已处理的具体原因'})` 明确重试。每次执行对应的审查启动次数单独受现有 `maxAttempts` 限制，所有启动同时计入计划 `maxActivations`。模型不自动升级或切换。
 
@@ -95,7 +99,7 @@ delegation_verify({taskId: 'login-tests', checkIndex: 1})
 
 配置和状态接口通过 `reviewerModelPolicy: dispatcher-snapshot` 标识当前策略。旧 `models.reviewer/complex` 配置不再生效，读取时不改原文件；下次保存仅保留执行配置及兼容的 `reviewer:null`。新版配置页连接旧进程时提示等待自然重载，避免页面显示新规则而后台仍使用旧审查配置。
 
-返工优先引用审查产生的 `issueIds`；主控新发现的问题用 `issues:[{criterion,severity,finding,evidence:[callId]}]`，允许引用实际验证失败的证据。`critical/important` 可触发返工，`minor` 仅记录。独立复查必须对原问题逐条返回 `ADDRESSED/NOT_ADDRESSED` 和证据；范围外发现只能作为可选建议，重要新问题必须说明由本次修复引入。普通任务由主控在最终验收时用 `resolutions:[{id,status:'ADDRESSED',evidence:[新callId]}]` 确认修复。
+返工优先引用审查产生的 `issueIds`；主控新发现的问题用 `issues:[{criterion,severity,finding,evidence:[callId]}]`，允许引用实际验证失败的证据。`critical/important` 可触发返工，`minor` 仅记录。同一次执行中标准、严重度、说明与证据完全相同的问题只保留一个编号，证据不同的记录不合并。纯修复保存 `reworkContext`，向执行者和复审者提供原问题、相关标准、前次报告及本次修复报告路径，不重新发送完整说明和无关标准；新用户要求加入时仍完整检查。独立复查必须对原问题逐条返回 `ADDRESSED/NOT_ADDRESSED` 和证据；范围外发现只能作为可选建议，重要新问题必须说明由本次修复引入。主控最终验证与验收仍覆盖全部标准，不因复审范围缩小而跳过要求。由主控验收的任务用 `resolutions:[{id,status:'ADDRESSED',evidence:[新callId]}]` 确认修复。
 
 历史任务未记录这些字段时保留原验收合同，不补造审查结果；新任务执行者未提交结构化报告会暂停，不能凭一段“已完成”通过验收。插件自然重载后新计划使用本流程；不强制重启宿主。
 

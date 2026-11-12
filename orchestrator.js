@@ -11,7 +11,7 @@ export const DEFAULT_OPTIONS = Object.freeze({
   models: { worker: null, reviewer: null },
 })
 export const REVIEWER_MODEL_POLICY = 'dispatcher-snapshot'
-export const COORDINATION_POLICY_VERSION = 5
+export const COORDINATION_POLICY_VERSION = 6
 const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork'])
 const COORDINATOR_TOOLS = new Set(['delegation_models', 'delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_wait', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
 const EXECUTOR_TOOLS = new Set(['delegation_checkpoint', 'delegation_report'])
@@ -36,6 +36,12 @@ const textOf = content => (content ?? []).filter(block => block?.type === 'text'
 const messageOf = error => brief(error?.message ?? error)
 const isServiceIssue = issue => ['MODEL_SERVICE_QUOTA', 'MODEL_SERVICE_RATE_LIMIT', 'MODEL_SERVICE_REQUEST_REFUSED'].includes(issue?.code)
 const criteriaOf = task => task.criteria.map((text, criterion) => ({ id: 'C' + (criterion + 1), criterion, text }))
+const requiresAudit = task => task.reviewPolicy === undefined ? task.complexity === 'complex' : task.reviewPolicy === 'independent'
+function taskPromptScope(task) {
+  const fixes = Boolean(task.reworkContext?.reportPath && !task.reworkContext.expanded && task.reworkIds?.length)
+  const issues = (task.issues ?? []).filter(issue => task.reworkIds?.includes(issue.id))
+  return { fixes, criteria: criteriaOf(task).filter(item => !fixes || issues.some(issue => issue.criterion === item.criterion)) }
+}
 const evidenceChoices = task => task.checks.map(check => check.result).filter(result => result?.attempt === task.attempts)
   .map(result => result.ref ?? result.callId).join('、') || '无，请先运行 delegation_verify'
 function reviewEvidence(task, values) {
@@ -78,6 +84,7 @@ function modelServiceIssue(error, role, route = {}) {
 // Model output is intentionally separate from the full persisted/UI snapshot.
 function compactTask(task) {
   return { id: task.id, title: task.title, status: task.status, attempts: task.attempts,
+    reviewPolicy: task.reviewPolicy ?? null, reviewReason: task.reviewReason ?? null,
     ...(task.criteria ? { criteria: criteriaOf(task) } : {}),
     model: task.modelRoute?.actual ?? task.modelRoute?.requested ?? task.model, authorization: task.modelRoute?.authorization ?? null, issue: task.issue,
     summary: brief(task.execution?.summary, 300), reportPath: task.execution?.reportPath,
@@ -172,8 +179,13 @@ function validateIssues(value, task) {
 }
 function appendIssues(task, issues, source) {
   task.issues ??= []
-  for (const issue of issues) task.issues.push({ ...issue, id: `${task.id}-${task.attempts}-${task.issues.length + 1}`,
-    attempt: task.attempts, source, status: issue.severity === 'minor' ? 'deferred' : 'open' })
+  for (const issue of issues) {
+    if (task.issues.some(existing => existing.attempt === task.attempts && existing.criterion === issue.criterion &&
+        existing.severity === issue.severity && existing.finding.trim() === issue.finding.trim() &&
+        JSON.stringify([...existing.evidence].sort()) === JSON.stringify([...issue.evidence].sort()))) continue
+    task.issues.push({ ...issue, id: `${task.id}-${task.attempts}-${task.issues.length + 1}`,
+      attempt: task.attempts, source, status: issue.severity === 'minor' ? 'deferred' : 'open' })
+  }
 }
 function validatePlan(args, stored = false) {
   if (!stored && JSON.stringify(args).length > 64 * 1024) throw new Error('任务计划超过 64 KiB，请缩小任务说明和输入范围')
@@ -183,6 +195,10 @@ function validatePlan(args, stored = false) {
     const id = requireText(input.id, '任务编号', 64)
     if (!/^[\w-]+$/.test(id)) throw new Error('任务编号只能包含字母、数字、下划线和短横线')
     if (!['routine', 'complex'].includes(input.complexity)) throw new Error('complexity 只能是 routine 或 complex')
+    if (input.reviewPolicy !== undefined && !['coordinator', 'independent'].includes(input.reviewPolicy)) throw new Error('reviewPolicy 只能是 coordinator 或 independent')
+    if (input.reviewPolicy === undefined && input.reviewReason !== undefined) throw new Error('审查依据必须同时提供 reviewPolicy')
+    const review = input.reviewPolicy === undefined ? {} : { reviewPolicy: input.reviewPolicy,
+      reviewReason: requireText(input.reviewReason, '审查依据', 1000) }
     if (!Array.isArray(input.checks) || !input.checks.length || input.checks.length > 4) throw new Error('每个任务需要 1~4 个主控验证步骤')
     const checks = input.checks.map(check => {
       if (!CHECK_TOOLS.includes(check.tool)) throw new Error(`验证工具只能是 ${CHECK_TOOLS.join(' / ')}`)
@@ -192,7 +208,7 @@ function validatePlan(args, stored = false) {
     })
     return { id, title: requireText(input.title, '任务标题', 160), instructions: requireText(input.instructions, '任务说明'),
       scope: requireText(input.scope, '边界'), outputs: strings(input.outputs, '交付物'), writes: strings(input.writes, '可修改路径', true),
-      dependsOn: strings(input.dependsOn ?? [], '依赖', true), complexity: input.complexity,
+      dependsOn: strings(input.dependsOn ?? [], '依赖', true), complexity: input.complexity, ...review,
       complexityReason: input.complexityReason == null ? null : requireText(input.complexityReason, '档位依据', 1000), modelRoute: null,
       criteria: strings(input.criteria, '验收标准'), checks, status: 'queued', attempts: 0,
       protocolVersion: 2, execution: null, issues: [], reworkIds: [], report: '', error: null, feedback: '', evidence: [], review: null, childId: null, model: null, progress: null }
@@ -453,7 +469,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const now = Date.now()
     for (const task of tasks) task.supervision.pending.deliveredAt = now
     const instruction = tasks.every(task => task.supervision.pending.advisory)
-      ? '执行中的任务长时间没有新活动，请读取 delegation_status 核对是否仍在运行；正常等待无需纠偏或停止。\n'
+      ? '执行中的任务需要核对进展，请读取 delegation_status 的提醒与证据，区分有效调查和重复操作；有进展继续，必要时纠正原代理，不因提醒停止或新开代理。\n'
       : '执行中的任务出现重复故障，请读取 delegation_status 核对证据，并向原子代理给出具体纠正，不重复派发或代做实现。\n'
     agent.inject(runtimeMessage(plan, instruction +
       tasks.map(task => `${task.id}（子会话 ${task.childId}）：${task.supervision.pending.reason}`).join('\n'), 'delegation-supervision'))
@@ -637,7 +653,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       } catch { /* No live parent or usable configuration: leave unknown information explicit. */ }
     }
     for (const task of copy.tasks) for (const check of task.checks) delete check.verifying
-    if (!persist) for (const task of targetsOf(copy)) if (task.supervision) delete task.supervision.evidenceIndex
+    if (!persist) for (const task of targetsOf(copy)) if (task.supervision) {
+      delete task.supervision.evidenceIndex; delete task.supervision.recentObservations
+    }
     copy.activationBudget = budget
     delete copy.pendingMessages
     if (plan.source?.messageId === sourceOf(plan.sessionId)?.messageId && pendingMessages(plan.sessionId).length) copy.pendingMessages = clone(pendingMessages(plan.sessionId))
@@ -978,11 +996,12 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return task
   }
   function workerPrompt(plan, task) {
+    const { fixes, criteria } = taskPromptScope(task)
     return [
       '你是执行者，使用配置的执行模型，按主控确定的目标、接口和边界完成任务，不再委派。可自行决定不改变接口、范围和验收要求的局部实现细节；影响需求含义、接口、数据或权限的不确定性，以及缺资料或能力不足，通过 delegation_report 报告 NEEDS_CONTEXT/BLOCKED 交回主控，不自行换模型或扩大范围。',
-      `总目标：${plan.goal}`, `任务：${task.title}`, task.instructions, `边界：${task.scope}`,
+      `总目标：${plan.goal}`, `任务：${task.title}`, fixes ? `本次仅修复原问题。前次执行报告：${task.reworkContext.reportPath}；先按需读取已有结论和实际交付物，不重新全面调查。修复报告须说明修改位置及针对性验证结果。` : task.instructions, `边界：${task.scope}`,
       `只允许修改：${task.writes.join('、') || '无（只读）'}`, `交付物：${task.outputs.join('、')}`,
-      '验收标准：', ...criteriaOf(task).map(item => `${item.id}：${item.text}`),
+      fixes ? '本次修复相关标准（最终验收仍覆盖全部原标准）：' : '验收标准：', ...criteria.map(item => `${item.id}：${item.text}`),
       '自测步骤（与主控验证使用同一份任务卡；自测结果不代表已验收）：',
       ...task.checks.map((check, i) => `${i + 1}. ${check.tool} ${JSON.stringify(check.arguments)}`),
       ...plan.tasks.filter(item => task.dependsOn.includes(item.id)).map(item => `已验收前置任务 ${item.id}：${item.execution ? item.execution.summary + '；完整报告：' + item.execution.reportPath : brief(item.report)}`),
@@ -1008,11 +1027,12 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     appendIssues(owner, task.issues ?? [], 'reviewer')
   }
   function auditPrompt(plan, task) {
+    const { fixes, criteria } = taskPromptScope(task)
     return [
       '你是独立的只读审查者，同时核对需求符合性和代码质量。不要修改文件、执行命令或继续委派；主控负责实际运行验证。',
-      `总目标：${plan.goal}`, `任务：${task.title}`, task.instructions, `边界：${task.scope}`,
+      `总目标：${plan.goal}`, `任务：${task.title}`, fixes ? `本次为原问题复审。前次执行报告：${task.reworkContext.reportPath}；从本次修复报告定位修改，只按需读取原问题与修改附近的实际交付物，不重新全面调查。` : task.instructions, `边界：${task.scope}`,
       `可修改范围（仅用于核查越界）：${task.writes.join('、') || '无'}`, `交付物：${task.outputs.join('、')}`,
-      '逐条验收要求：', ...criteriaOf(task).map(item => `${item.id}（criterion=${item.criterion}）：${item.text}`),
+      fixes ? '本次复查相关要求：' : '逐条验收要求：', ...criteria.map(item => `${item.id}（criterion=${item.criterion}）：${item.text}`),
       `执行报告文件：${task.execution.reportPath}。报告是待核实的主张，必须读实际交付物核对；不要全库漫游。`,
       '测试通过不能代替需求满足；界面还原需核对原稿与同尺寸实际截图，缺少无法核实的证据必须报告问题，不能默认通过。',
       '结束前调用 delegation_report，提交 status、summary、完整 report，以及 specVerdict/qualityVerdict（pass 或 fail）和 issues。',
@@ -1079,7 +1099,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         task.issue = null; task.error = task.execution.reason ?? null
         task.status = ['DONE', 'DONE_WITH_CONCERNS'].includes(task.execution.status) ? task.role === 'reviewer' ? 'completed' : 'review' : 'blocked'
         if (task.status === 'completed') applyAuditResult(taskOf(plan, task.id), task)
-        else if (task.status === 'review' && task.complexity === 'complex' && task.audit?.forAttempt !== task.attempts) queueAudit(task)
+        else if (task.status === 'review' && requiresAudit(task) && task.audit?.forAttempt !== task.attempts) queueAudit(task)
         delete task.interruption
         remember(plan, 'task.report_restored', '正式报告已确认，保留原结果继续验证验收，不重复执行', task)
         continue
@@ -1171,7 +1191,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       }
       if (task.status === 'review' && task.role === 'reviewer') task.status = 'completed'
       if (task.status === 'completed') applyAuditResult(handle.owner, task)
-      if (task.status === 'review' && task.protocolVersion && task.complexity === 'complex') queueAudit(task)
+      if (task.status === 'review' && task.protocolVersion && requiresAudit(task)) queueAudit(task)
       task.finishedAt = Date.now()
       remember(plan, ['review', 'completed'].includes(task.status) ? 'task.returned' : task.status === 'blocked' ? 'task.blocked' : 'task.failed',
           task.status === 'completed' ? '独立审查已返回，等待主控核对结论' : task.status === 'review' ? '子 Agent 已返回，等待主 Agent 验证与评审' : task.error,
@@ -1273,7 +1293,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         if (!checked.has(key)) checked.set(key, resolveManagedRoute(parent, selected, modelRole(task), signal))
         const { resolved, authorization } = await checked.get(key)
         recordModelSelection(task, selected, source, resolved, authorization)
-        if (task.protocolVersion && task.complexity === 'complex') {
+        if (task.protocolVersion && requiresAudit(task)) {
           const review = modelSelection({ role: 'reviewer', dispatcherModel: coordinatorModel(parent, task.attempts + 1) }, parent).selected
           const reviewKey = JSON.stringify(['reviewer', review])
           if (!checked.has(reviewKey)) checked.set(reviewKey, resolveManagedRoute(parent, review, 'reviewer', signal))
@@ -1318,7 +1338,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const { resolved, authorization } = await resolveManagedRoute(parent, selected, modelRole(task), handle.controller.signal)
       handle.controller.signal.throwIfAborted()
       recordModelSelection(task, selected, source, resolved, authorization)
-      if (!reviewer && task.complexity === 'complex') {
+      if (!reviewer && requiresAudit(task)) {
         await resolveManagedRoute(parent, modelSelection({ role: 'reviewer', dispatcherModel: dispatcher }, parent).selected, 'reviewer', handle.controller.signal)
         handle.controller.signal.throwIfAborted()
       }
@@ -1697,6 +1717,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       task.reworkIds = [...selected, ...task.issues.filter(issue => issue.attempt === task.attempts && issue.source === 'coordinator' && issue.status === 'open').map(issue => issue.id)].filter((id, i, all) => all.indexOf(id) === i)
       const feedback = [task.reworkIds.length ? task.issues.filter(issue => task.reworkIds.includes(issue.id)).map(issue => `${issue.id}：${issue.finding}；证据：${issue.evidence.join('、')}`).join('\n') : requireText(args.feedback, '返工原因'),
         ...inputs.map(input => '用户补充：' + input.text)].join('\n')
+      task.reworkContext = { fromAttempt: task.attempts, reportPath: task.execution?.reportPath ?? null, expanded: criteria.length > 0 }
       forwardInputs(plan, task, inputs, criteria, feedback)
       invalidateCompletion(plan)
       task.feedback = feedback; task.status = 'queued'; task.evidence = []; task.review = null
@@ -1705,7 +1726,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       remember(plan, 'task.rework', '主 Agent 要求返工：' + feedback, task)
     } else if (args.verdict === 'accept') {
       if (unresolvedInputs(plan).length) throw new Error('还有未处理的用户补充消息；先同步新增要求或用 acknowledge 说明纯答复，再验收')
-      if (task.protocolVersion && (task.complexity === 'complex' || task.audit) &&
+      if (task.protocolVersion && (requiresAudit(task) || task.audit) &&
           (task.audit?.forAttempt !== task.attempts || task.audit.status !== 'completed' || task.audit.specVerdict !== 'pass' || task.audit.qualityVerdict !== 'pass')) throw new Error('本次执行的独立审查尚未通过，不能验收；请核对审查状态和具体问题')
       const resolutions = args.resolutions ?? [], openIssues = (task.issues ?? []).filter(issue => issue.status === 'open' && issue.severity !== 'minor')
       if (!Array.isArray(resolutions) || new Set(resolutions.map(item => item.id)).size !== resolutions.length ||
@@ -2027,11 +2048,13 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     try { await write } finally { if (noteWrites.get(target) === write) noteWrites.delete(target) }
     return { path: target, sessionId: parent.id, requestId: source?.messageId ?? null, kind: args.kind }
   })
-  routeTool('delegation_plan', '主控提交可验证的任务拆分。通常一并提供 decisionReason 和 start:true，保存决定、计划并直接按配置派发，无需另调 decide/run。同类小修改合成一个任务；省略 start 或传 false 时仅建计划，兼容旧流程。', {
+  routeTool('delegation_plan', '主控提交可验证的任务拆分。通常一并提供 decisionReason 和 start:true，保存决定、计划并直接按配置派发。同类工作合批，有独立价值才拆分；审查按风险用 reviewPolicy/reviewReason 单独说明，不按执行复杂度增加流程。省略审查方式仍沿用 complex 独立审查的旧约定；省略 start 或 false 仅保存。', {
     goal: string, relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
     start: { type: 'boolean', description: 'true 表示建计划后立即校验模型、权限与预算并派发；省略或 false 仅建立计划。' },
     decisionReason: { type: 'string', description: '非空，最多 500 字；可在建计划时一并记录委派理由及 relation；不填写时需在 run 前记录。' }, tasks: array({ ...object({ id: string, title: string, instructions: string, scope: string,
       outputs: array(string), writes: array(string), dependsOn: array(string), complexity: { type: 'string', enum: ['routine', 'complex'] }, complexityReason: string,
+      reviewPolicy: { type: 'string', enum: ['coordinator', 'independent'], description: 'coordinator：主控实际验证并验收；independent：须额外独立审查。主控按错误风险选择；权限、数据破坏、并发等高风险工作用 independent。' },
+      reviewReason: { type: 'string', description: '指定 reviewPolicy 时必填，说明风险和所选审查方式的必要性；最多 1000 字。' },
       criteria: array(string), checks: array({ ...object({ tool: { type: 'string', enum: CHECK_TOOLS }, arguments: { type: 'object', additionalProperties: true } }), required: ['tool', 'arguments'] }) }),
       required: ['id', 'title', 'instructions', 'scope', 'outputs', 'writes', 'complexity', 'criteria', 'checks'] }),
   }, ['goal', 'tasks'], async (args, exec) => {

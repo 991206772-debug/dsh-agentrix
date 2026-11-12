@@ -18,6 +18,133 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('explicit coordinator review decouples execution complexity without bypassing evidence acceptance', async () => {
+  const f = await fixture()
+  const reason = '资料范围较大但交付仅为可核对的编辑建议，由主控验证验收。'
+  await f.plan([card('a', { complexity: 'complex', reviewPolicy: 'coordinator', reviewReason: reason })])
+  await f.execute('delegation_run'); await f.complete(0, { stopReason: 'completed', output: [] })
+  assert.equal(f.snapshot().tasks[0].reviewPolicy, 'coordinator')
+  assert.equal(f.snapshot().tasks[0].audit, undefined)
+  assert.equal(f.pending.length, 1)
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [] }), /验证/)
+  await f.reload()
+  assert.equal(f.snapshot().tasks[0].reviewReason, reason)
+  const state = await f.execute('delegation_status')
+  assert.match(f.render('delegation_status', {}, state), /coordinator/)
+  const proof = await f.execute('delegation_verify', { taskId: 'a' })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '实际内容符合要求', evidence: [proof.results[0].ref] }] })
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+  const saved = await f.engine.readArchive(f.snapshot().archive.id)
+  assert.match(saved.markdown, /审查方式：主控验证验收/)
+  assert.ok(saved.markdown.includes(reason))
+})
+
+test('explicit independent review remains mandatory for routine execution and preserves the dispatcher model', async () => {
+  const f = await fixture()
+  await f.plan([card('a', { reviewPolicy: 'independent', reviewReason: '改动虽少但影响权限边界，须独立审查。' })])
+  await f.execute('delegation_run'); await f.complete(0, { stopReason: 'completed', output: [] })
+  assert.equal(f.snapshot().tasks[0].audit.status, 'running')
+  assert.equal(f.calls[1].request.agentOptions.model, 'parent')
+  const proof = await f.execute('delegation_verify', { taskId: 'a' })
+  const accept = () => f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '实际验证通过', evidence: [proof.results[0].ref] }] })
+  await assert.rejects(accept(), /独立审查/)
+  await f.finishAudit(1, { specVerdict: 'pass', qualityVerdict: 'pass', issues: [] })
+  await accept()
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+})
+
+test('review policy choices require a valid explicit reason before any dispatch', async () => {
+  for (const fields of [{ reviewPolicy: 'skip', reviewReason: '不能跳过验收' }, { reviewPolicy: 'coordinator' },
+    { reviewPolicy: 'independent', reviewReason: ' ' }, { reviewReason: '缺少对应方式' }]) {
+    const f = await fixture()
+    await assert.rejects(f.plan([card('a', fields)]), /reviewPolicy|审查/)
+    assert.equal(f.pending.length, 0)
+  }
+})
+
+test('fix dispatch and re-review carry only the affected criteria and reports instead of the entire specification', async () => {
+  const f = await fixture()
+  await f.plan([card('a', { complexity: 'complex', instructions: 'UNRELATED_FULL_SPEC '.repeat(250),
+    criteria: ['返回包含必要字段', 'UNRELATED_ACCEPTANCE_CRITERION'] })])
+  await f.execute('delegation_run'); await f.complete(0, { stopReason: 'completed', output: [] })
+  const originalReport = f.snapshot().tasks[0].execution.reportPath
+  await f.finishAudit(1, { specVerdict: 'fail', qualityVerdict: 'pass', issues: [
+    { criterion: 0, severity: 'important', finding: '返回缺少必要字段', evidence: ['result.txt:2'] }] })
+  const issue = f.snapshot().tasks[0].issues[0]
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'rework', issueIds: [issue.id] })
+  const fix = f.calls[2].request.prompt[0].text
+  assert.ok(fix.includes(originalReport))
+  assert.ok(fix.includes(issue.id))
+  assert.doesNotMatch(fix, /UNRELATED_FULL_SPEC|UNRELATED_ACCEPTANCE_CRITERION/)
+  assert.ok(fix.length < f.calls[0].request.prompt[0].text.length * 0.5)
+  await f.complete(2, { stopReason: 'completed', output: [] })
+  const audit = f.calls[3].request.prompt[0].text
+  assert.ok(audit.includes(originalReport))
+  assert.ok(audit.includes(f.snapshot().tasks[0].execution.reportPath))
+  assert.ok(audit.includes(issue.id))
+  assert.doesNotMatch(audit, /UNRELATED_FULL_SPEC|UNRELATED_ACCEPTANCE_CRITERION/)
+  await f.finishAudit(3, { specVerdict: 'pass', qualityVerdict: 'pass', issues: [],
+    resolutions: [{ id: issue.id, status: 'ADDRESSED', evidence: ['result.txt:2 已修复'] }] })
+  const proof = await f.execute('delegation_verify', { taskId: 'a' })
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [
+    { criterionId: 'C1', finding: '仅核对修复仍不足以完成最终验收', evidence: [proof.results[0].ref] }] }), /逐条/)
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: ['C1', 'C2'].map(criterionId =>
+    ({ criterionId, finding: '实际结果满足原验收标准', evidence: [proof.results[0].ref] })) })
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+})
+
+test('new user criteria retain the full task brief and audit even when existing findings also need repair', async () => {
+  const f = await fixture()
+  await f.plan([card('a', { complexity: 'complex', instructions: 'FULL_BRIEF_REQUIRED_FOR_NEW_SCOPE' })])
+  await f.execute('delegation_run'); await f.complete(0, { stopReason: 'completed', output: [] })
+  await f.finishAudit(1, { specVerdict: 'fail', qualityVerdict: 'pass', issues: [
+    { criterion: 0, severity: 'important', finding: '缺少字段', evidence: ['result.txt:2'] }] })
+  const message = { id: 'new-delivery-rule', source: { kind: 'user' }, content: [{ type: 'text', text: '还需要操作说明' }] }
+  f.emit('session/event', f.parent, { type: 'user/message', data: message })
+  await f.execute('delegation_decide', { relation: 'update', messageId: message.id, mode: 'delegate', reason: '将新增操作说明纳入原任务。' })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'rework', inputIds: [message.id], additionalCriteria: ['NEW_DELIVERY_CRITERION'] })
+  assert.equal(f.snapshot().tasks[0].reworkContext.expanded, true)
+  assert.match(f.calls[2].request.prompt[0].text, /FULL_BRIEF_REQUIRED_FOR_NEW_SCOPE/)
+  assert.match(f.calls[2].request.prompt[0].text, /NEW_DELIVERY_CRITERION/)
+  await f.complete(2, { stopReason: 'completed', output: [] })
+  assert.match(f.calls[3].request.prompt[0].text, /FULL_BRIEF_REQUIRED_FOR_NEW_SCOPE/)
+  assert.match(f.calls[3].request.prompt[0].text, /NEW_DELIVERY_CRITERION/)
+})
+
+test('identical findings from one audit keep one stable issue without merging distinct evidence', async () => {
+  const f = await fixture()
+  await f.plan([card('a', { complexity: 'complex' })]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const issue = { criterion: 0, severity: 'important', finding: '引用行号不正确', evidence: ['result.txt:2', 'result.txt:4'] }
+  await f.finishAudit(1, { specVerdict: 'fail', qualityVerdict: 'pass', issues: [issue,
+    { ...issue, evidence: [...issue.evidence].reverse() }, { ...issue, evidence: ['other.txt:2'] }] })
+  assert.equal(f.snapshot().tasks[0].issues.length, 2)
+  assert.notEqual(f.snapshot().tasks[0].issues[0].id, f.snapshot().tasks[0].issues[1].id)
+})
+
+test('repeated successful observations notify the original coordinator once without stopping or spending correction budget', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const child = f.children[0]
+  const observe = i => f.engine.observe({ agent: child, name: 'pwsh', callId: 'repeat-' + i,
+    arguments: { command: 'count characters' } }, { isError: false, value: { exitCode: 0 }, content: [{ type: 'text', text: '119' }] })
+  for (let i = 0; i < 3; i++) observe(i)
+  await waitFor(() => f.parent.injected.some(message => message.source.kind === 'delegation-supervision'))
+  let task = f.snapshot().tasks[0]
+  assert.equal(task.supervision.pending.code, 'REPEATED_OBSERVATION')
+  assert.equal(task.supervision.pending.advisory, true)
+  assert.equal(task.supervision.used, 0)
+  assert.equal(f.snapshot().recovery.used, 0)
+  await f.execute('delegation_control', { taskId: 'a', action: 'steer', message: '这些计算不再影响需求，先交付完整结果。' })
+  for (let i = 3; i < 15; i++) observe(i)
+  await tick()
+  assert.equal(f.parent.injected.filter(message => message.source.kind === 'delegation-supervision').length, 1)
+  task = f.snapshot().tasks[0]
+  assert.equal(task.supervision.used, 0)
+  assert.equal(task.status, 'running')
+  assert.equal(f.pending.length, 1)
+  assert.equal(f.pending[0].receipt.disposed, undefined)
+})
+
 test('one plan call records delegation and starts its configured worker without a separate run', async () => {
   const f = await fixture()
   const result = await f.execute('delegation_plan', { goal: '一次派发隔离任务', decisionReason: '执行者核对文件，主控验证验收。', start: true, tasks: [card('a')] })

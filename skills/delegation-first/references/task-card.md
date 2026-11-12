@@ -11,8 +11,10 @@
 | `outputs` | 可定位的交付物路径或输出说明 |
 | `writes` | 可修改文件或目录；只读任务填空数组 |
 | `dependsOn` | 本计划内的前置任务编号，禁止循环依赖 |
-| `complexity` | `routine` 普通任务或 `complex` 复杂任务；复杂度不改变执行模型，complex 自动安排独立审查 |
+| `complexity` | `routine` 普通任务或 `complex` 复杂任务，只说明执行难度，不改变执行模型 |
 | `complexityReason` | 可选，说明本任务为什么属于该档位；新计划应填写，历史缺失时明确显示未记录 |
+| `reviewPolicy` | 可选，`coordinator` 主控验证验收，`independent` 额外独立审查；主控按风险选择，两项审查字段均省略时兼容 complex 自动审查的旧约定 |
+| `reviewReason` | 指定 `reviewPolicy` 时必填，非空且最多 1000 字，说明风险与审查必要性；高风险工作使用 independent |
 | `criteria` | 能逐条核对的非空标准数组 |
 | `checks` | 主控实际执行的验证步骤，每项有 `tool`、`arguments` |
 

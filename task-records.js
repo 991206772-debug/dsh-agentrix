@@ -74,6 +74,8 @@ export function taskSummary(plan) {
       '- 模型角色：' + (task.modelRoute?.role === 'worker' ? '执行模型' : task.modelRoute?.role === 'reviewer' ? '审查模型' : '历史未记录'),
       '- 任务复杂度：' + (task.complexity === 'complex' ? '复杂问题' : '普通执行'),
       '- 档位依据：' + (task.complexityReason || '未记录'),
+      '- 审查方式：' + (task.reviewPolicy === 'coordinator' ? '主控验证验收' : task.reviewPolicy === 'independent' ? '独立审查必须通过' : '沿用旧约定（复杂任务独立审查，普通任务由主控验证验收）'),
+      '- 审查依据：' + (task.reviewReason || '历史未记录'),
       '- 配置来源：' + (task.modelRoute ? task.modelRoute.source === 'configured' ? '用户配置' : '启动时继承主 Agent' : '历史未记录'),
       '- 配置模型：' + (task.modelRoute?.requested ? task.modelRoute.requested.provider + ' / ' + task.modelRoute.requested.model : '未记录'),
       '- 模型授权：' + (task.modelRoute?.authorization?.message || '历史未记录'),

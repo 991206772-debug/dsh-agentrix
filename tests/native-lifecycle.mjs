@@ -22,6 +22,7 @@ const { SubagentRuntime } = await native('dsh-subagent')
 const Spawn = await native('dsh-subagent-spawn-in-process')
 const directory = await mkdtemp(path.join(os.tmpdir(), 'dsh-completion-native-'))
 const truncateOutput = process.argv.includes('--truncate-output')
+const coordinatorReview = process.argv.includes('--coordinator-review')
 const continuous = process.argv.includes('--continuous')
 const benchmark = process.argv.includes('--benchmark')
 const baseline = process.argv.includes('--benchmark-baseline')
@@ -204,7 +205,7 @@ class ScriptedAdapter extends LlmAdapter {
           : tool('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '原任务产物已实际核对', evidence: [task.checks[0].result.callId] }] })
         else block = { type: 'text', text: plan.completion ? '原任务已验收，新便签也已核对。' : '等待原任务的报告与独立审查通知。' }
       }
-      else if (!task) block = tool('delegation_plan', { goal: '高模型规划、低模型执行、高模型审查与验收', decisionReason: '核对工作由执行模型完成，主控保留独立上下文做验证和验收。', tasks: [{ id: 'a', title: '检查隔离产物', instructions: coordinationConflict ? '读取 input.txt 后生成 result.txt 并正式报告' : '只读取隔离文件并正式报告', scope: '隔离目录', outputs: [deliverablePath], writes: coordinationConflict || activeNewRequest ? [deliverablePath] : [], complexity: 'complex', criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: deliverablePath } }] }] })
+      else if (!task) block = tool('delegation_plan', { goal: '高模型规划、低模型执行、高模型审查与验收', decisionReason: '核对工作由执行模型完成，主控保留独立上下文做验证和验收。', tasks: [{ id: 'a', title: '检查隔离产物', instructions: coordinationConflict ? '读取 input.txt 后生成 result.txt 并正式报告' : '只读取隔离文件并正式报告', scope: '隔离目录', outputs: [deliverablePath], writes: coordinationConflict || activeNewRequest ? [deliverablePath] : [], complexity: 'complex', ...(coordinatorReview ? { reviewPolicy: 'coordinator', reviewReason: '隔离只读核对，由主控验证验收即可。' } : {}), criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: deliverablePath } }] }] })
       else if (phase === 1) block = tool('delegation_run', {})
       else if (coordinationConflict && phase === 2) block = tool('write', { file_path: deliverablePath, content: 'unverified coordinator output' })
       else if (coordinationConflict && phase === 3) block = tool('delegation_verify', { taskId: 'a', checkIndex: 0 })
@@ -529,13 +530,20 @@ try {
   assert.equal(plan.tasks[0].release.status, 'released')
   assert.equal(plan.tasks[0].modelRoute.role, 'worker')
   assert.equal(plan.tasks[0].modelRoute.actual.model, 'low-worker')
-  assert.equal(plan.tasks[0].audit.modelRoute.role, 'reviewer')
+   if (coordinatorReview) {
+     assert.equal(plan.tasks[0].reviewPolicy, 'coordinator')
+     assert.equal(plan.tasks[0].audit, undefined)
+     assert.equal(plan.activationBudget.used, 1)
+     assert.equal(new Set(requests.filter(request => request.sessionId !== 'root').map(request => request.sessionId)).size, 1)
+   } else {
+   assert.equal(plan.tasks[0].audit.modelRoute.role, 'reviewer')
   assert.equal(plan.tasks[0].audit.modelRoute.actual.model, 'coordinator')
   assert.equal(plan.tasks[0].audit.modelRoute.source, 'dispatcher')
   assert.equal(plan.tasks[0].audit.release.status, 'released')
   assert.equal(new Set(requests.filter(request => request.sessionId !== 'root').map(request => request.sessionId)).size, 2)
+   }
   assert.equal(requests.filter(request => request.model === 'low-worker').length, earlyEvidence ? 22 : coordinationConflict ? 3 : continuous ? 86 : truncateOutput ? 4 : 2)
-  assert.equal(requests.filter(request => request.role === 'reviewer').length, truncateOutput ? 4 : 1)
+   assert.equal(requests.filter(request => request.role === 'reviewer').length, coordinatorReview ? 0 : truncateOutput ? 4 : 1)
   if (!switchCoordinator) assert.ok(requests.filter(request => request.sessionId === 'root').every(request => request.model === 'coordinator'))
   else {
     assert.ok(requests.some(request => request.role === 'coordinator' && request.model === 'changed-coordinator' && request.reasoningEffort === 'low'))
@@ -543,7 +551,7 @@ try {
     console.log('PASS: native chat model changed during execution; review keeps the dispatcher model and high effort while coordinator continues on the new selection')
   }
   if (!baseline) {
-    assert.equal((await state()).runtimePolicyVersion, 2)
+     assert.equal((await state()).runtimePolicyVersion, 3)
     assert.equal(plan.usage.roles.reduce((sum, row) => sum + row.requests, 0), requests.length)
     for (const row of plan.usage.roles) {
       assert.equal(row.inputTokens, row.responses * 100)
@@ -581,7 +589,7 @@ try {
     assert.equal(header.config.reasoningEffort, 'max')
     console.log('PASS: native adapter default reasoning max is accepted from the logged request header; adapterDefaults present=' + Object.hasOwn(header, 'adapterDefaults'))
   }
-  if (truncateOutput) assert.equal(plan.tasks[0].audit.recovery.used, 0)
+   if (truncateOutput && !coordinatorReview) assert.equal(plan.tasks[0].audit.recovery.used, 0)
   if (truncateOutput) console.log('PASS: three max-tokens responses per role continue on the same coordinator, worker and reviewer; accepted receipt generated with no replacement child or report-recovery consumption')
   if (continuous) {
     assert.ok(plan.tasks[0].supervision.notices.REQUEST_VOLUME)
@@ -600,7 +608,7 @@ try {
     assert.equal((await state()).sessions[0].delegationAvailability.status, 'available')
     console.log('PASS: installed host exposes role-appropriate tools before requests while coordinator delegation availability stays correct')
   }
-  console.log('PASS: real AgentLoop + ToolRuntime + SubagentRuntime: configured worker, review with dispatcher model, same-child report recovery, caller delivery, verification, acceptance, receipt and cleanup')
+   console.log('PASS: real AgentLoop + ToolRuntime + SubagentRuntime: configured worker, ' + (coordinatorReview ? 'explicit coordinator review without an extra reviewer' : 'review with dispatcher model') + ', same-child report recovery, caller delivery, verification, acceptance, receipt and cleanup')
   if (nextRequest) {
     await until(() => parent.status === 'idle', 'first request settled')
     followingRequest = true

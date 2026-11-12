@@ -78,7 +78,7 @@ try {
   let response
   await routes.get('/dsh-delegation-first/api/state')({ method: 'GET' }, { writeHead() {}, end(body) { response = JSON.parse(body) } })
   assert.equal(response.ok, true)
-  assert.equal(response.runtimePolicyVersion, 2)
+  assert.equal(response.runtimePolicyVersion, 3)
   assert.equal(response.supervisionPolicy.requests, null)
   assert.equal(response.supervisionPolicy.timeMode, 'notice')
   for (const [key, value] of Object.entries({ maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120 })) {
@@ -245,7 +245,8 @@ try {
   assert.deepEqual(verified.tasks.map(task => task.modelRoute.role), ['worker', 'worker'])
   assert.equal(adapterDispatches, 2)
   await cancel('原生契约测试已验证模型独立路由，明确结束本场景')
-  await checked('delegation_plan', { goal: '复杂任务独立审查与身份约束', tasks: [modelCard('audit', 'complex')] })
+  await checked('delegation_plan', { goal: '普通执行任务显式独立审查与身份约束', tasks: [{ ...modelCard('audit', 'routine'),
+    reviewPolicy: 'independent', reviewReason: '改动涉及权限边界，独立审查必须通过。' }] })
   await checked('delegation_run')
   const worker = children.at(-1), workerIndex = children.length - 1
   assert.equal((await call('delegation_report', { status: 'DONE', summary: '冒领', report: '不能由主控代报' })).isError, true)
@@ -283,7 +284,7 @@ try {
   assert.equal(disposed.get(reviewer.childId), 1)
   assert.match(await readFile(audited.tasks[0].execution.reportPath, 'utf8'), /实际证据/)
   assert.equal((await call('delegation_report', { status: 'DONE', summary: '过期覆盖', report: '拒绝' }, reviewerAgent)).isError, true)
-  console.log('PASS: structured full reports, child identity, complex-task independent review, native read-only guards, shared activation budget, acceptance gate and exact-once reviewer cleanup')
+  console.log('PASS: structured full reports, child identity, explicit independent review for routine execution, native read-only guards, shared activation budget, acceptance gate and exact-once reviewer cleanup')
   console.log('PASS: installed Cordis + ToolRuntime + LlmRuntime: schemas, strict gate, preparation, scoped notes, verification, acceptance, child errors, invalid-model recovery, reserved IDs, first-request mismatch blocked with zero dispatches, exact-once cleanup, per-role actual requests')
 } finally {
   await ctx.fiber.dispose()

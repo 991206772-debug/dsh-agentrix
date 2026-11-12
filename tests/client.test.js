@@ -5,15 +5,32 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('acceptance shows explicit review policy and reason separately from execution complexity', async () => {
+  for (const policy of ['coordinator', 'independent']) {
+    const task = { id: 'a', title: '核对产物', status: 'running', complexity: policy === 'coordinator' ? 'complex' : 'routine',
+      reviewPolicy: policy, reviewReason: '根据错误风险选择本次审查方式', dependsOn: [], writes: [], outputs: [], criteria: [], checks: [],
+      dispatcherModel: { provider: 'test', model: 'coordinator-model' } }
+    const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true, sessions: [],
+      plans: [{ sessionId: 'session-current', goal: '核对', status: 'running', tasks: [task] }] }) }) })
+    const view = f.mountView('session-current')
+    try {
+      await view.flush()
+      assert.match(view.text(), /审查依据.*根据错误风险选择本次审查方式/)
+      assert.match(view.text(), policy === 'coordinator' ? /主控验证验收/ : /独立审查必须通过/)
+      if (policy === 'coordinator') assert.doesNotMatch(view.text(), /复杂任务需独立审查/)
+    } finally { view.close(); f.close() }
+  }
+})
+
 test('acceptance distinguishes the current coordination policy from a host still running the previous policy', async () => {
-  for (const version of [4, 5]) {
+  for (const version of [5, 6]) {
     const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
       sessionId: 'session-current', plans: [], sessions: [], coordinationPolicyVersion: version }) }) })
     const view = f.mountView('session-current')
     try {
       await view.flush()
-      assert.match(view.text(), version === 5 ? /协作执行策略已生效（v5）/ : /协作执行策略等待加载/)
-      if (version === 4) assert.doesNotMatch(view.text(), /协作执行策略已生效/)
+      assert.match(view.text(), version === 6 ? /协作执行策略已生效（v6）/ : /协作执行策略等待加载/)
+      if (version === 5) assert.doesNotMatch(view.text(), /协作执行策略已生效/)
     } finally { view.close(); f.close() }
   }
 })

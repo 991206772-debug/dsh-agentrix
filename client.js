@@ -589,6 +589,7 @@ window.__ModuleLoader__.load({
       'view.countersUnknown': '旧记录没有本轮统计，不用累计次数代替。',
       'view.taskModel': '执行模型', 'view.taskComplexity': '任务复杂度', 'view.taskAudit': '独立审查',
       'view.taskAcceptance': '主控验收', 'view.auditRequired': '复杂任务需独立审查',
+      'view.auditCoordinator': '主控验证验收', 'view.auditExplicit': '独立审查必须通过', 'view.auditReason': '审查依据',
       'view.taskRoutine': '普通', 'view.taskComplex': '复杂', 'view.acceptanceStopped': '已停止，未验收',
       'view.auditOptional': '按需安排独立审查', 'view.acceptancePending': '报告提交后实际验证并验收',
       'view.acceptanceReview': '等待主控实际验证并逐条验收',
@@ -612,6 +613,7 @@ window.__ModuleLoader__.load({
       'view.countersUnknown': 'This older record has no turn counters; cumulative counts are not substituted.',
       'view.taskModel': 'Execution model', 'view.taskComplexity': 'Task complexity', 'view.taskAudit': 'Independent review',
       'view.taskAcceptance': 'Coordinator acceptance', 'view.auditRequired': 'Complex tasks require independent review',
+      'view.auditCoordinator': 'Coordinator verification and acceptance', 'view.auditExplicit': 'Independent review required', 'view.auditReason': 'Review reason',
       'view.taskRoutine': 'Routine', 'view.taskComplex': 'Complex', 'view.acceptanceStopped': 'Stopped without acceptance',
       'view.auditOptional': 'Independent review as needed', 'view.acceptancePending': 'Verification and acceptance after the report',
       'view.acceptanceReview': 'Awaiting actual verification and criterion-by-criterion acceptance',
@@ -693,7 +695,7 @@ window.__ModuleLoader__.load({
       'direct.backendMissing': 'Agentrix 插件服务不可用', 'direct.backendHint': '请检查插件是否启用；进度恢复前无法确认当前执行情况。',
       'direct.stale': '进度暂时无法更新，以下为最近记录',
       'coordination.incomplete': '尚未完成', 'coordination.coordinator': '主控操作未执行', 'coordination.worker': '协作操作未执行',
-      'coordination.active': '协作执行策略已生效（v5）', 'coordination.pending': '协作执行策略等待加载',
+      'coordination.active': '协作执行策略已生效（v6）', 'coordination.pending': '协作执行策略等待加载',
       'plans.outputTruncated': '验证摘要已截断，完整结果已保存', 'plans.outputPath': '完整验证结果', 'plans.concerns': '执行疑点（验收前需处理）',
     })
     Object.assign(en, {
@@ -722,7 +724,7 @@ window.__ModuleLoader__.load({
       'direct.backendMissing': 'Agentrix plugin service unavailable', 'direct.backendHint': 'Check that the plugin is enabled. Current execution cannot be confirmed until progress is available.',
       'direct.stale': 'Progress could not be refreshed; the last record is shown',
       'coordination.incomplete': 'Not completed', 'coordination.coordinator': 'Coordinator operation did not succeed', 'coordination.worker': 'Coordination operation did not succeed',
-      'coordination.active': 'Coordination policy active (v5)', 'coordination.pending': 'Coordination policy awaiting reload',
+      'coordination.active': 'Coordination policy active (v6)', 'coordination.pending': 'Coordination policy awaiting reload',
       'plans.outputTruncated': 'Verification preview truncated; full output saved', 'plans.outputPath': 'Full verification output', 'plans.concerns': 'Worker concerns (resolve before acceptance)',
     })
 
@@ -1938,6 +1940,10 @@ window.__ModuleLoader__.load({
     // Session-scoped acceptance board and complete task records.
     // -----------------------------------------------------------------------
 
+    const requiresAudit = task => task.reviewPolicy === undefined ? task.complexity === 'complex' : task.reviewPolicy === 'independent'
+    const reviewPolicyKey = task => task.reviewPolicy === 'coordinator' ? 'view.auditCoordinator'
+      : task.reviewPolicy === 'independent' ? 'view.auditExplicit' : task.complexity === 'complex' ? 'view.auditRequired' : 'view.auditOptional'
+
     function modelStatusKey(task) {
       const route = task.modelRoute
       const mismatch = task.issue?.code === 'MODEL_ROUTE_MISMATCH' || Boolean(route?.rejected)
@@ -1998,10 +2004,11 @@ window.__ModuleLoader__.load({
           h('div', null, `${tier} → ${selected?.model ?? task.model?.model ?? t('plans.modelUnknown')}`,
             h('span', { className: 'ddf-model-check' }, t(modelStatusKey(task)))),
           h('p', { className: 'ddf-hint' }, t('plans.modelReason') + '：' + (task.complexityReason || t('plans.modelReasonUnknown'))),
+          task.reviewPolicy ? h('p', { className: 'ddf-hint' }, t(reviewPolicyKey(task)) + ' · ' + t('view.auditReason') + '：' + task.reviewReason) : null,
           route ? h('p', { className: 'ddf-hint' }, t('view.modelIdentifierNote')) : null,
           h('p', { className: 'ddf-hint' }, t('plans.modelSource') + '：' + (route
             ? t(route.source === 'dispatcher' ? 'plans.modelSourceDispatcher' : route.source === 'configured' ? 'plans.modelSourceConfigured' : 'plans.modelSourceInherited') : t('plans.modelUnknown'))),
-          task.dispatcherModel ? h('p', { className: 'ddf-hint' }, t('plans.reviewSnapshot') + '：' + task.dispatcherModel.provider + ' / ' + task.dispatcherModel.model + ' · ' + t('models.reasoningEffort') + '：' + (task.dispatcherModel.reasoningEffort ?? t('models.defaultEffort')),
+          task.dispatcherModel && (task.audit || task.reviewPolicy !== 'coordinator') ? h('p', { className: 'ddf-hint' }, t('plans.reviewSnapshot') + '：' + task.dispatcherModel.provider + ' / ' + task.dispatcherModel.model + ' · ' + t('models.reasoningEffort') + '：' + (task.dispatcherModel.reasoningEffort ?? t('models.defaultEffort')),
             task.dispatcherModel.source === 'legacy-review' ? ' · ' + t('plans.reviewLegacySnapshot') : '') : null,
           mismatch ? h('p', { className: 'ddf-error' }, task.error || t('plans.modelMismatch')) : null,
           h(SupervisionDetails, { t, task }),
@@ -2324,7 +2331,7 @@ window.__ModuleLoader__.load({
               decision ? h('p', { className: 'ddf-board-decision-note' }, decision.reason) : null,
               !decisionCurrent && decision && !pending.length ? h('p', { className: 'ddf-board-decision-note' }, t('decision.revised')) : null,
               plan && semantic ? h(AssociationDetails, { t, resolution: session.messageResolution, pending }) : null,
-              plan ? h('p', { className: 'ddf-board-decision-note' }, t(complex || tasks.some(task => task.audit) ? 'view.complexAudit' : 'view.routineAcceptance')) : null),
+              plan ? h('p', { className: 'ddf-board-decision-note' }, t(tasks.some(task => requiresAudit(task) || task.audit) ? 'view.complexAudit' : 'view.routineAcceptance')) : null),
             h('div', { className: 'ddf-board-decision-actual' }, h('h2', null, t('view.actualArrangement')), h('strong', null, actual),
               dependent.length ? h('p', { className: 'ddf-board-decision-note' }, fill(t('view.boardDependency'), {
                 tasks: [...new Set(dependent.flatMap(task => task.dependsOn ?? []))].map(id => tasks.find(task => task.id === id))
@@ -2388,11 +2395,12 @@ window.__ModuleLoader__.load({
             h('span', { className: 'ddf-board-model-check', 'data-state': modelStatusKey(task) },
               t(modelStatusKey(task) === 'plans.modelVerified' ? 'view.requestConsistent' : modelStatusKey(task))), 'model'),
           fact('view.taskComplexity', task.complexity === 'complex' ? t('view.taskComplex') : task.complexity === 'routine' ? t('view.taskRoutine') : t('cfg.unknown'), null, 'complexity'),
-          fact('view.taskAudit', auditRoute?.model || t(task.complexity === 'complex' ? 'view.auditRequired' : 'view.auditOptional'),
-            task.audit ? t('audit.' + task.audit.status) : null, 'audit'),
+          fact('view.taskAudit', task.reviewPolicy === 'coordinator' && !task.audit ? t('view.auditCoordinator') : auditRoute?.model || t(reviewPolicyKey(task)),
+            task.audit ? t('audit.' + task.audit.status) : task.reviewPolicy === 'independent' ? t('view.auditExplicit') : null, 'audit'),
           fact('view.taskAcceptance', t(status === 'accepted' ? 'status.accepted' : status === 'cancelled' ? 'view.acceptanceStopped' : status === 'review' ? 'view.acceptanceReview' : 'view.acceptancePending'), null, 'acceptance')),
         h('p', { className: 'ddf-board-task-line', 'data-current-activity': true }, h('strong', null, t('view.currentAction') + '：'), activity),
         h('p', { className: 'ddf-board-task-line' }, h('strong', null, t('plans.modelReason') + '：'), task.complexityReason || t('plans.modelReasonUnknown')),
+        task.reviewPolicy ? h('p', { className: 'ddf-board-task-line' }, h('strong', null, t('view.auditReason') + '：'), task.reviewReason) : null,
         task.supervision || task.audit?.supervision ? h('details', { className: 'ddf-board-execution-diagnostics' },
           h('summary', null, t('view.executionDiagnostics')), h(SupervisionDetails, { t, task: current })) : null,
         reason ? h('p', { className: 'ddf-board-task-line', 'data-kind': status === 'cancelled' || affected ? undefined : 'error' }, h('strong', null, t('view.boardReason') + '：'), reason) : null,
@@ -2455,7 +2463,7 @@ window.__ModuleLoader__.load({
           notice,
           state?.storageError ? h('p', { className: 'ddf-board-inline-notice', 'data-kind': 'error', role: 'alert' }, state.storageError) : null,
           state ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-policy': state.runtimePolicyVersion ?? 'unknown' }, t(state.runtimePolicyVersion >= 2 ? 'runtime.active' : 'runtime.pending')) : null,
-          state ? h('p', { className: 'ddf-board-inline-notice', 'data-coordination-policy': state.coordinationPolicyVersion ?? 'unknown' }, t(state.coordinationPolicyVersion >= 5 ? 'coordination.active' : 'coordination.pending')) : null,
+          state ? h('p', { className: 'ddf-board-inline-notice', 'data-coordination-policy': state.coordinationPolicyVersion ?? 'unknown' }, t(state.coordinationPolicyVersion >= 6 ? 'coordination.active' : 'coordination.pending')) : null,
           h(UsageDetails, { t, usage: state?.requestUsage?.find(entry => entry.sessionId === sessionId && (!request?.messageId || entry.requestId === request.messageId)) ?? plan?.usage }),
           plan || request?.text ? h('section', { className: 'ddf-board-hero' },
             h('div', null, h('p', { className: 'ddf-board-hero-label' }, t(request?.messageId ? 'view.boardRequest' : 'view.recordedRequest')),
