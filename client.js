@@ -686,7 +686,8 @@ window.__ModuleLoader__.load({
       'direct.backendMissing': 'Agentrix 插件服务不可用', 'direct.backendHint': '请检查插件是否启用；进度恢复前无法确认当前执行情况。',
       'direct.stale': '进度暂时无法更新，以下为最近记录',
       'coordination.incomplete': '尚未完成', 'coordination.coordinator': '主控操作未执行', 'coordination.worker': '协作操作未执行',
-      'coordination.active': '协作执行策略已生效（v3）', 'coordination.pending': '协作执行策略等待加载',
+      'coordination.active': '协作执行策略已生效（v4）', 'coordination.pending': '协作执行策略等待加载',
+      'plans.outputTruncated': '验证摘要已截断，完整结果已保存', 'plans.outputPath': '完整验证结果', 'plans.concerns': '执行疑点（验收前需处理）',
     })
     Object.assign(en, {
       'direct.title': 'Coordinator executing directly', 'direct.incomplete': 'File changes remain incomplete',
@@ -707,7 +708,8 @@ window.__ModuleLoader__.load({
       'direct.backendMissing': 'Agentrix plugin service unavailable', 'direct.backendHint': 'Check that the plugin is enabled. Current execution cannot be confirmed until progress is available.',
       'direct.stale': 'Progress could not be refreshed; the last record is shown',
       'coordination.incomplete': 'Not completed', 'coordination.coordinator': 'Coordinator operation did not succeed', 'coordination.worker': 'Coordination operation did not succeed',
-      'coordination.active': 'Coordination policy active (v3)', 'coordination.pending': 'Coordination policy awaiting reload',
+      'coordination.active': 'Coordination policy active (v4)', 'coordination.pending': 'Coordination policy awaiting reload',
+      'plans.outputTruncated': 'Verification preview truncated; full output saved', 'plans.outputPath': 'Full verification output', 'plans.concerns': 'Worker concerns (resolve before acceptance)',
     })
 
     const CONFIG_NUMBERS = ['threshold', 'maxParallel', 'maxAttempts', 'maxActivations', 'taskTimeoutMinutes']
@@ -1891,6 +1893,7 @@ window.__ModuleLoader__.load({
           mismatch ? h('p', { className: 'ddf-error' }, task.error || t('plans.modelMismatch')) : null,
           h(SupervisionDetails, { t, task }),
           task.execution ? h('p', { className: 'ddf-hint' }, t('execution.' + task.execution.status) + '：' + task.execution.summary) : null,
+          ...(task.execution?.concerns ?? []).map((concern, i) => h('p', { key: 'concern-' + i, className: 'ddf-warn' }, t('plans.concerns') + '：' + concern)),
           task.stop ? h('div', null,
             h('p', null, t('completion.reason') + '：' + task.stop.reason),
             h('p', { className: 'ddf-hint' }, t('completion.stopSource') + '：' + t('completion.source.' + task.stop.source)),
@@ -1909,9 +1912,11 @@ window.__ModuleLoader__.load({
           h('strong', null, t('plans.checks')),
           ...(task.checks ?? []).map((check, i) => h('div', { key: i },
             h('div', null, check.tool + ' · ' + (check.result ? t(check.result.passed ? 'plans.passed' : 'plans.failed') : t('plans.unverified'))),
+            check.result?.truncated ? h('p', { className: 'ddf-warn' }, t('plans.outputTruncated')) : null,
             h('details', null, h('summary', null, t('plans.technical')),
               h('pre', null, JSON.stringify(check.arguments, null, 2)),
-              check.result ? h('pre', null, check.result.callId + '\n' + check.result.summary) : null))),
+              check.result ? h('pre', null, check.result.callId + '\n' + check.result.summary) : null,
+              check.result?.outputPath ? h('p', null, t('plans.outputPath') + '：', h('code', null, check.result.outputPath)) : null))),
           task.review ? h('div', null, h('strong', null, t('plans.review')),
             ...(task.review.findings ?? []).map((finding, i) => h('p', { key: i },
               `${finding.criterion + 1}. ${finding.finding} (${(finding.evidence ?? []).join(', ')})`))) : null,
@@ -2332,7 +2337,7 @@ window.__ModuleLoader__.load({
           notice,
           state?.storageError ? h('p', { className: 'ddf-board-inline-notice', 'data-kind': 'error', role: 'alert' }, state.storageError) : null,
           state ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-policy': state.runtimePolicyVersion ?? 'unknown' }, t(state.runtimePolicyVersion >= 2 ? 'runtime.active' : 'runtime.pending')) : null,
-          state ? h('p', { className: 'ddf-board-inline-notice', 'data-coordination-policy': state.coordinationPolicyVersion ?? 'unknown' }, t(state.coordinationPolicyVersion >= 3 ? 'coordination.active' : 'coordination.pending')) : null,
+          state ? h('p', { className: 'ddf-board-inline-notice', 'data-coordination-policy': state.coordinationPolicyVersion ?? 'unknown' }, t(state.coordinationPolicyVersion >= 4 ? 'coordination.active' : 'coordination.pending')) : null,
           h(UsageDetails, { t, usage: state?.requestUsage?.find(entry => entry.sessionId === sessionId && (!request?.messageId || entry.requestId === request.messageId)) ?? plan?.usage }),
           plan || request?.text ? h('section', { className: 'ddf-board-hero' },
             h('div', null, h('p', { className: 'ddf-board-hero-label' }, t(request?.messageId ? 'view.boardRequest' : 'view.recordedRequest')),

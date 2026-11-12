@@ -129,6 +129,7 @@ export function taskSummary(plan) {
       lines.push(result ? '- 结果：' + (result.passed ? '通过' : '失败或结果不明确') +
         '；证据：' + result.callId + (result.ref ? '；引用编号：' + result.ref : '') + (result.exitCode !== undefined ? '；退出码：' + result.exitCode : '') : '- 结果：尚未验证')
       if (result) lines.push('', result.summary || '（无文本输出）')
+      if (result?.truncated) lines.push('- 上方仅为截断摘要；完整验证输出：' + result.outputPath)
     }
     lines.push('', '### 主 Agent 验收结论', '', task.review
       ? list(task.review.findings.map(finding => task.criteria[finding.criterion] + '：' +
@@ -196,5 +197,21 @@ export function createTaskRecords(file) {
     return path.join(attach(plan).directory, 'reports', task.id,
       `${task.role === 'reviewer' ? 'review-' + task.forAttempt : 'worker'}-${task.attempts}.md`)
   }
-  return { attach, write, history, read, reportPath }
+  function verificationPath(plan, task, callId) {
+    if (!/^delegation-check-[a-f0-9-]{36}$/.test(callId)) throw invalid('验证证据编号无效')
+    return path.join(attach(plan).directory, 'verification', task.id, callId + '.txt')
+  }
+  async function writeVerification(plan, task, callId, output) {
+    const target = verificationPath(plan, task, callId)
+    await mkdir(path.dirname(target), { recursive: true })
+    await replace(target, output)
+    return target
+  }
+  async function readVerification(plan, task, evidence) {
+    if (!evidence.outputPath) return evidence.summary ?? ''
+    const expected = verificationPath(plan, task, evidence.callId)
+    if (path.resolve(evidence.outputPath) !== path.resolve(expected)) throw invalid('完整验证输出路径与证据不匹配')
+    return readFile(expected, 'utf8')
+  }
+  return { attach, write, history, read, reportPath, writeVerification, readVerification }
 }

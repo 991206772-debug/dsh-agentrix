@@ -47,7 +47,9 @@ complex 任务自动安排一个独立只读审查者核对需求和代码问题
 - 文件与结果必须能读到；仅复述子 Agent 的报告不算核对。
 - shell 验证必须前台完成并返回退出码 0；后台任务、报错或无退出码都不算通过。
 - 验证全部通过后，为每条 `criteria` 提交一项 finding，含标准编号、主控结论和本次实际证据 `callId`。
-- 只引用当前任务本次执行的证据；返工后原证据作废。
+- 只引用当前任务本次执行的当前检查结果；同一步骤重新验证后，旧的 ref 和 callId 都不能用于验收，历史记录仍保留。
+- 默认摘要保留 execution.status 和 concerns。DONE_WITH_CONCERNS 验收必须提供 concernsResolution，说明如何处理疑点。
+- 验证返回 truncated:true 时，摘要不是完整结果。按 readOutput 的提示，用 delegation_status({taskId,detail:'full',checkIndex,offset:0,limit:4000}) 分段读取；offset 是字符位置，按 nextOffset 继续。旧记录 available:summary 表示仅剩摘要，不能当成已读完整原文。
 
 ```js
 delegation_review({

@@ -11,7 +11,7 @@ export const DEFAULT_OPTIONS = Object.freeze({
   models: { worker: null, reviewer: null },
 })
 export const REVIEWER_MODEL_POLICY = 'dispatcher-snapshot'
-export const COORDINATION_POLICY_VERSION = 3
+export const COORDINATION_POLICY_VERSION = 4
 const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork'])
 const COORDINATOR_TOOLS = new Set(['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_wait', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
 const EXECUTOR_TOOLS = new Set(['delegation_checkpoint', 'delegation_report'])
@@ -41,8 +41,8 @@ const evidenceChoices = task => task.checks.map(check => check.result).filter(re
 function reviewEvidence(task, values) {
   if (!Array.isArray(values)) return values
   return values.map(value => {
-    if (!/^E[0-9a-f]{12}$/.test(value)) return value
-    const result = task.checks.map(check => check.result).find(result => result?.ref === value && result.attempt === task.attempts)
+    const result = task.checks.map(check => check.result).find(result => result &&
+      (result.ref === value || result.callId === value) && result.attempt === task.attempts)
     if (!result) throw new Error('验收证据必须引用本次主控验证实际返回的编号；当前可用：' + evidenceChoices(task))
     return result.callId
   })
@@ -74,12 +74,14 @@ function compactTask(task) {
     ...(task.criteria ? { criteria: criteriaOf(task) } : {}),
     model: task.modelRoute?.actual ?? task.modelRoute?.requested ?? task.model, issue: task.issue,
     summary: brief(task.execution?.summary, 300), reportPath: task.execution?.reportPath,
+    execution: task.execution ? { status: task.execution.status, reason: task.execution.reason, concerns: task.execution.concerns ?? [] } : null,
     error: task.error ? brief(task.error, 500) : null,
-    checks: (task.checks ?? []).map((check, index) => ({ index, passed: check.result?.passed ?? null, ref: check.result?.ref, callId: check.result?.callId })),
+    checks: (task.checks ?? []).map((check, index) => ({ index, passed: check.result?.passed ?? null, ref: check.result?.ref, callId: check.result?.callId,
+      ...(check.result?.truncated ? { truncated: true, outputPath: check.result.outputPath, readOutput: check.result.readOutput } : {}) })),
     issues: (task.issues ?? []).filter(issue => issue.status === 'open').map(issue => ({ id: issue.id, severity: issue.severity, finding: brief(issue.finding, 300) })),
-    evidence: (task.evidence ?? []).map(item => item.callId),
+    evidence: (task.checks ?? []).map(check => check.result).filter(result => result?.attempt === task.attempts).map(item => item.callId),
     ...(task.audit ? { audit: { status: task.audit.status, summary: brief(task.audit.execution?.summary, 300),
-      reportPath: task.audit.execution?.reportPath, specVerdict: task.audit.specVerdict, qualityVerdict: task.audit.qualityVerdict } } : {}) }
+      reportPath: task.audit.execution?.reportPath, concerns: task.audit.execution?.concerns ?? [], specVerdict: task.audit.specVerdict, qualityVerdict: task.audit.qualityVerdict } } : {}) }
 }
 function compactResult(value) {
   const result = { ...value }
@@ -361,7 +363,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const review = returned.filter(task => !task.audit || !['queued', ...LIVE].includes(task.audit.status))
     if (review.length) return { type: 'review', taskIds: review.map(task => task.id), message: review.some(task => task.checks.some(check => !check.result.passed))
       ? '验证已有失败结果，请核对原因并用具体证据决定返工；不能验收或原样反复验证。'
-      : '按给出的 criterionId 和证据 ref 逐条 delegation_review。' }
+      : '按给出的 criterionId 和证据 ref 逐条 delegation_review。' + (review.some(task => task.execution?.status === 'DONE_WITH_CONCERNS')
+        ? '报告含疑点，先核对 execution.concerns，并填写 concernsResolution 说明处理结论。' : '') }
     if (plan.tasks.some(task => ['failed', 'blocked'].includes(task.status) || ['failed', 'blocked'].includes(task.audit?.status))) return { type: 'handle_failure', message: '核对真实失败原因，处理后再明确重试；不新开代理掩盖错误。' }
     if (targetsOf(plan).some(task => LIVE.includes(task.status)) || plan.autoDispatch && plan.tasks.some(task => task.status === 'queued' || task.pendingAcceptance || task.audit?.status === 'queued')) return {
       type: 'wait', message: '计划正在执行或自动推进，下一阶段会自动启动，无需再次 run。简短告知用户后调用 delegation_wait，或结束当前回复等待自动通知；不要轮询 status。',
@@ -493,7 +496,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       abort = () => { plan.wakeSuppressed = true; resolve() }
       signal?.addEventListener('abort', abort, { once: true })
     })
-    try { await Promise.race([Promise.all(handles.map(handle => handle.done.promise)), cancelled, wake]) }
+    try { await Promise.race([...handles.map(handle => handle.done.promise), cancelled, wake]) }
     finally { signal?.removeEventListener('abort', abort) }
   }
   async function waitForResults(plan, agent, signal) {
@@ -504,7 +507,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       while (!closed && !signal?.aborted && !plan.cancelled && !plan.wakeSuppressed) {
         if (waiter.results.length || nextAction(plan).type !== 'wait' || pendingSupervision(plan).length) break
         const handles = [...live.values()].filter(handle => handle.planSessionId === agent.id)
-        if (!handles.length) break
+        waiter.awaitingDispatch = !handles.length
         const wake = waiter.wake
         await waitForWork(handles, signal, plan, wake.promise)
         if (waiter.wake === wake) waiter.wake = Promise.withResolvers()
@@ -1199,6 +1202,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const handle = { key, planSessionId: plan.sessionId, parent, task, owner, done: Promise.withResolvers(), controller: new AbortController(), receipt: null, settling: false }
     live.set(key, handle)
     task.status = 'starting'; task.error = null; task.issue = null
+    const waiter = waitingParents.get(plan.sessionId)
+    if (waiter?.awaitingDispatch) waiter.wake.resolve()
     delete task.stop
     task.execution = null; task.report = ''
     task.recovery = { used: 0, limit: RECOVERY_LIMIT }
@@ -1304,6 +1309,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
           }
           if (activationBudget(plan, getConfig().maxActivations).remaining <= 0) {
             pauseAtActivationLimit(plan)
+            waitingParents.get(plan.sessionId)?.wake.resolve()
             waitChanged = true
             break
           }
@@ -1503,14 +1509,22 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (task.pendingAcceptance) throw new Error('验收结果正在确认，不能同时更换验证证据')
     invalidateCompletion(plan)
     check.verifying = true
+    check.result = null; task.review = null
     try {
+      await save()
       const { result, callId } = await executePermitted(parent, check.tool, check.arguments, exec)
       const value = result.value, exitCode = value?.exitCode
       const shell = ['pwsh', 'bash'].includes(check.tool)
       // Shell success requires an actual exit code. A background job or missing status is inconclusive.
       const passed = !result.isError && (!shell || exitCode === 0)
+      const output = textOf(result.content) || JSON.stringify(value) || ''
       const evidence = { callId, ref: 'E' + randomUUID().replaceAll('-', '').slice(0, 12), tool: check.tool, passed, at: Date.now(), attempt: task.attempts,
-        summary: brief(textOf(result.content) || JSON.stringify(value), 2000), ...(shell ? { exitCode: exitCode ?? null } : {}) }
+        summary: brief(output, 2000), truncated: output.length > 2000, outputCharacters: output.length, ...(shell ? { exitCode: exitCode ?? null } : {}) }
+      if (evidence.truncated) {
+        try { evidence.outputPath = await records.writeVerification(plan, task, callId, output) }
+        catch (error) { throw new Error('完整验证输出保存失败，本次验证未登记；处理存储问题后重新验证：' + messageOf(error)) }
+        evidence.readOutput = `摘要已截断。用 delegation_status({taskId:"${task.id}",detail:"full",checkIndex:${args.checkIndex},offset:0,limit:4000}) 分段读取完整结果；offset 从 0 开始，按返回的 nextOffset 继续。读取成功不等于内容符合要求。`
+      }
       check.result = evidence
       task.evidence = [...task.evidence, evidence].slice(-12)
       task.review = null
@@ -1911,12 +1925,27 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     await save(); const failure = await pump(); if (failure) throw failure
     return { plan: snapshot().find(item => item.sessionId === plan.sessionId) }
   })
-  routeTool('delegation_status', '默认返回当前计划摘要及报告路径。detail=full 必须指定 taskId，仅读取该任务完整报告和证据；不要反复读取全量详情。', {
-    taskId: string, detail: { type: 'string', enum: ['summary', 'full'] },
+  routeTool('delegation_status', '默认返回计划摘要；detail=full 必须指定 taskId。额外指定 checkIndex 可分段读取该检查的完整验证输出：offset 为从 0 开始的字符位置，limit 默认 4000、最多 8000；按 nextOffset 继续，不反复读取全量详情。', {
+    taskId: string, detail: { type: 'string', enum: ['summary', 'full'] }, checkIndex: { type: 'integer' }, offset: { type: 'integer' }, limit: { type: 'integer' },
   }, [], async (args, exec) => {
     const { plan } = ownPlan(exec)
     if (args.detail !== undefined && !['summary', 'full'].includes(args.detail)) throw new Error('detail 只能是 summary 或 full')
     if (args.detail === 'full' && !args.taskId) throw new Error('完整详情必须指定 taskId，只读取一个任务')
+    if (args.checkIndex !== undefined) {
+      if (!args.taskId || args.detail !== 'full') throw new Error('读取验证输出必须指定 taskId 和 detail:full')
+      const task = taskOf(plan, args.taskId), check = task.checks[args.checkIndex]
+      if (!Number.isInteger(args.checkIndex) || !check?.result) throw new Error('checkIndex 无效或该检查尚未返回验证结果')
+      const offset = args.offset ?? 0, limit = args.limit ?? 4000
+      if (!Number.isInteger(offset) || offset < 0) throw new Error('offset 必须为从 0 开始的字符位置')
+      if (!Number.isInteger(limit) || limit < 1 || limit > 8000) throw new Error('limit 必须为 1~8000 的整数')
+      const output = await records.readVerification(plan, task, check.result)
+      if (offset > output.length) throw new Error('offset 超过验证输出长度')
+      const content = output.slice(offset, offset + limit), end = offset + content.length
+      return { taskId: task.id, checkIndex: args.checkIndex, ref: check.result.ref, callId: check.result.callId,
+        available: check.result.outputPath || check.result.truncated === false ? 'full' : 'summary',
+        content, offset, nextOffset: end < output.length ? end : null, totalCharacters: output.length, outputPath: check.result.outputPath }
+    }
+    if (args.offset !== undefined || args.limit !== undefined) throw new Error('offset 和 limit 必须与 checkIndex 一起使用')
     if (args.taskId) {
       const task = clone(taskOf(plan, args.taskId))
       for (const target of task.audit ? [task, task.audit] : [task]) if (target.supervision) delete target.supervision.evidenceIndex
@@ -2073,6 +2102,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     async dispose() {
       if (closed) return
       closed = true
+      for (const waiter of waitingParents.values()) waiter.wake.resolve()
       truncatedOutputs.clear()
       clearTimeout(activityTimer)
       for (const plan of plans.values()) {

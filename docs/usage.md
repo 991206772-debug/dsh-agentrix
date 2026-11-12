@@ -70,7 +70,11 @@ delegation_verify({taskId: 'login-tests', checkIndex: 0})
 delegation_verify({taskId: 'login-tests', checkIndex: 1})
 ```
 
-`checkIndex` 和验收标准编号从 0 开始。主控阅读返回结果后，在 `delegation_review` 的 `findings` 中逐条写明结论，`evidence` 引用这次实际返回的 `callId`。编造编号、缺少条目、验证失败、后台命令或无退出码的 shell 结果，都不能通过验收。返工后旧证据作废。
+`checkIndex` 从 0 开始，验收标准可直接引用返回的 `C1/C2`。主控阅读返回结果后，在 `delegation_review` 的 `findings` 中逐条写明结论，`evidence` 引用该检查当前返回的 `ref` 或 `callId`。重新验证同一步骤后，旧的两种编号都不能用于验收，历史仍保留。编造编号、缺少条目、验证失败、后台命令或无退出码的 shell 结果，都不能通过验收。
+
+验证输出超过 2000 字符时，只在默认响应中显示摘要，原文保存在 `outputPath`。`truncated: true` 和 `readOutput` 会明确提示继续读取。主控可以调用 `delegation_status({taskId:'login-tests',detail:'full',checkIndex:0,offset:0,limit:4000})` 分段核查原文；`offset` 为从 0 开始的字符位置，按 `nextOffset` 继续，直到其为 `null`。每次最多返回 8000 字符。旧任务未保存原文时显示 `available: summary`，不补造完整结果。读取成功不等于内容符合要求。
+
+跨会话等并发名额或写入锁时，主控使用 `delegation_wait` 或结束当前回复等待事件；正常排队不消耗补流程次数，不必反复查询，也不会因此停止自动派发。用户补充与取消仍可中断等待。
 
 ### 执行报告与独立审查
 

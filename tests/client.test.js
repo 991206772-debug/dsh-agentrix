@@ -6,14 +6,14 @@ import vm from 'node:vm'
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
 test('acceptance distinguishes the current coordination policy from a host still running the previous policy', async () => {
-  for (const version of [2, 3]) {
+  for (const version of [3, 4]) {
     const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
       sessionId: 'session-current', plans: [], sessions: [], coordinationPolicyVersion: version }) }) })
     const view = f.mountView('session-current')
     try {
       await view.flush()
-      assert.match(view.text(), version === 3 ? /协作执行策略已生效（v3）/ : /协作执行策略等待加载/)
-      if (version === 2) assert.doesNotMatch(view.text(), /协作执行策略已生效/)
+      assert.match(view.text(), version === 4 ? /协作执行策略已生效（v4）/ : /协作执行策略等待加载/)
+      if (version === 3) assert.doesNotMatch(view.text(), /协作执行策略已生效/)
     } finally { view.close(); f.close() }
   }
 })
@@ -1579,9 +1579,9 @@ test('collapsed board task details retain the full request, model, checks, evide
     plans: [{ sessionId: 'session-current', status: 'accepted', goal: '核查接口', source: { text: '原始需求完整内容', messageId: 'message-source' }, cwd: 'D:/project',
       tasks: [{ id: 'api', title: '接口检查', status: 'accepted', childId: 'child-session', dependsOn: ['base'], outputs: ['src/api.js'],
         modelRoute: { requested: { provider: 'provider-a', model: 'worker-requested' }, actual: { provider: 'provider-b', model: 'worker-actual' } },
-        criteria: ['返回字段完整'], checks: [{ tool: 'test', arguments: { command: 'node --test' }, result: { passed: true, callId: 'check-123', summary: '字段验证通过' } }],
+        criteria: ['返回字段完整'], checks: [{ tool: 'test', arguments: { command: 'node --test' }, result: { passed: true, callId: 'check-123', summary: '字段验证通过', truncated: true, outputPath: 'verification/check-123.txt' } }],
         review: { findings: [{ criterion: 0, finding: '符合标准', evidence: ['check-123'] }] }, release: { status: 'released' },
-        execution: { status: 'DONE', summary: '完成字段检查', reportPath: 'reports/api.md' },
+        execution: { status: 'DONE_WITH_CONCERNS', summary: '完成字段检查', reportPath: 'reports/api.md', concerns: ['实际数据库尚未验证'] },
         audit: { status: 'completed', specVerdict: 'pass', qualityVerdict: 'pass', report: '独立审查完整报告' }, report: '子任务完整报告' }] }] }) }) })
   const view = f.mountView('session-current')
   try {
@@ -1590,7 +1590,7 @@ test('collapsed board task details retain the full request, model, checks, evide
     view.button('查看验收详情').props.onClick()
     await view.flush()
     for (const value of ['原始需求完整内容', 'message-source', '返回字段完整', 'node --test', 'check-123', '字段验证通过', '符合标准',
-      'provider-a / worker-requested', 'provider-b / worker-actual', 'child-session', 'src/api.js', 'base', 'reports/api.md', '独立审查完整报告', '子任务完整报告', '子 Agent 已关闭']) {
+      'provider-a / worker-requested', 'provider-b / worker-actual', 'child-session', 'src/api.js', 'base', 'reports/api.md', '独立审查完整报告', '子任务完整报告', '子 Agent 已关闭', '实际数据库尚未验证', 'verification/check-123.txt', '验证摘要已截断']) {
       assert.ok(view.text().includes(value), value)
     }
   } finally { view.close(); f.close() }

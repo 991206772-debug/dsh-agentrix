@@ -51,6 +51,7 @@ test('acceptance uses supplied criterion IDs and current-task evidence reference
   const current = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
   assert.notEqual(current.ref, first.ref)
   await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: findings(first.ref) }), /本次主控验证|当前可用/)
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: findings(first.callId) }), /本次主控验证|当前可用/)
   await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [
     { criterionId: 'C9', finding: '错误编号', evidence: [current.ref] }, findings(current.ref)[1],
   ] }), /C1.*C2/)
@@ -91,6 +92,37 @@ test('event waiting returns the first actionable report while other workers keep
   assert.equal(f.snapshot().tasks[1].status, 'running')
   await f.execute('delegation_cancel', { reason: '隔离等待测试结束，明确取消剩余任务' })
 })
+
+for (const reason of ['parallel', 'write-conflict']) for (const stopping of [false, true]) {
+  test(`queued ${reason} work waits for another session without spending recovery (${stopping ? 'turn end' : 'wait tool'})`, async () => {
+    const f = await fixture({ maxParallel: reason === 'parallel' ? 1 : 4 })
+    const other = { ...f.parent, id: 'queued-parent', injected: [] }
+    const get = f.ctx.get.bind(f.ctx)
+    f.ctx.get = name => name === 'agents' ? { get: id => id === other.id ? other : get(name).get(id), list: () => [...get(name).list(), other] } : get(name)
+    const writes = reason === 'write-conflict' ? ['shared.txt'] : []
+    await f.plan([card('holder', { writes })]); await f.execute('delegation_run')
+    await f.plan([card('queued', { writes })], other); await f.execute('delegation_run', {}, other)
+    assert.equal(f.snapshot(other.id).dispatchWait.reason, reason)
+    let returned = false
+    const waiting = (stopping ? f.emit('agent/turn-stopping', { agent: other, signal: new AbortController().signal })
+      : f.execute('delegation_wait', {}, other)).then(value => { returned = true; return value })
+    await tick(); assert.equal(returned, false, 'queued work must remain suspended without calling the model again')
+    assert.equal(f.snapshot(other.id).recovery.used, 0)
+    await f.complete(0, { stopReason: 'completed', output: [] })
+    const proof = await f.execute('delegation_verify', { taskId: 'holder', checkIndex: 0 })
+    await f.execute('delegation_review', { taskId: 'holder', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '已核对', evidence: [proof.ref] }] })
+    await waitFor(() => f.calls.length === 2)
+    await tick(); assert.equal(returned, false, 'dispatch events alone must not wake the coordinator model')
+    await f.report(1, { status: 'DONE', summary: '原排队任务已执行', report: '等待主控验证验收' })
+    f.pending[1].resolve({ stopReason: 'completed', output: [] })
+    await waiting
+    assert.equal(f.snapshot(other.id).tasks[0].status, 'review')
+    assert.equal(f.snapshot(other.id).completion, null)
+    assert.equal(f.snapshot(other.id).recovery.used, 0)
+    assert.equal(f.calls.length, 2)
+    await f.execute('delegation_cancel', { reason: '隔离排队测试结束' }, other)
+  })
+}
 
 test('acceptance returns automatic dispatch guidance instead of inviting a duplicate run', async () => {
   const f = await fixture()
@@ -145,6 +177,71 @@ test('failed verification asks for a review of the failure rather than repeated 
   assert.equal(proof.nextAction.type, 'review')
   assert.match(proof.nextAction.message, /失败/)
   await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '不能冒充通过', evidence: [proof.ref] }] }), /主控验证尚未全部通过/)
+  assert.equal(f.snapshot().completion, null)
+})
+
+test('default task summaries and notifications retain concerns and the required acceptance step', async () => {
+  const f = await fixture({ autoConclude: true })
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.report(0, { status: 'DONE_WITH_CONCERNS', summary: '文件已核对', report: '完整交付说明', concerns: ['真实数据库行为尚未验证'] })
+  await waitFor(() => f.snapshot().tasks[0].status === 'review')
+  const value = await f.execute('delegation_status')
+  const compact = JSON.parse(f.render('delegation_status', {}, value)).plan.tasks[0]
+  assert.equal(compact.execution.status, 'DONE_WITH_CONCERNS')
+  assert.deepEqual(compact.execution.concerns, ['真实数据库行为尚未验证'])
+  await waitFor(() => f.parent.injected.some(message => JSON.stringify(message).includes('真实数据库行为尚未验证')))
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  assert.match(proof.nextAction.message, /concernsResolution/)
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', concernsResolution: '本次仅验收静态文件，保留真实数据库验证限制。',
+    findings: [{ criterionId: 'C1', finding: '已按本次范围核对', evidence: [proof.ref] }] })
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+})
+
+test('long verification output stays complete across reload and can be read in bounded chunks', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const output = '已核对的正文\n'.repeat(800) + 'TAIL:尚未完成真实数据库验证'
+  const execute = f.ctx.tools.execute
+  f.ctx.tools.execute = async exec => { const result = await execute(exec); result.content[0].text = output; return result }
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  assert.equal(proof.truncated, true)
+  assert.equal(proof.outputCharacters, output.length)
+  assert.equal(await readFile(proof.outputPath, 'utf8'), output)
+  assert.ok(proof.summary.length <= 2000)
+  assert.match(f.render('delegation_verify', {}, proof), /truncated|截断/)
+  assert.match(proof.readOutput, /delegation_status.*checkIndex/)
+  await f.reload()
+  let actual = '', offset = 0
+  do {
+    const args = { taskId: 'a', detail: 'full', checkIndex: 0, offset, limit: 700 }
+    const value = await f.execute('delegation_status', args)
+    const chunk = JSON.parse(f.render('delegation_status', args, value))
+    assert.equal(chunk.available, 'full')
+    assert.ok(chunk.content.length <= 700)
+    actual += chunk.content; offset = chunk.nextOffset
+  } while (offset !== null)
+  assert.equal(actual, output)
+  await assert.rejects(f.execute('delegation_status', { detail: 'full', checkIndex: 0 }), /taskId/)
+  await assert.rejects(f.execute('delegation_status', { taskId: 'a', checkIndex: 0 }), /full/)
+  await assert.rejects(f.execute('delegation_status', { taskId: 'a', detail: 'full', checkIndex: 0, offset: -1 }), /offset/)
+  await assert.rejects(f.execute('delegation_status', { taskId: 'a', detail: 'full', checkIndex: 0, limit: 100000 }), /limit/)
+  const archive = await f.engine.readArchive(f.snapshot().archive.id)
+  assert.ok(archive.markdown.includes(proof.outputPath))
+  assert.match(archive.markdown, /摘要.*截断|截断.*摘要/)
+})
+
+test('failure to retain a new verification output invalidates the older result and preserves its history', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const old = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  await writeFile(path.join(f.snapshot().archive.directory, 'verification'), 'not a directory')
+  const execute = f.ctx.tools.execute
+  f.ctx.tools.execute = async exec => { const result = await execute(exec); result.content[0].text = '长验证结果'.repeat(1000); return result }
+  await assert.rejects(f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 }), /完整验证输出保存失败.*未登记/)
+  await f.reload()
+  assert.equal(f.snapshot().tasks[0].checks[0].result, null)
+  assert.ok(f.snapshot().tasks[0].evidence.some(item => item.callId === old.callId))
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '旧结果不能代替失败的新验证', evidence: [old.callId] }] }), /本次主控验证/)
   assert.equal(f.snapshot().completion, null)
 })
 
@@ -1293,7 +1390,7 @@ async function fixture(options = {}) {
         calls.push(spec)
         if (options.startError) throw new Error('capacity full')
         const deferred = Promise.withResolvers()
-        children.set(spec.childId, { id: spec.childId, session: { header: { origin: 'subagent', parentSession: parent.id } },
+        children.set(spec.childId, { id: spec.childId, session: { header: { origin: 'subagent', parentSession: spec.request.parent.id } },
           injected: [], inject(message) { this.injected.push(message) } })
         attachScope(children.get(spec.childId))
         await events.get('agent/created')?.({ agent: children.get(spec.childId) })
@@ -1338,9 +1435,9 @@ async function fixture(options = {}) {
       throw error
     }
   }
-  const execute = (name, args = {}) => invoke(name, args, parent)
-  const plan = tasks => execute('delegation_plan', { goal: '完成任务并由主控验收', decisionReason: '执行者核对隔离文件，主控保留独立上下文验证和验收。', tasks })
-  const snapshot = () => engine.snapshot()[0]
+  const execute = (name, args = {}, agent = parent) => invoke(name, args, agent)
+  const plan = (tasks, agent = parent) => execute('delegation_plan', { goal: '完成任务并由主控验收', decisionReason: '执行者核对隔离文件，主控保留独立上下文验证和验收。', tasks }, agent)
+  const snapshot = (sessionId = parent.id) => engine.snapshot().find(plan => plan.sessionId === sessionId)
   return { get engine() { return engine }, ctx, calls, pending, config, execute, plan, snapshot, directory, file, parent, conclusions,
     definition: (name, index) => scopedTools.get(index === undefined ? parent.id : pending[index].receipt.childId)?.get(name) ?? tools.get(name),
     render: (name, args, value) => tools.get(name).output.render(args, value).map(block => block.text).join('\n'),

@@ -123,7 +123,7 @@ test('host guards and request tools share managed coordination policy, including
     assert.match(h.call('write', 'denied-write', h.agent, { file_path: 'tool.html' }), /尚未验收/)
     const response = await new Promise(resolve => h.routes.get('/dsh-delegation-first/api/state')({ method: 'GET', url: '/dsh-delegation-first/api/state?sessionId=root' },
       { writeHead() {}, end(text) { resolve(JSON.parse(text)) } }))
-    assert.equal(response.coordinationPolicyVersion, 3)
+    assert.equal(response.coordinationPolicyVersion, 4)
     assert.equal(response.plans[0].coordinationIssue.callId, 'denied-write')
     assert.equal(response.plans[0].completion, null)
     assert.equal(h.call('team_task_list'), undefined)
