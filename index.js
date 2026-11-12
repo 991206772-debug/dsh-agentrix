@@ -763,6 +763,7 @@ export function apply(ctx) {
         requestBindingVersion: 2,
         pendingMessages: orchestration.pendingMessages(id),
         messageResolution: orchestration.requestContext(id)?.messageResolution ?? null,
+        argumentRecovery: orchestration.requestContext(id)?.argumentRecovery ?? null,
         role: state.isCoordinator ? 'coordinator' : 'worker',
         turn: state.turn,
         direct: state.direct,

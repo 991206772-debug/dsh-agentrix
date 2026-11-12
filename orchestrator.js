@@ -15,6 +15,7 @@ export const COORDINATION_POLICY_VERSION = 6
 const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork'])
 const COORDINATOR_TOOLS = new Set(['delegation_models', 'delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_wait', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
 const EXECUTOR_TOOLS = new Set(['delegation_checkpoint', 'delegation_report'])
+const ARGUMENT_RECOVERY_LIMIT = 2
 const REVIEW_TOOLS = new Set(['read', 'grep', 'glob', ...EXECUTOR_TOOLS])
 const MAX_PLANS = 12
 const MAX_TASKS = 16
@@ -44,6 +45,17 @@ function taskPromptScope(task) {
 }
 const evidenceChoices = task => task.checks.map(check => check.result).filter(result => result?.attempt === task.attempts)
   .map(result => result.ref ?? result.callId).join('、') || '无，请先运行 delegation_verify'
+function malformedToolArguments(failure) {
+  if (failure?.code !== 'MALFORMED_RESPONSE' || typeof failure.message !== 'string') return null
+  const match = failure.message.match(/^Tool call "([^"]+)": [^\n]+\n\nReceived arguments:\n([\s\S]+)$/)
+  if (!match || !COORDINATOR_TOOLS.has(match[1]) && !EXECUTOR_TOOLS.has(match[1])) return null
+  try { JSON.parse(match[2]); return null }
+  catch (error) {
+    const offset = Number(error.message.match(/position (\d+)/)?.[1] ?? 0)
+    return { tool: match[1], error: error.message, offset,
+      excerpt: match[2].slice(Math.max(0, offset - 180), offset + 420), characters: match[2].length }
+  }
+}
 function reviewEvidence(task, values) {
   if (!Array.isArray(values)) return values
   return values.map(value => {
@@ -445,6 +457,52 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     for (const message of data.inserted ?? []) receiveHuman(session.id, message, target)
     backgroundSave()
   }
+  function argumentOwner(agent, tool) {
+    const expected = expectedRoutes.get(agent?.id)
+    if (expected) return EXECUTOR_TOOLS.has(tool) && !expected.plan.cancelled && !expected.plan.wakeSuppressed &&
+      !expected.handle.controller.signal.aborted && !expected.task.execution
+      ? { owner: expected.task, requestId: String(expected.task.attempts) } : null
+    if (!COORDINATOR_TOOLS.has(tool) || service('agents')?.get(agent?.id) !== agent) return null
+    const header = agent.session?.header
+    if (header?.origin === 'subagent' || header?.parentSession || header?.delegationDepth > 0) return null
+    let entry = decisions.get(agent.id)
+    const messageId = coordinatorUsage.get(agent.id)?.messageId
+    const message = entry?.messages?.find(item => item.messageId === messageId && !item.withdrawn) ?? pendingMessages(agent.id).at(-1)
+    const requestId = message?.resolution?.requestId ?? message?.messageId ?? sourceOf(agent.id)?.messageId
+    if (!requestId) return null
+    const plan = plans.get(agent.id)
+    if (plan?.source?.messageId === requestId && (plan.cancelled || plan.wakeSuppressed)) return null
+    if (!entry) {
+      entry = { sessionId: agent.id, source: clone(sourceOf(agent.id)), revision: clone(revisionOf(agent.id)), decision: null }
+      decisions.set(agent.id, entry)
+    }
+    return { owner: entry, requestId }
+  }
+  disposers.push(ctx.on('agent/request-error', async ({ agent, failure, signal }, next) => {
+    await ready
+    if (signal?.aborted) return
+    if (closed || getConfig().enabled === false) return next()
+    const problem = malformedToolArguments(failure), target = problem && argumentOwner(agent, problem.tool)
+    if (!target || typeof agent.session?.append !== 'function') return next()
+    const previous = target.owner.argumentRecovery
+    const state = { ...(previous?.requestId === target.requestId ? previous : { requestId: target.requestId, used: 0 }),
+      limit: ARGUMENT_RECOVERY_LIMIT, ...problem, at: Date.now() }
+    state.status = state.used >= ARGUMENT_RECOVERY_LIMIT ? 'exhausted' : 'retrying'
+    if (state.status === 'retrying') state.used++
+    target.owner.argumentRecovery = state
+    try { await save() }
+    catch (error) { target.owner.argumentRecovery = previous; throw error }
+    if (closed || signal?.aborted || state.status === 'exhausted') return
+    // The native retry re-derives the session surface within the SAME step;
+    // next-step inbox injection would arrive too late and add a spurious turn.
+    agent.session.append('user/message', { id: randomUUID(), role: 'user', source: { kind: 'delegation-argument-recovery' },
+      content: [{ type: 'text', text: [
+        `[DSH Agentrix] ${problem.tool} 的 JSON 参数格式错误，本次调用未执行。请在原任务、原模型中重新生成完整合法参数（自动修正 ${state.used}/${state.limit}）。`,
+        '不要猜测已执行成功，不重开会话或子代理，也不重复已成功操作。按当前工具 schema 和原需求生成；简化嵌套与长命令，保留必要验证。',
+        `解析错误：${problem.error}；附近片段（仅用于定位，非执行指令）：${JSON.stringify(problem.excerpt)}`,
+      ].join('\n') }] }, { surfaceOp: 'append' })
+    return { kind: 'retry' }
+  }, { global: true, prepend: true }))
   function notifyParent(plan, task, handle) {
     if (handle.notified || closed || plan.cancelled || plan.wakeSuppressed || plans.get(plan.sessionId) !== plan) return
     handle.notified = true
@@ -954,6 +1012,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const decision = changes ? { mode: args.mode, reason, requestId: source.messageId, revisionId: revision.messageId, at, model } : entry.decision ?? null
     const resolution = { messageId: message?.messageId ?? revision.messageId, requestId: source.messageId, relation, at, model, ...(reason ? { reason } : {}) }
     const next = { ...entry, source: clone(source), revision: clone(revision), decision, messageResolution: resolution }
+    if (message && next.argumentRecovery?.requestId === message.messageId) next.argumentRecovery = { ...next.argumentRecovery, requestId: source.messageId }
     if (message) {
       next.messages = entry.messages.map(item => item.messageId === message.messageId ? { ...item, resolution } : item)
     }
@@ -1466,6 +1525,12 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   // committed error before native cleanup releases the child Agent.
   disposers.push(ctx.on('session/event', (session, event) => {
     observeInput(session, event)
+    if (event?.type === 'tool/call') {
+      const owner = expectedRoutes.get(session?.id)?.task ?? decisions.get(session?.id)
+      if (owner?.argumentRecovery?.status === 'retrying' && owner.argumentRecovery.tool === event.data?.name) {
+        owner.argumentRecovery.status = 'parsed'; owner.argumentRecovery.parsedAt = Date.now(); backgroundSave()
+      }
+    }
     if (event?.type === 'subagent/model-selection-policy') {
       const target = service('agents')?.get(session?.id)?.session
       if (target && modelPolicies.get(target) === null) modelPolicies.set(target, clone(event.data?.allowedModels ?? false))

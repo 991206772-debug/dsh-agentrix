@@ -18,6 +18,70 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+const malformedArguments = (tool = 'delegation_plan', raw = '{"checks":[{"arguments":{"command":"echo 1","tool":"pwsh"}]}') => {
+  let detail
+  try { JSON.parse(raw) } catch (error) { detail = error.message }
+  return { code: 'MALFORMED_RESPONSE', message: `Tool call "${tool}": ${detail}\n\nReceived arguments:\n${raw}` }
+}
+
+test('malformed delegation arguments retry in the same coordinator with durable feedback before a plan exists', async () => {
+  const f = await fixture()
+  const recover = () => f.emit('agent/request-error', { agent: f.parent, turn: 1, step: 1,
+    failure: malformedArguments(), signal: new AbortController().signal }, () => undefined)
+  assert.deepEqual(await recover(), { kind: 'retry' })
+  assert.equal(f.pending.length, 0)
+  assert.equal(f.snapshot(), undefined)
+  let recovery = f.engine.requestContext('parent').argumentRecovery
+  assert.equal(recovery.used, 1)
+  assert.equal(recovery.status, 'retrying')
+  assert.equal(f.parent.session.appended.length, 1)
+  assert.equal(f.parent.session.appended[0].type, 'user/message')
+  assert.match(JSON.stringify(f.parent.session.appended[0].data), /JSON.*未执行|未执行.*JSON/)
+  await f.reload()
+  assert.deepEqual(await recover(), { kind: 'retry' })
+  await assert.rejects(f.execute('delegation_status'), /创建任务计划/)
+  assert.equal(await recover(), undefined)
+  recovery = f.engine.requestContext('parent').argumentRecovery
+  assert.equal(recovery.used, 2)
+  assert.equal(recovery.status, 'exhausted')
+  assert.equal(f.parent.session.appended.length, 2)
+  assert.equal(f.pending.length, 0)
+})
+
+test('classifying the original user message and successfully calling a tool do not reset its argument recovery budget', async () => {
+  const f = await fixture()
+  f.emit('session/event', f.parent, { type: 'user/message', data: {
+    id: 'new-writing-request', source: { kind: 'user' }, content: [{ type: 'text', text: '写出完整文章' }] } })
+  const recover = () => f.emit('agent/request-error', { agent: f.parent, failure: malformedArguments(),
+    signal: new AbortController().signal }, () => undefined)
+  await recover()
+  await f.execute('delegation_plan', { relation: 'new', decisionReason: '执行者完成正文，主控验证验收。', goal: '完成文章', tasks: [card('a')] })
+  f.emit('session/event', f.parent, { type: 'tool/call', data: { name: 'delegation_plan' } })
+  assert.equal(f.engine.requestContext('parent').argumentRecovery.status, 'parsed')
+  assert.equal(f.engine.requestContext('parent').argumentRecovery.used, 1)
+  await recover()
+  assert.equal(await recover(), undefined)
+  assert.equal(f.engine.requestContext('parent').argumentRecovery.used, 2)
+})
+
+test('argument recovery ignores service errors, valid JSON, unowned tools, disabled plugins and cancelled signals', async () => {
+  for (const failure of [{ ...malformedArguments(), code: 'AUTH' }, malformedArguments('write'),
+    malformedArguments('delegation_plan', '{"start":true}'), { code: 'MALFORMED_RESPONSE', message: 'Unexpected provider response' }]) {
+    const f = await fixture()
+    let fallback = 0
+    assert.equal(await f.emit('agent/request-error', { agent: f.parent, failure, signal: new AbortController().signal }, () => { fallback++; return 'fallback' }), 'fallback')
+    assert.equal(fallback, 1)
+    assert.equal(f.parent.session.appended.length, 0)
+  }
+  for (const disabled of [false, true]) {
+    const f = await fixture({ enabled: !disabled })
+    assert.equal(await f.emit('agent/request-error', { agent: f.parent, failure: malformedArguments(),
+      signal: disabled ? new AbortController().signal : AbortSignal.abort() }, () => undefined), undefined)
+    assert.equal(f.parent.session.appended.length, 0)
+    assert.equal(f.pending.length, 0)
+  }
+})
+
 test('explicit coordinator review decouples execution complexity without bypassing evidence acceptance', async () => {
   const f = await fixture()
   const reason = '资料范围较大但交付仅为可核对的编辑建议，由主控验证验收。'
@@ -1845,6 +1909,7 @@ async function fixture(options = {}) {
   cleanup.push(() => rm(directory, { recursive: true, force: true }))
   const calls = [], pending = [], tools = new Map(), events = new Map(), children = new Map(), conclusions = [], scopedTools = new Map()
   const parent = { id: 'parent', options: { provider: 'local', model: 'parent' }, session: { header: {}, requestHeader: () => undefined,
+    appended: [], append(type, data, intent) { this.appended.push({ type, data, intent }); return { seq: this.appended.length } },
     snapshotEvents: () => options.allowedModels === undefined ? [] : [{ type: 'subagent/model-selection-policy', data: { allowedModels: options.allowedModels } }] },
     status: 'running', injected: [], inject(message) { this.injected.push(message) }, steer(message) { this.injected.push(message) } }
   let engine, count = 0, exitCode = 0
