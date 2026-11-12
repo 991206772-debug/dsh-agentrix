@@ -95,7 +95,8 @@ export function taskSummary(plan) {
         ...(state.checkpoint ? ['- 阶段结论（执行者提交，待核实）：' + state.checkpoint.summary,
           '- 执行者下一步：' + state.checkpoint.nextStep, '- 阶段工具证据：' + state.checkpoint.evidence.join('、')] : []))
     }
-    if (task.error) lines.push('', '### 阻塞或失败原因', '', task.error)
+    if (task.error) lines.push('', '### 阻塞或失败原因', '', task.issue?.message || task.error)
+    if (task.issue?.details) lines.push('- 原始错误：' + task.issue.details)
     if (task.issue?.action) lines.push('- 下一步：' + task.issue.action)
     if (task.stop) lines.push('', '### 取消记录', '', '- 原因：' + task.stop.reason,
       '- 取消来源：' + ({ coordinator: '主控', host: '用户或宿主' }[task.stop.source] || task.stop.source),
@@ -114,7 +115,9 @@ export function taskSummary(plan) {
         '- 需求：' + verdict(audit.specVerdict) + '；质量：' + verdict(audit.qualityVerdict),
         '- 审查模型：' + (route ? route.provider + ' / ' + route.model : '未记录') + '（' + (audit.modelRoute?.actual ? '实际请求已核对' : '尚未记录实际请求') + '）',
         '- 审查配置来源：' + (audit.modelRoute ? audit.modelRoute.source === 'dispatcher' ? '沿用本次执行的分发者模型记录' : audit.modelRoute.source === 'configured' ? '历史用户配置' : '历史审查启动时跟随主控' : '历史未记录'),
-        ...(audit.error ? ['- 原因：' + audit.error] : []),
+        ...(audit.error ? ['- 原因：' + (audit.issue?.message || audit.error)] : []),
+        ...(audit.issue?.details ? ['- 原始错误：' + audit.issue.details] : []),
+        ...(audit.issue?.action ? ['- 下一步：' + audit.issue.action] : []),
         ...(audit.execution?.reportPath ? ['- 完整报告：' + audit.execution.reportPath] : []),
         ...(audit.report ? ['', audit.report] : []))
     }

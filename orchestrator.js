@@ -34,7 +34,7 @@ const clone = value => JSON.parse(JSON.stringify(value))
 const brief = (value, limit = 3000) => String(value ?? '').slice(0, limit)
 const textOf = content => (content ?? []).filter(block => block?.type === 'text').map(block => block.text).join('\n')
 const messageOf = error => brief(error?.message ?? error)
-const isServiceIssue = issue => ['MODEL_SERVICE_QUOTA', 'MODEL_SERVICE_RATE_LIMIT'].includes(issue?.code)
+const isServiceIssue = issue => ['MODEL_SERVICE_QUOTA', 'MODEL_SERVICE_RATE_LIMIT', 'MODEL_SERVICE_REQUEST_REFUSED'].includes(issue?.code)
 const criteriaOf = task => task.criteria.map((text, criterion) => ({ id: 'C' + (criterion + 1), criterion, text }))
 const evidenceChoices = task => task.checks.map(check => check.result).filter(result => result?.attempt === task.attempts)
   .map(result => result.ref ?? result.callId).join('、') || '无，请先运行 delegation_verify'
@@ -60,8 +60,15 @@ function reviewFindings(task, findings) {
 }
 function modelServiceIssue(error, role, route = {}) {
   const details = messageOf(error), quota = error?.code === 'QUOTA' || /(?:exceed|insufficient)[^\n]*quota|quota[^\n]*(?:exceed|limit)/i.test(details)
-  if (!quota && !['RATE_LIMIT', 'RATE_LIMITED'].includes(error?.code) && Number(error?.status ?? error?.statusCode) !== 429 && !/\b429\b|rate_limit_error/.test(details)) return null
   const label = { coordinator: '主控', worker: '执行者', reviewer: '独立审查' }[role]
+  if (/Illegal API invocation from an unapproved channel/i.test(details)) return {
+    code: 'MODEL_SERVICE_REQUEST_REFUSED', retryable: false, role,
+    provider: route.provider, model: route.model, originalCode: error?.code, details, at: Date.now(),
+    message: `${label}模型的本次请求被服务商拒绝；已保留现有交付物、报告和验证证据`,
+    action: '请核对服务商支持的调用方式与相关限制；处理后' + (role === 'coordinator' ? '明确继续主控验证验收'
+      : role === 'reviewer' ? '仅明确重试失败的独立审查，沿用分发者模型记录' : '仅明确重试失败任务') + '；不会自动切换模型或反复新开代理。',
+  }
+  if (!quota && !['RATE_LIMIT', 'RATE_LIMITED'].includes(error?.code) && Number(error?.status ?? error?.statusCode) !== 429 && !/\b429\b|rate_limit_error/.test(details)) return null
   return { code: quota ? 'MODEL_SERVICE_QUOTA' : 'MODEL_SERVICE_RATE_LIMIT', retryable: false, role,
     provider: route.provider, model: route.model, originalCode: error?.code, details, at: Date.now(),
     message: `${label}模型服务${quota ? '额度不足' : '请求受限（429）'}；已保留现有交付物、报告和验证证据`,
@@ -2031,13 +2038,13 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const { plan, parent } = ownPlan(exec)
     if (planStatus(plan) === 'accepted') return { status: 'accepted', completion: plan.completion ?? null }
     const serviceIssue = pendingServiceIssue(plan)
+    const hasLive = targetsOf(plan).some(task => LIVE.includes(task.status))
     if (!args.reason && serviceIssue) {
       const message = serviceIssue.message + '。' + serviceIssue.action
       remember(plan, 'plan.service_recovery_required', message)
-      const completion = plan.completion ?? finishPlan(plan, message)
+      const completion = plan.completion ?? (hasLive ? null : finishPlan(plan, message))
       await save(); return { status: 'blocked', issue: clone(serviceIssue), completion }
     }
-    const hasLive = targetsOf(plan).some(task => LIVE.includes(task.status))
     const recoverable = !args.reason && !hasLive && plan.tasks.filter(task => ['failed', 'blocked'].includes(task.status)
       && !task.recovered && task.attempts < getConfig().maxAttempts)
     if (recoverable.length) {

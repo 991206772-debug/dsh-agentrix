@@ -353,7 +353,7 @@ window.__ModuleLoader__.load({
       'plans.modelSourceConfigured': '用户配置', 'plans.modelSourceInherited': '启动时继承主 Agent',
       'chat.waitingCount': '等待 {count}', 'chat.reviewCount': '待验收 {count}', 'chat.failedCount': '失败 {count}', 'chat.blockedCount': '阻塞 {count}',
       'plans.routeWarnings': '路由提醒：{warnings}', 'plans.taskComplexity': '任务复杂度：{complexity}',
-      'chat.routeDecision': '自动判断：{route}', 'chat.planSummary': '{status} · 已完成 {done}/{total}',
+      'chat.routeDecision': '自动判断：{route}', 'chat.planSummary': '{status} · 已验收 {done}/{total}',
       'chat.activeSummary': '进行中 {running} · 已完成 {done}/{total}', 'chat.completedSummary': '已完成 {done}/{total}',
       'chat.navigationUnavailable': '当前版本无法从此处打开，请切换到会话的“任务验收”页签。',
       'chat.stopped': '已停止', 'chat.issueTask': '任务', 'chat.issueReason': '原因',
@@ -457,7 +457,7 @@ window.__ModuleLoader__.load({
       'plans.modelSourceConfigured': 'User configuration', 'plans.modelSourceInherited': 'Inherited at startup',
       'chat.waitingCount': '{count} waiting', 'chat.reviewCount': '{count} awaiting review', 'chat.failedCount': '{count} failed', 'chat.blockedCount': '{count} blocked',
       'plans.routeWarnings': 'Routing note: {warnings}', 'plans.taskComplexity': 'Task complexity: {complexity}',
-      'chat.routeDecision': 'Automatic decision: {route}', 'chat.planSummary': '{status} · {done}/{total} completed',
+      'chat.routeDecision': 'Automatic decision: {route}', 'chat.planSummary': '{status} · {done}/{total} accepted',
       'chat.activeSummary': '{running} running · {done}/{total} completed', 'chat.completedSummary': '{done}/{total} completed',
       'chat.navigationUnavailable': 'This version cannot open the view here. Select Task acceptance in this conversation.',
       'chat.stopped': 'stopped', 'chat.issueTask': 'Task', 'chat.issueReason': 'Reason',
@@ -673,7 +673,10 @@ window.__ModuleLoader__.load({
       'dock.execution': '当前执行', 'dock.decision': '执行判断', 'dock.activity': '当前动作',
       'dock.toolCalls': '本轮工具调用', 'dock.callsUnit': '次', 'dock.unknownModel': '未记录', 'dock.issues': '异常记录',
       'dock.coordinator': '主控处理中', 'dock.repairing': '正在处理异常',
-      'dock.waiting': '等待', 'dock.accepted': '验收',
+      'dock.waiting': '等待', 'dock.accepted': '验收', 'dock.failed': '失败', 'dock.blocked': '阻塞', 'dock.requestRefused': '请求被拒',
+      'service.requestRefused': '模型服务拒绝本次请求。', 'service.refusalScope': '这是本次请求的拒绝结果，不代表模型整体不可用。',
+      'service.refusalNext': '核对服务商支持的调用方式与限制，处理后由主控明确重试该任务。', 'service.rawDetails': '原始错误详情',
+      'chat.othersContinue': '其他正在运行的任务继续执行。',
       'dock.workers': '{count} 个子任务执行中', 'dock.audit': '独立审查中', 'dock.review': '待验收 {count} 项',
       'dock.unavailable': '协作暂不可用', 'dock.offline': '状态暂不可用',
       'direct.advice': '系统建议委派，当前尚未启动子代理', 'direct.calls': '本轮工具调用 {count} 次',
@@ -695,7 +698,10 @@ window.__ModuleLoader__.load({
       'dock.execution': 'Current execution', 'dock.decision': 'Execution decision', 'dock.activity': 'Current activity',
       'dock.toolCalls': 'Tool calls this turn', 'dock.callsUnit': 'calls', 'dock.unknownModel': 'Not recorded', 'dock.issues': 'Issues',
       'dock.coordinator': 'Coordinator working', 'dock.repairing': 'Handling an issue',
-      'dock.waiting': 'Queued', 'dock.accepted': 'Accepted',
+      'dock.waiting': 'Queued', 'dock.accepted': 'Accepted', 'dock.failed': 'Failed', 'dock.blocked': 'Blocked', 'dock.requestRefused': 'Request refused',
+      'service.requestRefused': 'The model service refused this request.', 'service.refusalScope': 'This refusal applies to this request; it does not establish that the model is unavailable.',
+      'service.refusalNext': 'Check the provider\'s supported usage and restrictions, then explicitly retry this task after resolving the cause.', 'service.rawDetails': 'Original error details',
+      'chat.othersContinue': 'Other running tasks continue.',
       'dock.workers': '{count} subtasks running', 'dock.audit': 'Independent review', 'dock.review': '{count} awaiting acceptance',
       'dock.unavailable': 'Delegation unavailable', 'dock.offline': 'Status unavailable',
       'direct.advice': 'Delegation was suggested; no child agent has started', 'direct.calls': '{count} tool calls this turn',
@@ -1139,10 +1145,11 @@ window.__ModuleLoader__.load({
 .ddf-dock-indicator { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-dock-activity { max-width:9em; }
 .ddf-dock-model { max-width:16ch; }
-.ddf-dock-calls,.ddf-dock-accepted,.ddf-dock-queued { display:inline-flex; flex:none; align-items:baseline; gap:4px; overflow:visible; font-variant-numeric:tabular-nums; }
+.ddf-dock-calls,.ddf-dock-accepted,.ddf-dock-queued,.ddf-dock-failed,.ddf-dock-blocked,.ddf-dock-refused { display:inline-flex; flex:none; align-items:baseline; gap:4px; overflow:visible; font-variant-numeric:tabular-nums; }
 .ddf-dock-calls,.ddf-dock-accepted { padding-left:9px; border-left:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-dock-indicator strong { color:var(--dsw-alias-state-business-primary,#4f6ef7); font-size:14px; font-weight:600; }
 .ddf-dock-accepted strong { color:var(--dsw-alias-state-success-primary,#369b83); }
+.ddf-dock-failed strong,.ddf-dock-blocked strong,.ddf-dock-refused strong { color:var(--ddf-dock-tone); }
 .ddf-dock-indicator small { font-size:12px; }
 .ddf-dock-call-icon { color:var(--dsw-alias-state-business-primary,#4f6ef7); }
 @container ddf-progress (max-width:440px) {
@@ -1206,18 +1213,36 @@ window.__ModuleLoader__.load({
       return t('completion.' + (stopped ? 'partialStopped' : receipt.outcome))
     }
 
+    function requestRefused(task) {
+      return task?.issue?.code === 'MODEL_SERVICE_REQUEST_REFUSED'
+        || !task?.issue && /Illegal API invocation from an unapproved channel/i.test(task?.error || '')
+    }
+
+    function taskServiceIssue(t, task) {
+      return task?.issue || (requestRefused(task) ? { code: 'MODEL_SERVICE_REQUEST_REFUSED', message: t('service.requestRefused'),
+        details: task.error, action: t('service.refusalNext') } : null)
+    }
+
+    function ServiceErrorDetails({ t, details }) {
+      return details ? h('details', { className: 'ddf-service-error-details' },
+        h('summary', null, t('service.rawDetails')), h('p', null, details)) : null
+    }
+
     function serviceProblem(plan) {
       if (!plan || plan.cancelled || plan.status === 'cancelled') return null
       if (plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt) return plan.coordinatorIssue
       return (plan.tasks ?? []).flatMap(task => task.audit ? [task, task.audit] : [task])
-        .find(task => ['failed', 'blocked'].includes(task.status) && ['MODEL_SERVICE_QUOTA', 'MODEL_SERVICE_RATE_LIMIT'].includes(task.issue?.code))?.issue
+        .find(task => ['failed', 'blocked'].includes(task.status) && ['MODEL_SERVICE_QUOTA', 'MODEL_SERVICE_RATE_LIMIT', 'MODEL_SERVICE_REQUEST_REFUSED'].includes(task.issue?.code))?.issue
     }
 
     function ServiceIssueNotice({ t, issue }) {
       if (!issue) return null
+      const refused = issue.code === 'MODEL_SERVICE_REQUEST_REFUSED'
       return h('section', { className: 'ddf-chat-notice', role: 'alert', 'data-kind': 'service' },
         h('style', null, CHAT_NOTICE_STYLES), h('strong', null, issue.message),
-        h('p', null, issue.details), h('p', null, t('view.next') + '：' + issue.action))
+        refused ? h('p', null, t('service.refusalScope')) : h('p', null, issue.details),
+        h('p', null, t('view.next') + '：' + issue.action),
+        refused ? h(ServiceErrorDetails, { t, details: issue.details }) : null)
     }
 
     function completionNext(t, plan, state) {
@@ -1254,7 +1279,8 @@ window.__ModuleLoader__.load({
       return h('section', { className: 'ddf-receipt', 'data-outcome': receipt.outcome, role: 'status' },
         h('style', null, RECEIPT_STYLES),
         h('strong', null, t('completion.title') + ' · ' + completionLabel(t, receipt)),
-        service ? h('p', null, h('strong', null, service.message), ' · ', service.details) : null,
+        service ? h('p', null, h('strong', null, service.message), service.code === 'MODEL_SERVICE_REQUEST_REFUSED' ? '' : ' · ' + service.details) : null,
+        service?.code === 'MODEL_SERVICE_REQUEST_REFUSED' ? h(ServiceErrorDetails, { t, details: service.details }) : null,
         h('p', null, fill(t('completion.accepted'), { done: receipt.accepted, total: receipt.total })),
         h('p', { className: 'ddf-receipt-next' }, completionNext(t, plan, state)),
         receipt.reason ? h('p', null, t('completion.reason') + '：' + receipt.reason) : null,
@@ -1275,7 +1301,9 @@ window.__ModuleLoader__.load({
 
     function ChatLiveProgress({ t, plan, openView, error }) {
       const tasks = plan?.tasks ?? [], unfinished = tasks.filter(task => task.status !== 'accepted')
-      if (!unfinished.length) return null
+      const visible = unfinished.filter(task => !['failed', 'blocked', 'cancelled'].includes(task.status)
+        && !['failed', 'blocked', 'cancelled'].includes(task.audit?.status))
+      if (!visible.length) return null
       const live = task => ['starting', 'running'].includes(task.status)
       const running = tasks.filter(task => live(task) || live(task.audit ?? {})).length
       const current = task => {
@@ -1297,7 +1325,7 @@ window.__ModuleLoader__.load({
           running, returned: tasks.filter(task => ['review', 'accepted'].includes(task.status)).length, accepted: tasks.length - unfinished.length, total: tasks.length })),
         error ? h('p', { className: 'ddf-chat-live-meta' }, t('view.staleTitle')) : null,
         h(DecisionDetails, { t, decision: plan.decision, current: plan.decisionCurrent !== false, resolution: plan.messageResolution, pending: plan.pendingMessages }),
-        ...unfinished.map(task => {
+        ...visible.map(task => {
           const target = live(task.audit ?? {}) ? task.audit : task, state = target.supervision
           const time = value => new Date(value).toLocaleTimeString()
           return h('div', { key: task.id, className: 'ddf-chat-live-task' },
@@ -1376,6 +1404,13 @@ window.__ModuleLoader__.load({
         if (plan.protocolVersion >= 2 && !plan.completion) summary = t('coordination.incomplete') + ' · ' + summary
         const queued = tasks.filter(task => task.status === 'queued' || task.audit?.status === 'queued').length
         if (queued) indicators.push({ kind: 'queued', text: t('dock.waiting') + ' ' + queued, prefix: t('dock.waiting'), value: queued })
+        const problems = tasks.map(task => ['failed', 'blocked'].includes(task.audit?.status) ? task.audit : task)
+        const refused = problems.filter(task => ['failed', 'blocked'].includes(task.status) && requestRefused(task)).length
+        if (refused) indicators.push({ kind: 'refused', text: t('dock.requestRefused') + ' ' + refused, prefix: t('dock.requestRefused'), value: refused })
+        for (const kind of ['failed', 'blocked']) {
+          const count = problems.filter(task => task.status === kind && !requestRefused(task)).length
+          if (count) indicators.push({ kind, text: t('dock.' + kind) + ' ' + count, prefix: t('dock.' + kind), value: count })
+        }
         if (tasks.length) indicators.push({ kind: 'accepted', text: t('dock.accepted') + ' ' + done + '/' + tasks.length,
           prefix: t('dock.accepted'), value: done + '/' + tasks.length })
         content = h(ChatPlanNotice, { t, plan, error: result.error })
@@ -1468,27 +1503,31 @@ window.__ModuleLoader__.load({
     }
 
     function ChatPlanNotice({ t, plan, openView, error }) {
+      const running = (plan?.tasks ?? []).filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
       return h('div', null,
-        plan?.protocolVersion >= 2 && !plan.completion ? h('p', { role: 'status', className: 'ddf-chat-notice-hint' }, t('coordination.incomplete') + ' · ' + t('chat.' + chatStatusKey(plan))) : null,
+        plan?.protocolVersion >= 2 && !plan.completion ? h('p', { role: 'status', className: 'ddf-chat-notice-hint' }, t('coordination.incomplete') + ' · '
+          + (running ? fill(t('dock.workers'), { count: running }) : t('chat.' + chatStatusKey(plan)))) : null,
         h(CoordinationIssueNotice, { t, plan }), h(ChatPlanBody, { t, plan, openView, error }))
     }
 
     function ChatPlanBody({ t, plan, openView, error }) {
-      if (plan?.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled) return h(ServiceIssueNotice, { t, issue: plan.coordinatorIssue })
+      const progress = h(ChatLiveProgress, { t, plan, openView, error })
+      if (plan?.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled) return h('div', null, progress, h(ServiceIssueNotice, { t, issue: plan.coordinatorIssue }))
       const problem = chatProblem(plan)
-      if (!problem) return h(ChatLiveProgress, { t, plan, openView, error })
+      if (!problem) return progress
       const task = problem.primary, tasks = plan.tasks ?? []
-      const recorded = problem.kind === 'supervision' ? task.supervision.pending.reason : task?.stop?.reason || task?.issue?.message || task?.error
+      const issue = taskServiceIssue(t, task), refused = requestRefused(task) && problem.kind !== 'stopped'
+      const recorded = problem.kind === 'supervision' ? task.supervision.pending.reason : task?.stop?.reason || issue?.message || task?.error
       const reason = typeof recorded === 'string' && recorded.trim() && !/^(error|子任务停止原因：error)$/i.test(recorded.trim())
         ? recorded.trim().split('\n')[0].slice(0, 400)
         : t(task?.recovered ? 'chat.recoveredReason' : 'chat.unknownReason')
       const next = problem.kind === 'supervision' ? t('supervision.next') : problem.kind === 'stopped' ? t('chat.stoppedNext')
-        : task?.issue?.action || t(task?.recovered ? 'view.recoveredNext' : 'view.failedNext')
+        : issue?.action || t(task?.recovered ? 'view.recoveredNext' : 'view.failedNext')
       const done = tasks.filter(task => task.status === 'accepted').length
       const heading = fill(t(problem.kind === 'stopped' || problem.kind === 'supervision' ? 'chat.acceptedSummary' : 'chat.planSummary'), {
-        status: problem.kind === 'supervision' ? t(task.supervision.pending.advisory ? 'supervision.inquiry' : 'supervision.waiting') : problem.kind === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${problem.kind}`), done, total: tasks.length })
+        status: refused ? t('dock.requestRefused') : problem.kind === 'supervision' ? t(task.supervision.pending.advisory ? 'supervision.inquiry' : 'supervision.waiting') : problem.kind === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${problem.kind}`), done, total: tasks.length })
       const canOpen = typeof openView === 'function'
-      return h('section', { className: 'ddf-chat-notice', 'data-kind': problem.kind,
+      return h('div', null, progress, h('section', { className: 'ddf-chat-notice', 'data-kind': problem.kind,
         role: problem.kind === 'stopped' ? 'status' : 'alert', 'aria-label': heading },
         h('style', null, CHAT_NOTICE_STYLES),
         h('strong', { className: 'ddf-chat-notice-heading' }, heading),
@@ -1496,11 +1535,15 @@ window.__ModuleLoader__.load({
         h('p', null, h('strong', null, t('chat.issueTask') + '：'),
           problem.tasks.map(item => item.title || item.id).join('、') || t('chat.unknownTask')),
         h('p', null, h('strong', null, t('chat.issueReason') + '：'), reason),
+        refused ? h('p', { className: 'ddf-chat-live-meta' }, t('service.refusalScope')) : null,
         h('p', null, h('strong', null, t('view.next') + '：'), next),
+        problem.kind !== 'stopped' && tasks.some(item => ['starting', 'running'].includes(item.status) || ['starting', 'running'].includes(item.audit?.status))
+          ? h('p', { className: 'ddf-chat-live-meta' }, t('chat.othersContinue')) : null,
+        refused ? h(ServiceErrorDetails, { t, details: issue.details || task.error }) : null,
         problem.kind !== 'stopped' && problem.affected > 1
           ? h('p', { className: 'ddf-chat-notice-hint' }, fill(t('chat.affected'), { count: problem.affected })) : null,
         canOpen ? h('button', { type: 'button', className: 'ddf-chat-notice-action',
-          onClick: () => openView(VIEW_ID) }, t('view.details')) : null)
+          onClick: () => openView(VIEW_ID) }, t('view.details')) : null))
     }
 
     // -----------------------------------------------------------------------
@@ -2151,7 +2194,8 @@ window.__ModuleLoader__.load({
     function dashboardNextText(t, status, tasks, modelBlock, rootTask) {
       if (status === 'cancelled') return t('view.stoppedNext')
       if (status === 'accepted') return t('view.doneNext')
-      if (rootTask?.issue?.action) return rootTask.issue.action
+      const issue = taskServiceIssue(t, rootTask)
+      if (issue?.action) return issue.action
       if (modelBlock) return t('view.configNext')
       if (tasks.some(task => task.recovered || task.audit?.recovered)) return t('view.recoveredNext')
       if (tasks.some(task => ['failed', 'blocked'].includes(task.audit?.status))) return t('audit.nextRetry')
@@ -2165,7 +2209,8 @@ window.__ModuleLoader__.load({
 
     function dashboardReason(t, task) {
       if (task.stop?.reason) return task.stop.reason
-      if (task.issue?.message) return task.issue.message
+      const issue = taskServiceIssue(t, task)
+      if (issue?.message) return issue.message
       if (task.error && !/^(error|子任务停止原因：error)$/i.test(task.error)) return task.error
       return t('view.boardNoReason')
     }
@@ -2251,7 +2296,8 @@ window.__ModuleLoader__.load({
         : auditActivity || task.execution?.summary || (task.progress?.tool ? t('view.latestActivity') + '：' + task.progress.tool : t('view.boardNoActivity')))
       const reason = ['failed', 'blocked', 'cancelled'].includes(status) ? dashboardReason(t, task) : ''
       const affected = dashboardAffected(task, plan.tasks)
-      const next = status === 'cancelled' ? t('chat.stoppedNext') : task.issue?.action
+      const issue = taskServiceIssue(t, task), auditIssue = taskServiceIssue(t, task.audit)
+      const next = status === 'cancelled' ? t('chat.stoppedNext') : issue?.action
         || (task.recovered ? t('view.recoveredNext') : ['failed', 'blocked'].includes(status) ? t('view.failedNext') : '')
       const isRoot = Boolean(rootTask && rootTask.id === task.id)
       const detail = route ? `${route.provider} / ${route.model}` : t('plans.modelUnknown')
@@ -2281,12 +2327,14 @@ window.__ModuleLoader__.load({
           h('summary', null, t('view.executionDiagnostics')), h(SupervisionDetails, { t, task: current })) : null,
         reason ? h('p', { className: 'ddf-board-task-line', 'data-kind': status === 'cancelled' || affected ? undefined : 'error' }, h('strong', null, t('view.boardReason') + '：'), reason) : null,
         next ? h('p', { className: 'ddf-board-task-line', 'data-kind': 'next' }, h('strong', null, t('view.boardNext') + '：'), next) : null,
+        requestRefused(task) && status !== 'cancelled' ? h(ServiceErrorDetails, { t, details: issue.details || task.error }) : null,
         task.audit ? h('p', { className: 'ddf-board-task-line' }, h('strong', null, t('audit.title') + '：'),
           task.audit.modelRoute?.requested ? `${task.audit.modelRoute.requested.provider} / ${task.audit.modelRoute.requested.model} · ` : '',
           task.audit.status === 'completed' && task.audit.specVerdict && task.audit.qualityVerdict
             ? fill(t('audit.verdicts'), { spec: t('audit.' + task.audit.specVerdict), quality: t('audit.' + task.audit.qualityVerdict) })
             : t('audit.' + task.audit.status)) : null,
-        task.audit?.error ? h('p', { className: 'ddf-board-task-line', 'data-kind': 'error' }, task.audit.error) : null,
+        task.audit?.error ? h('p', { className: 'ddf-board-task-line', 'data-kind': 'error' }, auditIssue?.message || task.audit.error) : null,
+        requestRefused(task.audit) ? h(ServiceErrorDetails, { t, details: auditIssue.details || task.audit.error }) : null,
         ...(task.issues ?? []).map(issue => h('p', { key: issue.id, className: 'ddf-board-task-line',
           'data-kind': issue.status === 'open' ? 'error' : undefined }, `${issue.id} · ${issue.finding} · ${(issue.evidence ?? []).join('、')}`)),
         task.issue?.code === 'MODEL_CONFIG_INVALID' ? h('button', { type: 'button', className: 'ddf-board-task-fix', onClick: () => onFix(task.issue.tier) }, t('plans.fixModel')) : null,

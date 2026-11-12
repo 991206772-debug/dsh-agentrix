@@ -1073,6 +1073,71 @@ test('a stopped two-of-four plan explains the unfinished tasks in the dock witho
   } finally { action.close(); notice.close(); f.close() }
 })
 
+test('mixed failures keep all running task activity visible in the dock and chat notice', async () => {
+  const now = Date.now(), request = { messageId: 'mixed-request', text: '核对隔离示例文档' }
+  const plan = { sessionId: 'session-current', protocolVersion: 2, source: request, status: 'running', tasks: [
+    ...['核对事实', '检查用词', '汇总意见'].map((title, index) => ({ id: 'running-' + index, title, status: 'running',
+      supervision: { startedAt: now - 180000, lastActivityAt: now - 1000, activity: { kind: 'tool', tool: 'grep' } },
+      progress: { tool: 'read', at: now - 2000 } })),
+    { id: 'failed', title: '评审结构', status: 'failed', error: 'HTTP 500: isolated provider error' },
+  ] }
+  const body = { ok: true, sessionId: plan.sessionId, plans: [plan], sessions: [{ sessionId: plan.sessionId, source: request }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock(plan.sessionId), notice = f.mountNotice(plan.sessionId)
+  try {
+    await dock.flush(); await notice.flush()
+    for (const surface of [dock, notice]) {
+      for (const title of ['核对事实', '检查用词', '汇总意见', '评审结构']) assert.ok(surface.text().includes(title), title)
+      assert.match(surface.text(), /当前.*检索内容/)
+      assert.match(surface.text(), /最近完成的工具.*读取文件/)
+      assert.match(surface.text(), /最近活动/)
+      assert.match(surface.text(), /HTTP 500: isolated provider error/)
+      assert.match(surface.text(), /已验收 0\/4/)
+      assert.doesNotMatch(surface.text(), /已完成 0\/4/)
+    }
+    assert.match(dock.nodes('summary')[0].props['aria-label'], /3 个子任务执行中.*失败 1.*验收 0\/4/)
+  } finally { dock.close(); notice.close(); f.close() }
+})
+
+test('request refusals use a short explanation and keep raw errors in details for new and legacy tasks', async t => {
+  const raw = 'WorkBuddy: Illegal API invocation from an unapproved channel — https://example.invalid/REFUSED.md — request refused'
+  const renderedText = (node, includeDetails = false) => !node ? '' : typeof node !== 'object' ? String(node)
+    : node.type === 'style' || node.type === 'details' && !includeDetails ? ''
+      : typeof node.type === 'function' ? renderedText(node.type(node.props), includeDetails)
+        : node.children.flat(Infinity).map(child => renderedText(child, includeDetails)).join(' ')
+  for (const structured of [false, true]) await t.test(structured ? 'structured issue' : 'legacy error', async () => {
+    const request = { messageId: 'refusal-request', text: '核对隔离文档' }
+    const task = { id: 'refused', title: '结构核查', status: structured ? 'blocked' : 'failed', error: raw, criteria: [], checks: [],
+      ...(structured ? { issue: { code: 'MODEL_SERVICE_REQUEST_REFUSED', message: '执行者模型服务拒绝本次请求',
+        details: raw, action: '核对服务商支持的调用方式，处理后明确重试该任务。' } } : {}) }
+    const plan = { sessionId: 'session-current', protocolVersion: 2, source: request, status: 'running', tasks: [task,
+      { id: 'active', title: '事实核查', status: 'running', criteria: [], checks: [] }] }
+    const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+      sessionId: plan.sessionId, plans: [structuredClone(plan)], sessions: [{ sessionId: plan.sessionId, source: request }] }) }) })
+    const dock = f.mountDock(plan.sessionId), view = f.mountView(plan.sessionId)
+    try {
+      await dock.flush(); await view.flush()
+      const alert = dock.nodes('section').find(node => node.props?.role === 'alert')
+      const card = view.nodes('article').find(node => node.props?.['data-task-id'] === task.id)
+      for (const node of [alert, card]) {
+        assert.ok(node)
+        const main = renderedText(node)
+        assert.match(main, /本次请求.*拒绝|拒绝本次请求/)
+        assert.doesNotMatch(main, /Illegal API invocation|example\.invalid|模型不可用|模型配置已失效|决定重试或停止/)
+      }
+      for (const surface of [dock, view]) {
+        const technical = surface.nodes('details').find(node => node.props?.className === 'ddf-service-error-details')
+        assert.ok(technical, 'raw service errors remain available in collapsed details')
+        assert.match(renderedText(technical, true), /Illegal API invocation from an unapproved channel/)
+        assert.equal(technical.props.open, undefined)
+      }
+      assert.match(dock.nodes('summary')[0].props['aria-label'], /请求被拒 1.*验收 0\/2/)
+      assert.match(dock.text(), /事实核查/)
+      assert.doesNotMatch(dock.text(), /已完成 0\/2/)
+    } finally { dock.close(); view.close(); f.close() }
+  })
+})
+
 test('failure details identify the source failure while another child is still running', async () => {
   const body = { ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current', status: 'running', tasks: [
     { id: 'waiting', title: '下游汇总', status: 'blocked', error: '等待失败任务处理后继续' },
@@ -1087,8 +1152,9 @@ test('failure details identify the source failure while another child is still r
     assert.match(notice.text(), /HTTP 401: provider authentication failed/)
     assert.match(notice.text(), /下一步.*核对失败原因/)
     assert.doesNotMatch(notice.text(), /等待失败任务处理后继续/)
-    assert.equal(notice.nodes('section')[0]?.props['data-kind'], 'failed')
-    assert.equal(notice.nodes('section')[0]?.props.role, 'alert')
+    assert.match(notice.text(), /仍在审查/)
+    const failure = notice.nodes('section').find(node => node.props?.role === 'alert')
+    assert.equal(failure?.props['data-kind'], 'failed')
   } finally { notice.close(); f.close() }
 })
 

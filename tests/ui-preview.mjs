@@ -11,7 +11,8 @@ const loadError = process.argv.includes('--load-error')
 const nextRequest = process.argv.includes('--next-request')
 const directProgress = process.argv.includes('--direct-progress')
 const coordinationConflict = process.argv.includes('--coordination-conflict')
-const liveProgress = process.argv.includes('--live-progress') || directProgress || coordinationConflict
+const mixedRefusal = process.argv.includes('--mixed-refusal')
+const liveProgress = process.argv.includes('--live-progress') || directProgress || coordinationConflict || mixedRefusal
 let config = { ok: true, modelRouting: 'roles', reviewerModelPolicy: 'dispatcher-snapshot', mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS, locked: false,
   models: { worker: { provider: invalid ? 'retired-demo' : 'demo', model: 'routine-model' }, reviewer: null }, file: 'C:/isolated-test/delegation-first/default.json',
   defaults: { mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS }, ranges: { threshold: { min: 0, max: 20 }, ...OPTION_RANGES },
@@ -60,6 +61,20 @@ if (liveProgress) {
       complexityReason: '按已明确的接口参数规范实现配置与参数生成，完成后由主控验证',
       progress: { tool: 'read', at: now - 4000 }, supervision: { startedAt: now - 13 * 60000, lastActivityAt: now,
         activity: { kind: 'tool', tool: 'edit', at: now } } }],
+  })
+}
+if (mixedRefusal) {
+  const now = Date.now(), raw = 'WorkBuddy: Illegal API invocation from an unapproved channel (isolated preview)'
+  Object.assign(plans[0], { sessionTitle: '文档评审流程演示', goal: '核对示例文章的事实、结构与用词',
+    source: { messageId: 'mixed-request', text: '核对隔离示例文档，给出事实、结构与用词建议' },
+    decision: { mode: 'delegate', reason: '分别核查文档事实、结构与用词，主控负责最后验收。', model: { model: 'demo/coordinator' }, at: now },
+    tasks: [...['核对文档事实', '检查文章用词', '整理评审意见'].map((title, index) => ({ ...baseTask,
+      id: 'active-' + index, title, status: 'running', report: '', checks: [],
+      progress: { tool: 'read', at: now - 4000 }, supervision: { startedAt: now - 180000, lastActivityAt: now - 1000,
+        activity: { kind: 'tool', tool: 'grep', at: now - 1000 } } })),
+    { ...baseTask, id: 'refused', title: '检查文章结构', status: 'blocked', report: '', checks: [], error: raw,
+      issue: { code: 'MODEL_SERVICE_REQUEST_REFUSED', message: '执行者模型的本次请求被服务商拒绝', details: raw,
+        action: '核对服务商支持的调用方式与限制，处理后明确重试该任务。' } }],
   })
 }
 if (coordinationConflict) {
@@ -156,7 +171,7 @@ window.__ModuleLoader__ = {load({factory}) {
   const openView = id => { activeView=id; renderView(); };
   function LiveChat() {
     return React.createElement('div',{className:'preview-other-view','data-fixture-view':'chat'},
-      React.createElement('p',null,'工作台保留两个接口，参数自动生成，固定参数改为配置项'),
+      React.createElement('p',null,${JSON.stringify(mixedRefusal ? plans[0].source.text : '工作台保留两个接口，参数自动生成，固定参数改为配置项')}),
       React.createElement('p',null,${JSON.stringify(coordinationConflict ? '主控曾输出“已交付”，下方程序状态显示真实进度。' : '主控正在核对当前方案与执行结果。')}));
   }
   function Composer() {

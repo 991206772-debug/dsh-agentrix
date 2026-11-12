@@ -1866,6 +1866,86 @@ test('native child rate limits cannot be retried by an unexplained cancel but al
   assert.equal(f.pending[0].receipt.disposeCount, 1)
 })
 
+test('a refused request preserves its cause while another task on the same model continues and recovery stays explicit', async () => {
+  const f = await fixture({ maxParallel: 2 })
+  await f.plan([card('refused'), card('working')]); await f.execute('delegation_run')
+  const message = 'WorkBuddy: Illegal API invocation from an unapproved channel — WorkBuddy refused words in this client prompt'
+  f.emit('session/event', f.children[0], { type: 'turn/end', data: { reason: {
+    kind: 'error', error: { code: '11128', message },
+  } } })
+  f.pending[0].resolve({ stopReason: 'error', output: [] })
+  await waitFor(() => !['starting', 'running'].includes(f.snapshot().tasks[0].status))
+  const refused = f.snapshot().tasks[0], working = f.snapshot().tasks[1]
+  assert.equal(refused.issue?.code, 'MODEL_SERVICE_REQUEST_REFUSED')
+  assert.equal(refused.status, 'blocked')
+  assert.equal(refused.issue.role, 'worker')
+  assert.equal(refused.issue.provider, 'local')
+  assert.equal(refused.issue.model, 'cheap')
+  assert.equal(refused.issue.originalCode, '11128')
+  assert.equal(refused.issue.details, message)
+  assert.match(refused.issue.message, /执行者.*本次请求.*拒绝/)
+  assert.match(refused.issue.action, /服务商.*支持.*调用方式|服务商.*限制/)
+  assert.match(refused.issue.action, /明确重试.*失败任务/)
+  assert.equal(refused.error, message)
+  assert.equal(working.status, 'running')
+  assert.equal(working.model.model, 'cheap')
+  assert.equal(f.snapshot().status, 'running')
+  assert.equal(f.calls.length, 2)
+  const cancel = await f.execute('delegation_cancel')
+  assert.equal(cancel.issue.code, 'MODEL_SERVICE_REQUEST_REFUSED')
+  assert.equal(f.snapshot().tasks[1].status, 'running', 'handling refusal must not stop the other live task')
+  assert.equal(f.snapshot().cancelled, false)
+  assert.equal(f.snapshot().completion, null)
+  assert.equal(f.pending[1].receipt.disposeCount, undefined)
+  await f.execute('delegation_run')
+  assert.equal(f.calls.length, 2, 'an unexplained cancel or repeated run must not reopen the refused task')
+  await f.complete(1, { stopReason: 'completed', output: [] })
+  await f.reload()
+  assert.equal(f.snapshot().tasks[0].issue.details, message)
+  assert.equal(f.snapshot().tasks[0].issue.code, 'MODEL_SERVICE_REQUEST_REFUSED')
+  assert.equal(f.snapshot().tasks[1].status, 'review')
+  await f.execute('delegation_control', { taskId: 'refused', action: 'retry', message: '已核对服务商支持的调用方式并处理限制，明确重试失败任务' })
+  assert.equal(f.calls.length, 3)
+  assert.equal(f.calls[2].request.agentOptions.model, 'cheap')
+  assert.equal(f.snapshot().tasks[0].attempts, 2)
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+  assert.equal(f.pending[1].receipt.disposeCount, 1)
+})
+
+test('refused worker and review requests retain readable causes and raw service errors in the Markdown summary', async t => {
+  for (const role of ['worker', 'reviewer']) await t.test(role, async () => {
+    const f = await fixture()
+    await f.plan([card('a', { complexity: role === 'reviewer' ? 'complex' : 'routine' })]); await f.execute('delegation_run')
+    if (role === 'reviewer') await f.complete(0, { stopReason: 'completed', output: [] })
+    const index = role === 'reviewer' ? 1 : 0
+    const message = 'WorkBuddy: Illegal API invocation from an unapproved channel — this request was refused'
+    f.emit('session/event', f.children[index], { type: 'turn/end', data: { reason: { kind: 'error', error: { code: '11128', message } } } })
+    f.pending[index].resolve({ stopReason: 'error', output: [] })
+    await waitFor(() => (role === 'reviewer' ? f.snapshot().tasks[0].audit : f.snapshot().tasks[0]).status === 'blocked')
+    const archive = await f.engine.readArchive(f.snapshot().archive.id)
+    assert.match(archive.markdown, role === 'reviewer' ? /独立审查模型的本次请求被服务商拒绝/ : /执行者模型的本次请求被服务商拒绝/)
+    assert.ok(archive.markdown.includes('- 原始错误：' + message))
+    assert.match(archive.markdown, /下一步：.*核对服务商支持的调用方式/)
+  })
+})
+
+test('other model errors do not become service request refusals from their code or HTTP status alone', async t => {
+  for (const error of [
+    { code: '11128', message: 'WorkBuddy: other error (11128)' },
+    { code: 'AUTH', status: 403, message: 'HTTP 403 Forbidden: access denied' },
+    { code: 'EACCES', message: 'permission denied, open result.txt' },
+    { code: 'MODEL_ERROR', message: 'The model context window was exceeded' },
+  ]) await t.test(error.code, async () => {
+    const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+    f.emit('session/event', f.children[0], { type: 'turn/end', data: { reason: { kind: 'error', error } } })
+    f.pending[0].resolve({ stopReason: 'error', output: [] })
+    await waitFor(() => f.snapshot().tasks[0].status === 'failed')
+    assert.equal(f.snapshot().tasks[0].issue, null)
+    assert.equal(f.snapshot().tasks[0].error, error.message)
+    assert.equal(f.calls.length, 1)
+  })
+})
+
 test('a child failure pauses queued dispatch until each task is explicitly retried', async () => {
   const f = await fixture({ maxParallel: 1 })
   await f.plan([card('a'), card('b')])

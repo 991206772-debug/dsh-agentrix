@@ -31,6 +31,7 @@ const cancelSupplement = process.argv.includes('--supplement-cancel') || process
 const nativeDefault = process.argv.includes('--native-default')
 const switchCoordinator = process.argv.includes('--switch-coordinator')
 const coordinatorQuota = process.argv.includes('--coordinator-quota')
+const requestRefusal = process.argv.includes('--request-refusal')
 const nextRequest = process.argv.includes('--next-request')
 const directUnresolved = process.argv.includes('--direct-unresolved')
 const directRecovery = process.argv.includes('--direct-recovery') || directUnresolved
@@ -51,6 +52,7 @@ const deliverablePath = path.join(directory, 'result.txt')
 const notePath = path.join(directory, 'new-note.txt')
 let parentWaiting = false
 const supplementText = '交付操作员不懂技术，需要页面操作引导。'
+const refusalMessage = 'WorkBuddy: Illegal API invocation from an unapproved channel — this request was refused'
 const workerReport = '读取 result.txt 可验证 verified，等待主控实际验收。' + (benchmark ? '\n证据：result.txt 包含 verified。'.repeat(500) : '')
 process.env.DSH_HOME = directory
 delete process.env.DSH_DELEGATION_FIRST
@@ -153,7 +155,27 @@ class ScriptedAdapter extends LlmAdapter {
         for (const name of ['team_task_create', 'team_task_update', 'wait_agent', 'subagent']) assert.ok(!names.includes(name), name + ' must be hidden from the managed coordinator')
         assert.ok(names.includes('team_task_list'), 'read-only board observation remains available')
       }
-      if (dependentStages) {
+      if (requestRefusal) {
+        if (!plan) block = tool('delegation_plan', { goal: '一个请求被拒绝时，另一同模型任务继续', decisionReason: '并行核对两个隔离任务，失败项保留原因，不取消正常执行者。', start: true,
+          tasks: ['a', 'b'].map(id => ({ id, title: '隔离任务 ' + id, instructions: '只读取隔离文件并正式报告', scope: '隔离目录',
+            outputs: [deliverablePath], writes: [], complexity: 'routine', criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: deliverablePath } }] })) })
+        else if (phase === 1) {
+          await until(async () => { const tasks = (await state()).plans[0].tasks; return tasks[0].status === 'blocked' && tasks[1].status === 'running' }, 'one refused request and another running worker')
+          block = tool('delegation_cancel', {})
+        } else if (phase === 2) {
+          const current = (await state()).plans[0]
+          assert.equal(current.tasks[0].issue.code, 'MODEL_SERVICE_REQUEST_REFUSED')
+          assert.equal(current.tasks[1].status, 'running')
+          assert.equal(current.cancelled, false)
+          assert.equal(current.completion, null, 'service refusal must not create a terminal receipt while another worker runs')
+          assert.equal(releases.get(current.tasks[0].childId), 1)
+          assert.equal(releases.get(current.tasks[1].childId), undefined)
+          workerGate.resolve()
+          block = tool('delegation_wait', {})
+        } else if (phase === 3) block = tool('delegation_cancel', {})
+        else block = { type: 'text', text: '服务拒绝原因已保留；另一任务已交报告，尚未验收，不自动重试失败项。' }
+      }
+      else if (dependentStages) {
         const current = plan?.tasks.find(task => task.status !== 'accepted')
         if (!plan) block = tool('delegation_plan', { goal: '依次验证三个阶段', decisionReason: '每个阶段由执行者检查，主控验证验收后再开始下一阶段。', tasks: ['a', 'b', 'c'].map((id, index, ids) => ({
           id, title: '检查阶段 ' + id, instructions: '读取隔离文件并提交报告', scope: '隔离目录', outputs: [deliverablePath], writes: [],
@@ -199,11 +221,21 @@ class ScriptedAdapter extends LlmAdapter {
       })
       else if (explicitWait && phase === 2) block = tool('delegation_wait', {})
       else if (phase === 2 || truncateOutput && phase < 5) block = { type: 'text', text: '保留当前输出，继续原计划。' }
-      else if (coordinatorQuota) throw new LlmError('429: exceed quota limit', 'QUOTA')
+      else if (coordinatorQuota) {
+        await until(async () => (await state()).plans[0].tasks[0].audit?.status === 'completed', 'review report returned before scripted coordinator quota error')
+        throw new LlmError('429: exceed quota limit', 'QUOTA')
+      }
       else if (task.status === 'review' && !task.checks[0].result) block = tool('delegation_verify', { taskId: 'a', checkIndex: 0 })
       else if (task.status === 'review') block = tool('delegation_review', { taskId: 'a', verdict: 'accept', findings: task.criteria.map((_criterion, criterion) => ({ criterion, finding: '已读取隔离文件并核对要求', evidence: [task.checks[0].result.callId] })) })
       else if ((truncateOutput || supplement) && task.status === 'running') block = { type: 'text', text: '等待原子代理报告和独立审查返回。' }
       else throw new Error('Unexpected coordinator request after terminal tool: ' + task.status)
+    } else if (requestRefusal && request.model === 'low-worker') {
+      const current = (await state()).plans[0].tasks.find(task => task.childId === request.sessionId)
+      if (current.id === 'a') {
+        await until(async () => (await state()).plans[0].tasks[1].status === 'running', 'second worker started before service refusal')
+        throw new LlmError(refusalMessage, 'AUTH')
+      }
+      block = phase === 0 ? tool('read', { path: fixturePath }) : tool('delegation_report', { status: 'DONE', summary: '同模型的正常请求已交报告', report: workerReport })
     } else if (dependentStages && request.model === 'low-worker') block = phase === 0
       ? tool('read', { path: fixturePath }) : tool('delegation_report', { status: 'DONE', summary: '当前阶段已检查', report: workerReport })
     else if (earlyEvidence && request.model === 'low-worker') {
@@ -262,7 +294,7 @@ try {
         assert.equal(exec.signal.aborted, false)
       }
       if (dependentStages && exec.agent.id !== 'root') await until(() => parentWaiting, 'coordinator waiting for this dependency stage')
-      if ((supplement || switchCoordinator || coordinationConflict || activeNewRequest) && exec.agent.id !== 'root' && requests.some(request => request.sessionId === exec.agent.id && request.model === 'low-worker')) await workerGate.promise
+      if ((supplement || switchCoordinator || coordinationConflict || activeNewRequest || requestRefusal) && exec.agent.id !== 'root' && requests.some(request => request.sessionId === exec.agent.id && request.model === 'low-worker')) await workerGate.promise
       return { text: await readFile(args.path, 'utf8') }
     } }))
   if (coordinationConflict) {
@@ -283,7 +315,7 @@ try {
         await writeFile(args.file_path, args.content); return { ok: true }
       } }))
   }
-  if (coordinationConflict || dependentStages || activeNewRequest) {
+  if (coordinationConflict || dependentStages || activeNewRequest || requestRefusal) {
     const start = ctx.subagents.startActivation.bind(ctx.subagents)
     ctx.subagents.startActivation = async (...args) => {
       const activation = await start(...args), dispose = activation.dispose.bind(activation)
@@ -452,13 +484,35 @@ try {
     assert.equal(plan.activationBudget.used, 1)
     assert.equal(new Set(requests.filter(request => request.sessionId !== 'root').map(request => request.sessionId)).size, 1)
     console.log('PASS: real native user cancellation wins queued supplement, releases the original child once and does not reopen work')
+  } else if (requestRefusal) {
+    await until(() => parent.status === 'idle', 'refusal receipt settled')
+    assert.equal(plan.cancelled, false)
+    assert.equal(plan.completion.outcome, 'blocked')
+    assert.deepEqual(plan.tasks.map(task => task.status), ['blocked', 'review'])
+    assert.equal(plan.tasks[0].issue.code, 'MODEL_SERVICE_REQUEST_REFUSED')
+    assert.equal(plan.tasks[0].issue.details, refusalMessage)
+    assert.equal(plan.tasks[0].issue.provider, 'scripted')
+    assert.equal(plan.tasks[0].issue.model, 'low-worker')
+    assert.equal(plan.tasks[1].execution.commitState, 'committed')
+    assert.equal(plan.activationBudget.used, 2)
+    const failedTurn = events.find(event => event.id === plan.tasks[0].childId && event.type === 'turn/end')
+    assert.equal(failedTurn.reason.kind, 'error')
+    assert.equal(failedTurn.reason.error.message, refusalMessage)
+    assert.equal(new Set(requests.filter(request => request.role === 'worker').map(request => request.sessionId)).size, 2)
+    for (const task of plan.tasks) {
+      assert.equal(task.attempts, 1)
+      assert.equal(task.modelRoute.actual.model, 'low-worker')
+      assert.equal(task.release.status, 'released')
+      assert.equal(releases.get(task.childId), 1)
+    }
+    console.log('PASS: native service-refused request retains its turn/end cause while another same-model worker reports normally; implicit cancel preserves it, no replacement child starts, and each resource releases once')
   } else if (coordinatorQuota) {
     assert.equal(plan.coordinatorIssue.code, 'MODEL_SERVICE_QUOTA')
     assert.equal(plan.coordinatorIssue.model, 'coordinator')
     assert.equal(plan.completion.outcome, 'blocked')
     assert.equal(plan.tasks[0].status, 'review')
     assert.equal(plan.tasks[0].execution.commitState, 'committed')
-    assert.equal(plan.tasks[0].audit.status, 'completed')
+    assert.equal(plan.tasks[0].audit.status, 'completed', 'the scripted quota scenario starts after the independent report has returned')
     assert.match(await readFile(plan.tasks[0].execution.reportPath, 'utf8'), /verified/)
     assert.equal(plan.activationBudget.used, 2)
     assert.equal(new Set(requests.filter(request => request.sessionId !== 'root').map(request => request.sessionId)).size, 2)
