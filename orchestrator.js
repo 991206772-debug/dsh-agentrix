@@ -13,7 +13,7 @@ export const DEFAULT_OPTIONS = Object.freeze({
 export const REVIEWER_MODEL_POLICY = 'dispatcher-snapshot'
 export const COORDINATION_POLICY_VERSION = 5
 const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork'])
-const COORDINATOR_TOOLS = new Set(['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_wait', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
+const COORDINATOR_TOOLS = new Set(['delegation_models', 'delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_wait', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
 const EXECUTOR_TOOLS = new Set(['delegation_checkpoint', 'delegation_report'])
 const REVIEW_TOOLS = new Set(['read', 'grep', 'glob', ...EXECUTOR_TOOLS])
 const MAX_PLANS = 12
@@ -79,7 +79,7 @@ function modelServiceIssue(error, role, route = {}) {
 function compactTask(task) {
   return { id: task.id, title: task.title, status: task.status, attempts: task.attempts,
     ...(task.criteria ? { criteria: criteriaOf(task) } : {}),
-    model: task.modelRoute?.actual ?? task.modelRoute?.requested ?? task.model, issue: task.issue,
+    model: task.modelRoute?.actual ?? task.modelRoute?.requested ?? task.model, authorization: task.modelRoute?.authorization ?? null, issue: task.issue,
     summary: brief(task.execution?.summary, 300), reportPath: task.execution?.reportPath,
     execution: task.execution ? { status: task.execution.status, reason: task.execution.reason, concerns: task.execution.concerns ?? [] } : null,
     error: task.error ? brief(task.error, 500) : null,
@@ -264,6 +264,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const coordinatorUsage = new Map()
   const plans = new Map(), live = new Map(), permits = new Map(), expectedRoutes = new Map(), disposers = []
   const interrupting = new Map()
+  const modelPolicies = new WeakMap()
   const noteRequests = new Map(), noteWrites = new Map()
   const stagedResults = new Map(), pendingTransports = new Map(), committing = new Set()
   const waitingParents = new Map()
@@ -363,8 +364,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   }
   const queuedInputs = plan => [...(plan.inputs ?? []).filter(input => input.status === 'queued'), ...pendingMessages(plan.sessionId)]
   const unresolvedInputs = plan => [...(plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)), ...pendingMessages(plan.sessionId).map(message => ({ id: message.messageId, text: message.text, status: 'unclassified' }))]
+  const interruptedPlan = plan => Boolean(plan && (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt || plan.cancelled && plan.cancelledBy === 'host' && !plan.cancellation))
   function nextAction(plan) {
     if (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt && pendingMessages(plan.sessionId).length) return { type: 'resolve_message', message: '先用 delegation_decide 确认真实新消息；继续原需求时自动接续中断计划，不新建任务卡。' }
+    if (interruptedPlan(plan) && !pendingMessages(plan.sessionId).length && (!decisionCurrent(plan.sessionId) || decisionFor(plan.sessionId)?.mode !== 'delegate')) return { type: 'decide', message: '继续消息已关联，但旧判断不是委派。请用 delegation_decide(relation:continue,mode:delegate,reason:监督原托管任务的具体理由) 确认继续原计划，无需改成 update 或重建任务卡。' }
     if (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt) return { type: 'run', message: '执行已中断，进度保留。用户明确继续后调用 delegation_run，沿用原计划恢复未完成任务；已返回报告继续验证验收，不必新建计划。' }
     if (plan.completion || plan.cancelled) return { type: 'finished', message: '以程序交付回执为准；不要重复启动或清理。' }
     if (pendingMessages(plan.sessionId).length) return { type: 'resolve_message', message: '先用 delegation_decide 确认新消息与需求的关联。' }
@@ -711,9 +714,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   function unavailableTool(agent, name) {
     if (getConfig().enabled === false) return false
     const expected = expectedRoutes.get(agent.id)
-    if (expected) return expected.task.role === 'reviewer' ? !REVIEW_TOOLS.has(name) : COORDINATOR_TOOLS.has(name) || conflictingTool(name)
+    if (expected) return expected.task.role === 'reviewer' ? !REVIEW_TOOLS.has(name) : COORDINATOR_TOOLS.has(name) || conflictingTool(name) || name === 'list_subagent_models'
     const header = agent.session?.header ?? service('sessions')?.get(agent.id)?.header ?? {}
     if (header.origin === 'subagent' || header.parentSession || header.delegationDepth > 0) return false
+    if (name === 'list_subagent_models') return true
     const plan = plans.get(agent.id)
     if (name === 'delegation_wait') return !plan || !isCurrentPlan(plan) || Boolean(plan.completion)
     if (plan && isCurrentPlan(plan) && !plan.completion) {
@@ -757,6 +761,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     reportSchemas.get(agent.id)?.dispose(); reportSchemas.delete(agent.id)
   }, { global: true }))
   function guardCoordination(exec) {
+    if (getConfig().enabled !== false && exec.name === 'list_subagent_models' && exec.agent &&
+      !exec.agent.session?.header?.parentSession && exec.agent.session?.header?.origin !== 'subagent') return '[DSH Agentrix] 托管任务的模型查询使用 delegation_models，与实际派发共用检查。原生 list_subagent_models 只描述原生派单授权，不能据此判断托管配置模型失效。'
     const context = coordinationContext(exec.agent?.id)
     if (!context || !conflictingTool(exec.name)) return
     const message = `[DSH Agentrix] 当前任务由 Agentrix 托管，不能使用 ${exec.name} 另建、完成或等待另一套任务。真实状态以 delegation_status 为准。` +
@@ -917,13 +923,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (!['new', 'continue', 'update', 'question'].includes(relation)) throw new Error('请用 relation 明确 new/continue/update/question；程序不根据措辞猜需求归属')
     if (['continue', 'update'].includes(relation) && !entry.source) throw new Error('尚无已确认需求，请先用 new 记录')
     const reason = typeof args.reason === 'string' ? args.reason.trim() : ''
-    const changes = ['new', 'update'].includes(relation) || !entry.decision && relation !== 'question'
+    const plan = plans.get(parent.id)
+    const continuationRepair = relation === 'continue' && interruptedPlan(plan) && args.mode === 'delegate' && reason.length > 0
+    const changes = ['new', 'update'].includes(relation) || !entry.decision && relation !== 'question' || continuationRepair
     if (changes && (!['direct', 'delegate'].includes(args.mode) || !reason || reason.length > 500)) throw new Error('新需求、范围或方案变化须提供 direct/delegate 和非空的具体理由，最多 500 字')
     if (!changes && args.mode && args.mode !== entry.decision?.mode) throw new Error('执行方式变化请使用 update 并说明理由')
     const source = relation === 'new' || !entry.source ? message ? { messageId: message.messageId, text: message.text } : getSource(parent.id) : entry.source
     if (!source?.messageId) throw new Error('尚未取得当前需求编号，请先接收用户需求后记录判断')
     const revision = ['new', 'update'].includes(relation) ? message ? { messageId: message.messageId, text: message.text } : source : entry.revision ?? source
-    const plan = plans.get(parent.id)
     if (changes && relation !== 'new' && args.mode === 'direct' && plan && !['accepted', 'cancelled'].includes(planStatus(plan))) throw new Error('托管计划尚未结束，请监督、返工或明确取消，不能同时改为主控重复实现')
     const model = coordinatorModel(parent, 0, 'decision'), at = Date.now()
     const decision = changes ? { mode: args.mode, reason, requestId: source.messageId, revisionId: revision.messageId, at, model } : entry.decision ?? null
@@ -961,8 +968,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     } finally { decisionWrites.delete(parent.id) }
     if (message && coordinatorUsage.get(parent.id)?.messageId === message.messageId) coordinatorUsage.set(parent.id, { entry: usageFor(parent.id) })
     onRequestResolved(parent.id, clone(next))
-    if (message && relation === 'continue' && plan?.source?.messageId === source.messageId &&
-      (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt || plan.cancelled && plan.cancelledBy === 'host' && !plan.cancellation)) await runPlan({}, exec)
+    if (message && relation === 'continue' && plan?.source?.messageId === source.messageId && interruptedPlan(plan) &&
+      decisionCurrent(parent.id) && decisionFor(parent.id)?.mode === 'delegate') await runPlan({}, exec)
     return { decision: clone(decision), source: clone(source), messageResolution: clone(resolution), pendingMessages: clone(pendingMessages(parent.id)) }
   }
   function taskOf(plan, id) {
@@ -1195,9 +1202,43 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (!selected.provider || !selected.model) throw new Error('无法确定子任务模型，请在“DSH Agentrix”中选择模型或检查主 Agent 模型')
     return { selected, source: role === 'reviewer' ? 'dispatcher' : 'configured' }
   }
-  function recordModelSelection(task, selected, source, resolved = null) {
-    task.modelRoute = { role: modelRole(task), source, requested: clone(selected), resolved: resolved ? clone(resolved) : null, actual: null }
+  function modelAuthorization(parent, selected) {
+    const session = parent?.session
+    if (!session?.snapshotEvents) return { status: 'unknown', source: 'unavailable', message: '当前宿主没有提供会话授权读取接口，不能确认托管模型授权' }
+    let policy
+    try {
+      if (!modelPolicies.has(session)) {
+        const event = session.snapshotEvents().find(event => event.type === 'subagent/model-selection-policy')
+        modelPolicies.set(session, event ? clone(event.data?.allowedModels ?? false) : null)
+      }
+      policy = modelPolicies.get(session)
+    } catch (error) { return { status: 'unknown', source: 'unavailable', message: '读取会话模型授权失败：' + messageOf(error) } }
+    if (policy === null) return { status: 'allowed', source: 'agentrix-config', message: '托管任务使用用户保存的 Agentrix 模型配置；本会话没有原生模型白名单，原生模型查询的父模型范围不用于托管派发' }
+    if (!Array.isArray(policy) || !policy.length || policy.some(route => !route?.provider || !route?.model)) return { status: 'unknown', source: 'session-policy', message: '当前会话模型授权记录无效，未启动子任务' }
+    const allowed = policy.some(route => route.provider === selected.provider && route.model === selected.model)
+    return { status: allowed ? 'allowed' : 'blocked', source: 'session-policy', message: allowed ? '配置模型符合当前会话已记录的授权' : '配置模型不在当前会话已记录的授权范围内；这不表示模型服务不可用' }
+  }
+  async function resolveManagedRoute(parent, selected, role, signal) {
+    const authorization = modelAuthorization(parent, selected)
+    if (authorization.status !== 'allowed') {
+      const issue = { code: authorization.status === 'blocked' ? 'MODEL_ROUTE_UNAUTHORIZED' : 'MODEL_AUTHORIZATION_UNAVAILABLE', retryable: false,
+        role, provider: selected.provider, model: selected.model, message: authorization.message,
+        action: '请核对 DSH 当前会话授权；保存模型配置不代表旧会话授权已刷新。通过宿主支持的授权入口处理后继续原计划，不切换入口绕过授权。' }
+      throw Object.assign(new Error(issue.message + '。' + issue.action), { issue, authorization })
+    }
+    return { resolved: await validateModelRoute(service('llm'), selected, role, signal), authorization }
+  }
+  function recordModelSelection(task, selected, source, resolved = null, authorization = null) {
+    task.modelRoute = { role: modelRole(task), source, requested: clone(selected), resolved: resolved ? clone(resolved) : null, actual: null, authorization }
     task.model = { ...(resolved ?? selected), source }
+  }
+  function modelRoutingState(sessionId) {
+    const parent = service('agents')?.get(sessionId)
+    if (!parent || parent.session?.header?.origin === 'subagent') return null
+    try {
+      const { selected } = modelSelection({ role: 'worker' }, parent)
+      return { requested: selected, authorization: modelAuthorization(parent, selected), validation: 'not-checked', checkTool: 'delegation_models' }
+    } catch (error) { return { requested: null, authorization: null, validation: 'blocked', issue: error.issue ?? { message: messageOf(error) }, checkTool: 'delegation_models' } }
   }
   function validateChecks(tasks, parent, toolSet) {
     if (typeof ctx.tools.schemas !== 'function') return
@@ -1224,25 +1265,26 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     let failure
     const checked = new Map()
     for (const task of plan.tasks) {
-      if (task !== retryTask && task.status !== 'queued' && !(task.status === 'blocked' && task.issue?.code === 'MODEL_CONFIG_INVALID')) continue
+      if (task !== retryTask && task.status !== 'queued' && !(task.status === 'blocked' && ['MODEL_CONFIG_INVALID', 'MODEL_ROUTE_UNAUTHORIZED', 'MODEL_AUTHORIZATION_UNAVAILABLE'].includes(task.issue?.code))) continue
       try {
         const { selected, source } = modelSelection(task, parent)
         recordModelSelection(task, selected, source)
         const key = JSON.stringify([modelRole(task), selected])
-        if (!checked.has(key)) checked.set(key, validateModelRoute(service('llm'), selected, modelRole(task), signal))
-        const resolved = await checked.get(key)
-        recordModelSelection(task, selected, source, resolved)
+        if (!checked.has(key)) checked.set(key, resolveManagedRoute(parent, selected, modelRole(task), signal))
+        const { resolved, authorization } = await checked.get(key)
+        recordModelSelection(task, selected, source, resolved, authorization)
         if (task.protocolVersion && task.complexity === 'complex') {
           const review = modelSelection({ role: 'reviewer', dispatcherModel: coordinatorModel(parent, task.attempts + 1) }, parent).selected
           const reviewKey = JSON.stringify(['reviewer', review])
-          if (!checked.has(reviewKey)) checked.set(reviewKey, validateModelRoute(service('llm'), review, 'reviewer', signal))
+          if (!checked.has(reviewKey)) checked.set(reviewKey, resolveManagedRoute(parent, review, 'reviewer', signal))
           await checked.get(reviewKey)
         }
-        if (task.issue?.code === 'MODEL_CONFIG_INVALID') {
+        if (['MODEL_CONFIG_INVALID', 'MODEL_ROUTE_UNAUTHORIZED', 'MODEL_AUTHORIZATION_UNAVAILABLE'].includes(task.issue?.code)) {
           task.status = 'queued'; task.error = null; task.issue = null
-          remember(plan, 'task.unblocked', '模型配置检查通过，任务可继续派发', task)
+          remember(plan, 'task.unblocked', '模型配置与会话授权检查通过，任务可继续派发', task)
         }
       } catch (error) {
+        if (error.authorization && error.issue?.role === modelRole(task) && task.modelRoute) task.modelRoute.authorization = error.authorization
         task.status = error.issue ? 'blocked' : 'failed'; task.error = messageOf(error); task.issue = error.issue ?? null
         failure ??= error
         remember(plan, task.status === 'blocked' ? 'task.blocked' : 'task.failed', task.error, task)
@@ -1273,11 +1315,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (!subagents?.startActivation) throw new Error('DSH subagents 服务不可用；请确认原生子 Agent provider 已加载')
       const { selected, source } = modelSelection(task, parent)
       recordModelSelection(task, selected, source)
-      const resolved = await validateModelRoute(service('llm'), selected, modelRole(task), handle.controller.signal)
+      const { resolved, authorization } = await resolveManagedRoute(parent, selected, modelRole(task), handle.controller.signal)
       handle.controller.signal.throwIfAborted()
-      recordModelSelection(task, selected, source, resolved)
+      recordModelSelection(task, selected, source, resolved, authorization)
       if (!reviewer && task.complexity === 'complex') {
-        await validateModelRoute(service('llm'), modelSelection({ role: 'reviewer', dispatcherModel: dispatcher }, parent).selected, 'reviewer', handle.controller.signal)
+        await resolveManagedRoute(parent, modelSelection({ role: 'reviewer', dispatcherModel: dispatcher }, parent).selected, 'reviewer', handle.controller.signal)
         handle.controller.signal.throwIfAborted()
       }
       modelChecked = true
@@ -1315,6 +1357,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       await save()
     } catch (error) {
       clearTaskTimers(handle)
+      if (error.authorization && error.issue?.role === modelRole(task) && task.modelRoute) task.modelRoute.authorization = error.authorization
       const issue = !error.issue && modelServiceIssue(error, modelRole(task), task.modelRoute?.actual ?? task.modelRoute?.resolved)
       if (issue) error = Object.assign(new Error(messageOf(error)), { issue })
       const releaseError = await releaseChild(handle, task)
@@ -1403,6 +1446,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   // committed error before native cleanup releases the child Agent.
   disposers.push(ctx.on('session/event', (session, event) => {
     observeInput(session, event)
+    if (event?.type === 'subagent/model-selection-policy') {
+      const target = service('agents')?.get(session?.id)?.session
+      if (target && modelPolicies.get(target) === null) modelPolicies.set(target, clone(event.data?.allowedModels ?? false))
+    }
     if (coordinationContext(session?.id) && plans.has(session.id)) {
       if (event?.type === 'tool/call') {
         const call = event.data
@@ -1820,7 +1867,29 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     toolDefinitions.set(name, definition)
     disposers.push(ctx.tools.register(definition))
   }
-  routeTool('delegation_decide', '主控结合上下文确认消息关联：new 新需求、continue 继续、update 补充或调整、question 询问进度或提问。新需求/方案变化同时提供 direct/delegate 和理由；继续/询问沿用原决定。messageId 只能引用本会话真实消息，多条待关联时必填。先读文件准备，普通正文不能代替记录。', {
+  routeTool('delegation_models', '查询 Agentrix 托管模型，使用与派发相同的授权和模型解析检查。默认检查后续执行者配置；role=reviewer 查看审查模型。taskId 读取该任务已启动时的快照，配置改变不覆盖运行任务。与原生 list_subagent_models 范围不同；检查通过不等于服务商已成功响应。', {
+    taskId: string, role: { type: 'string', enum: ['worker', 'reviewer'] },
+  }, [], async (args, exec) => {
+    const parent = own(exec), role = args.role ?? 'worker'
+    if (!['worker', 'reviewer'].includes(role)) throw new Error('role 只能是 worker 或 reviewer')
+    const owner = args.taskId ? taskOf(ownPlan(exec).plan, args.taskId) : null
+    const target = role === 'reviewer' ? owner?.audit ?? { role, dispatcherModel: owner?.dispatcherModel } : owner ?? { role }
+    if (owner && target.attempts > 0 && target.modelRoute) return { role, source: 'launch-snapshot', passed: target.modelRoute.authorization ? Boolean(target.modelRoute.resolved && !target.modelRoute.rejected && target.modelRoute.authorization.status === 'allowed') : null,
+      requested: clone(target.modelRoute.requested), resolved: clone(target.modelRoute.resolved), actual: clone(target.modelRoute.actual),
+      authorization: clone(target.modelRoute.authorization ?? { status: 'unknown', source: 'historical', message: '历史任务没有记录授权检查，未补造结果' }),
+      validation: target.modelRoute.actual ? 'observed' : target.modelRoute.resolved ? 'resolved' : 'blocked', issue: clone(target.issue ?? null) }
+    let selected, source, authorization
+    try {
+      ({ selected, source } = modelSelection(target, parent))
+      authorization = modelAuthorization(parent, selected)
+      const result = await resolveManagedRoute(parent, selected, role, exec.signal)
+      return { role, source, passed: true, requested: selected, resolved: result.resolved, authorization: result.authorization, actual: null, validation: 'resolved' }
+    } catch (error) {
+      return { role, source, passed: false, requested: selected ?? null, resolved: null, authorization: error.authorization ?? authorization ?? null, actual: null, validation: 'blocked',
+        issue: error.issue ?? { code: 'MODEL_ROUTE_CHECK_FAILED', source: 'model-resolution', message: messageOf(error) } }
+    }
+  })
+  routeTool('delegation_decide', '主控确认消息关联：new 新需求、continue 继续、update 调整、question 提问。新需求/方案变化给出 direct/delegate 和理由；继续沿用原决定。恢复原托管计划时如旧判断为 direct，可在 continue 中提供 mode:delegate 和具体 reason 修正，无需 update 或重建任务卡。多条真实消息须逐条用 messageId 关联，全部处理后才自动接续。', {
     relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
     mode: { type: 'string', enum: ['direct', 'delegate'] }, reason: { type: 'string', description: '新需求或方案变化时给出具体理由，最多 500 字；继续和进度询问沿用原判断。' },
   }, [], recordDecision)
@@ -1969,6 +2038,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const parent = own(exec), previous = plans.get(parent.id)
     if (args.start !== undefined && typeof args.start !== 'boolean') throw new Error('start 必须为 true 或 false')
     if (storageError) throw new Error(`任务保存或恢复异常，请先处理：${storageError}`)
+    if (args.relation === 'continue' && previous && planStatus(previous) !== 'accepted' && (!previous.cancelled || previous.cancelledBy === 'host' && !previous.cancellation)) {
+      if (args.decisionReason !== undefined) await recordDecision({ mode: 'delegate', reason: args.decisionReason, relation: 'continue', messageId: args.messageId }, exec)
+      if (args.start && !previous.autoDispatch && decisionCurrent(parent.id) && decisionFor(parent.id)?.mode === 'delegate') return runPlan({}, exec)
+      return { plan: snapshotPlan(previous) }
+    }
     if (previous && !['accepted', 'cancelled'].includes(planStatus(previous))) throw new Error('当前计划尚未验收；请监督、返工或取消后再建新计划')
     if (pendingMessages(parent.id).length && args.decisionReason === undefined) throw new Error('建立计划前须明确消息关联；可在本次 delegation_plan 一并提供 relation/messageId/decisionReason，或先用 delegation_decide 确认')
     const validated = validatePlan(args)
@@ -2085,7 +2159,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (task.audit) task.audit.dispatcherModel ??= clone(task.dispatcherModel)
     const target = task.audit ?? { ...task, role: 'reviewer' }
     const { selected } = modelSelection(target, parent)
-    await validateModelRoute(service('llm'), selected, 'reviewer', exec.signal)
+    await resolveManagedRoute(parent, selected, 'reviewer', exec.signal)
     if (closed || plan.cancelled || task.status !== 'review' || task.attempts !== originalAttempt) throw new Error('模型检查期间任务状态已改变，审查未启动')
     if (task.audit !== originalAudit || task.audit?.status !== originalStatus) return { audit: clone(task.audit) }
     if (!task.audit || task.audit.forAttempt !== task.attempts) queueAudit(task)
@@ -2139,7 +2213,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   })
   return {
     ready, snapshot, observe, allowsVerification, decisionFor, decisionCurrent, recoverDecision, sourceOf, revisionOf,
-    refreshCoordinationTools, guardCoordination, coordinatorWriteBlock, recordCoordinationFailure,
+    refreshCoordinationTools, guardCoordination, coordinatorWriteBlock, recordCoordinationFailure, modelRoutingState,
     isToolHiddenByPolicy(sessionId, name) {
       return ['delegation_verify', 'delegation_review'].includes(name) && Boolean(coordinationRestrictions.get(sessionId)?.names.includes(name))
     },
@@ -2153,6 +2227,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (task?.protocolVersion >= 2 && task.execution) return task.execution.commitState === 'committed'
         ? '[DSH Agentrix] 报告已提交，子回合正在结束，不能继续执行工具。' : '[DSH Agentrix] 报告正在确认，不能继续执行工具。'
       if (!expected) return undefined
+      if (exec.name === 'list_subagent_models') return '[DSH Agentrix] 执行者沿用已校验的启动模型，不用原生模型查询重新判断或切换；模型问题通过 delegation_report 报告主控。'
       if (task.protocolVersion >= 2 && exec.name === 'send_message') return '[DSH Agentrix] 托管任务必须通过 delegation_report 提交正式报告；普通消息不能代替报告。'
       if (COORDINATOR_TOOLS.has(exec.name)) return '[DSH Agentrix] 此入口仅供主控。子代理读取使用 read/grep/glob，阶段进度使用 delegation_checkpoint，最终结果使用 delegation_report。'
       if (['subagent', 'subagent_fork', 'spawn_teammate', ...(getConfig().delegationTools ?? [])].includes(exec.name)) return '[DSH Agentrix] 执行者和审查者不能继续委派。'

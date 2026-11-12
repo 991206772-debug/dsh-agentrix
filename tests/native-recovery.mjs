@@ -17,6 +17,9 @@ process.env.DSH_HOME = directory
 delete process.env.DSH_DELEGATION_FIRST
 const ctx = new Context(), routes = new Map(), releases = new Map(), events = []
 const gate = Promise.withResolvers(), phases = new Map()
+const queuedContinue = process.argv.includes('--queued-continue')
+const denyRoute = process.argv.includes('--deny-route')
+const nativePolicy = denyRoute || process.argv.includes('--route-policy')
 let parent, handle, stopped = false, waiting = false, calls = 0
 ctx.provide('webServer', { register(route) { routes.set(route.path, route.handler); return () => routes.delete(route.path) } })
 ctx.provide('workingDirectory', { get: () => directory, async set() {} })
@@ -25,6 +28,7 @@ for (const [module, name] of [['dsh-session-projection', 'SessionProjectionRegis
   ['dsh-agent-loop', 'AgentLoop'], ['dsh-subagent', 'SubagentRuntime']]) ctx.plugin((await native(module))[name])
 ctx.plugin(ToolRuntime)
 ctx.plugin(await native('dsh-subagent-spawn-in-process'))
+ctx.plugin(await native('dsh-tool-subagent'), { provider: 'spawn', modelSelection: true, modelDiscovery: true })
 const tick = () => new Promise(resolve => setTimeout(resolve, 10))
 async function until(test, label) {
   for (let i = 0; i < 1000; i++) { if (await test()) return; await tick() }
@@ -47,7 +51,10 @@ class Adapter extends LlmAdapter {
       : tool('delegation_report', { status: 'DONE', summary: '保留原需求完成检查', report: '已核对隔离文件包含 verified，等待主控验证。' })
     else {
       const snapshot = await state(), plan = snapshot.plans[0], task = plan?.tasks[0]
-      if (!plan) block = tool('delegation_plan', { goal: '中断后继续同一计划', start: true, decisionReason: '执行者检查文件，主控读取真实结果后验收。', tasks: [{
+      assert.ok(request.tools.some(tool => tool.name === 'delegation_models'))
+      assert.ok(!request.tools.some(tool => tool.name === 'list_subagent_models'), 'managed model discovery must not advertise the native-only catalog')
+      if (!plan && phase === 0) block = tool('delegation_models')
+      else if (!plan) block = tool('delegation_plan', { goal: '中断后继续同一计划', start: true, decisionReason: '执行者检查文件，主控读取真实结果后验收。', tasks: [{
         id: 'a', title: '检查隔离文件', instructions: '读取隔离文件后正式报告', scope: '隔离目录', outputs: [file], writes: [],
         complexity: 'routine', criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: file } }],
       }] })
@@ -59,12 +66,13 @@ class Adapter extends LlmAdapter {
       else if (task.status === 'review') block = tool('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{
         criterionId: 'C1', finding: '原计划中的文件已实际核对', evidence: [task.checks[0].result.ref],
       }] })
+      else if (denyRoute && task.issue?.code === 'MODEL_ROUTE_UNAUTHORIZED') block = { type: 'text', text: '执行模型未获当前会话授权，原计划保留，未创建子代理。' }
       else throw new Error('Unexpected task state: ' + task.status)
     }
     yield { type: 'block-start', index: 0, blockType: block.type }
     yield { type: 'block-end', index: 0, block }
     yield { type: 'usage', usage: { inputTokens: 20, outputTokens: 5 } }
-    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    yield { type: 'finish', reason: { kind: block.type === 'tool-call' ? 'tool-calls' : 'stop' } }
   }
 }
 try {
@@ -87,7 +95,7 @@ try {
     return receipt
   }
   ctx.on('session/event', (session, event) => {
-    events.push({ id: session.id, type: event.type })
+    events.push({ id: session.id, type: event.type, ...(event.type === 'tool/call' ? { name: event.data.name } : {}) })
     if (session.id === 'root' && event.type === 'tool/call' && event.data.name === 'delegation_wait') waiting = true
   }, { global: true })
   await writeFile(file, 'verified')
@@ -99,7 +107,17 @@ try {
   } }, { writeHead(code) { assert.equal(code, 200) }, end() {} })
   handle = await ctx.agents.create({ sessionId: 'root', meta: { cwd: directory }, agentOptions: { provider: 'scripted', model: 'coordinator' } })
   parent = handle.agent
+  if (nativePolicy) parent.session.append('subagent/model-selection-policy', { allowedModels: [{ provider: 'scripted', model: denyRoute ? 'coordinator' : 'worker' }] })
   parent.followup(createUserMessage({ content: [{ type: 'text', text: '执行隔离任务并验收' }], source: { kind: 'user' } }))
+  if (denyRoute) {
+    await until(async () => (await state()).plans[0]?.completion?.outcome === 'blocked', 'session policy refusal')
+    const result = (await state()).plans[0]
+    assert.equal(result.tasks[0].issue.code, 'MODEL_ROUTE_UNAUTHORIZED')
+    assert.equal(result.tasks[0].modelRoute.authorization.source, 'session-policy')
+    assert.equal(result.activationBudget.used, 0)
+    assert.equal(phases.size, 1, 'no worker model request was made')
+    console.log('PASS: native recorded session policy rejects the configured route before child creation or activation spending')
+  } else {
   await until(() => waiting, 'parent event wait')
   const before = (await state()).plans[0], oldChild = before.tasks[0].childId
   parent.cancel({ kind: 'user' })
@@ -111,6 +129,7 @@ try {
   assert.equal(releases.get(oldChild), 1)
   stopped = true; gate.resolve()
   parent.followup(createUserMessage({ content: [{ type: 'text', text: '继续原任务' }], source: { kind: 'user' } }))
+  if (queuedContinue) parent.steer(createUserMessage({ content: [{ type: 'text', text: '继续，仍然是原任务' }], source: { kind: 'user' } }))
   await until(async () => (await state()).plans[0].completion?.outcome === 'completed', 'resumed acceptance')
   const result = (await state()).plans[0]
   assert.equal(result.archive.id, before.archive.id)
@@ -119,10 +138,13 @@ try {
   assert.equal(result.activationBudget.used, 2)
   assert.equal(result.tasks[0].status, 'accepted')
   assert.equal(result.tasks[0].modelRoute.actual.model, 'worker')
+  assert.equal(result.tasks[0].modelRoute.authorization.source, nativePolicy ? 'session-policy' : 'agentrix-config')
   assert.equal(releases.size, 2)
   assert.ok([...releases.values()].every(count => count === 1))
   assert.ok(events.filter(event => event.id === 'root' && event.type === 'turn/end').length >= 1)
+  if (queuedContinue) assert.equal(events.filter(event => event.id === 'root' && event.type === 'tool/call' && event.name === 'delegation_decide').length, 2, 'both real continue messages must be resolved before one recovery')
   console.log('PASS: native host interruption releases once; real continue resumes the same request and plan, verifies and accepts without creating a new demand')
+  }
 } finally {
   gate.resolve()
   await handle?.dispose()

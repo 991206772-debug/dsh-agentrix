@@ -20,7 +20,7 @@ const directory = await mkdtemp(path.join(os.tmpdir(), 'dsh-native-contract-'))
 process.env.DSH_HOME = directory
 delete process.env.DSH_DELEGATION_FIRST
 const ctx = new Context(), routes = new Map(), children = [], outputs = [], sections = [], childAgents = new Map()
-const parent = { id: 'root', options: { provider: 'test', model: 'parent' }, session: { header: {}, requestHeader: () => undefined }, ctx }
+const parent = { id: 'root', options: { provider: 'test', model: 'parent' }, session: { header: {}, requestHeader: () => undefined, snapshotEvents: () => [] }, ctx }
 parent.ctx = createScope(ctx, parent).ctx
 ctx.provide('systemPrompt', { tools() {}, section(section) { sections.push(section); return () => {} } })
 ctx.provide('sessions', { get: id => id === 'root' ? parent.session : childAgents.get(id)?.session })

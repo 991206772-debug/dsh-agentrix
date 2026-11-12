@@ -78,6 +78,26 @@ export async function host() {
 
 const complex = '1. 重构所有模块并且迁移数据\n2. 批量修复接口同时补充测试套件'
 
+test('host state distinguishes configured authorization from provider validation and native discovery stays separate', async () => {
+  delete process.env.DSH_DELEGATION_FIRST
+  const h = await host(); await h.state()
+  try {
+    h.agent.session = { header: {}, snapshotEvents: () => [] }
+    assert.equal((await h.request('POST', { models: { worker: { provider: 'local', model: 'worker' } } })).status, 200)
+    h.turn('检查配置模型')
+    const state = await h.state()
+    assert.equal(state.modelRouting.requested.model, 'worker')
+    assert.equal(state.modelRouting.authorization.source, 'agentrix-config')
+    assert.equal(state.modelRouting.validation, 'not-checked')
+    const checked = await h.definitions.get('delegation_models').execute({}, { agent: h.agent, signal: new AbortController().signal })
+    assert.equal(checked.passed, true)
+    assert.equal(checked.actual, null)
+    assert.match(h.call('list_subagent_models'), /delegation_models/)
+    await h.request('POST', { mode: 'off' })
+    assert.equal(h.call('list_subagent_models'), undefined)
+  } finally { await h.close() }
+})
+
 test('a new direct request can write unrelated files while the previous plan keeps its deliverables protected', async () => {
   const h = await host(); await h.state()
   try {

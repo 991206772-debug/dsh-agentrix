@@ -76,6 +76,7 @@ export function taskSummary(plan) {
       '- 档位依据：' + (task.complexityReason || '未记录'),
       '- 配置来源：' + (task.modelRoute ? task.modelRoute.source === 'configured' ? '用户配置' : '启动时继承主 Agent' : '历史未记录'),
       '- 配置模型：' + (task.modelRoute?.requested ? task.modelRoute.requested.provider + ' / ' + task.modelRoute.requested.model : '未记录'),
+      '- 模型授权：' + (task.modelRoute?.authorization?.message || '历史未记录'),
       ...(task.dispatcherModel ? [
         '- 审查沿用主控模型：' + task.dispatcherModel.provider + ' / ' + task.dispatcherModel.model + '；思考强度：' + (task.dispatcherModel.reasoningEffort ?? '模型默认值'),
         '- 分发模型记录：' + (task.dispatcherModel.source === 'legacy-review' ? '旧任务缺少分发快照，采用首次审查时的主控模型' : '任务第 ' + task.dispatcherModel.attempt + ' 次派发时固定') + '；时间：' + time(task.dispatcherModel.at),

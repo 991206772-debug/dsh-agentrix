@@ -1598,11 +1598,127 @@ test('a real continue message restores returned work for acceptance without a ne
   assert.equal(f.calls.length, 1)
 })
 
+test('managed model discovery and dispatch share configured routes without a native session allowlist', async () => {
+  const f = await fixture()
+  const models = await f.execute('delegation_models')
+  assert.equal(models.passed, true)
+  assert.equal(models.requested.model, 'cheap')
+  assert.equal(models.authorization.source, 'agentrix-config')
+  assert.equal(models.actual, null)
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  assert.equal(f.calls[0].request.agentOptions.model, models.resolved.model)
+  assert.equal(f.snapshot().tasks[0].modelRoute.authorization.source, models.authorization.source)
+  assert.match(f.engine.guardChild({ agent: f.children[0], name: 'list_subagent_models' }), /启动模型/)
+  f.config.models.worker.model = 'changed-worker'
+  assert.equal((await f.execute('delegation_models')).requested.model, 'changed-worker')
+  assert.equal((await f.execute('delegation_models', { taskId: 'a' })).requested.model, 'cheap')
+})
+
+test('an explicit native allowlist blocks both discovery and dispatch before spending an activation', async () => {
+  const f = await fixture({ allowedModels: [{ provider: 'local', model: 'parent' }] })
+  const models = await f.execute('delegation_models')
+  assert.equal(models.passed, false)
+  assert.equal(models.issue.code, 'MODEL_ROUTE_UNAUTHORIZED')
+  assert.equal(models.authorization.source, 'session-policy')
+  await f.plan([card('a')])
+  await assert.rejects(f.execute('delegation_run'), /当前会话.*授权/)
+  assert.equal(f.calls.length, 0)
+  assert.equal(f.snapshot().activationBudget.used, 0)
+  assert.equal(f.snapshot().tasks[0].issue.code, models.issue.code)
+})
+
+test('managed discovery preserves model resolution errors and does not claim an actual request', async () => {
+  const f = await fixture({ models: { worker: { provider: 'retired', model: 'old' } } })
+  const models = await f.execute('delegation_models')
+  assert.equal(models.passed, false)
+  assert.equal(models.issue.code, 'MODEL_CONFIG_INVALID')
+  assert.equal(models.actual, null)
+  assert.equal(f.calls.length, 0)
+})
+
+test('reviewer authorization is checked before a complex worker is created', async () => {
+  const f = await fixture({ allowedModels: [{ provider: 'local', model: 'cheap' }] })
+  assert.equal((await f.execute('delegation_models')).passed, true)
+  const reviewer = await f.execute('delegation_models', { role: 'reviewer' })
+  assert.equal(reviewer.passed, false)
+  assert.equal(reviewer.requested.model, 'parent')
+  await f.plan([card('a', { complexity: 'complex' })])
+  await assert.rejects(f.execute('delegation_run'), /当前会话.*授权/)
+  assert.equal(f.calls.length, 0)
+  assert.equal(f.snapshot().activationBudget.used, 0)
+  assert.equal(f.snapshot().tasks[0].modelRoute.authorization.status, 'allowed', 'reviewer denial must not mislabel worker authorization')
+})
+
+test('historical running-model records do not invent a past authorization result', async () => {
+  const f = await fixture()
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  await f.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    delete stored.plans[0].tasks[0].modelRoute.authorization
+    await writeFile(file, JSON.stringify(stored))
+  })
+  const result = await f.execute('delegation_models', { taskId: 'a' })
+  assert.equal(result.passed, null)
+  assert.equal(result.authorization.status, 'unknown')
+  assert.equal(f.calls.length, 1)
+})
+
+test('multiple continue messages are acknowledged before resuming the original interrupted plan once', async () => {
+  const f = await fixture()
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.emit('session/event', f.parent, { type: 'turn/end', data: { reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+  const archiveId = f.snapshot().archive.id
+  for (const id of ['continue-first', 'continue-last']) f.emit('session/event', f.parent, { type: 'user/message', data: { id, source: { kind: 'user' }, content: '继续原任务' } })
+  const first = await f.execute('delegation_decide', { relation: 'continue', messageId: 'continue-first' })
+  assert.equal(first.pendingMessages.length, 1)
+  assert.equal(f.calls.length, 1)
+  await f.execute('delegation_decide', { relation: 'continue', messageId: 'continue-last' })
+  assert.equal(f.calls.length, 2)
+  assert.equal(f.snapshot().archive.id, archiveId)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+})
+
+test('a stale direct decision can be repaired within continue without changing the request or adding requirements', async () => {
+  const f = await fixture()
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.emit('session/event', f.parent, { type: 'turn/end', data: { reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+  const archiveId = f.snapshot().archive.id
+  await f.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    stored.decisions[0].decision.mode = 'direct'
+    stored.plans[0].decision.mode = 'direct'
+    await writeFile(file, JSON.stringify(stored))
+  })
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'continue-direct', source: { kind: 'user' }, content: '继续' } })
+  await f.execute('delegation_decide', { relation: 'continue', messageId: 'continue-direct' })
+  assert.equal(f.calls.length, 1, 'the acknowledged message must not cause a failed startup or invent a decision')
+  await f.execute('delegation_decide', { relation: 'continue', messageId: 'continue-direct', mode: 'delegate', reason: '继续监督已存在的托管任务，沿用原任务卡与验收要求。' })
+  assert.equal(f.calls.length, 2)
+  assert.equal(f.snapshot().archive.id, archiveId)
+  assert.equal(f.snapshot().inputs, undefined)
+  assert.equal(f.snapshot().messageResolution.relation, 'continue')
+  assert.equal(f.engine.decisionFor(f.parent.id).mode, 'delegate')
+})
+
+test('a continue plan call reuses existing task cards instead of replacing the interrupted archive', async () => {
+  const f = await fixture()
+  await f.plan([card('original')]); await f.execute('delegation_run')
+  await f.emit('session/event', f.parent, { type: 'turn/end', data: { reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+  const archiveId = f.snapshot().archive.id
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'continue-plan', source: { kind: 'user' }, content: '继续' } })
+  const result = await f.execute('delegation_plan', { relation: 'continue', messageId: 'continue-plan', decisionReason: '继续原计划，由执行者完成、主控验收。', start: true, goal: '继续原需求', tasks: [card('replacement')] })
+  assert.equal(result.plan.archive.id, archiveId)
+  assert.deepEqual(result.plan.tasks.map(task => task.id), ['original'])
+  assert.equal(f.calls.length, 2)
+})
+
 async function fixture(options = {}) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'dsh-orchestrator-'))
   cleanup.push(() => rm(directory, { recursive: true, force: true }))
   const calls = [], pending = [], tools = new Map(), events = new Map(), children = new Map(), conclusions = [], scopedTools = new Map()
-  const parent = { id: 'parent', options: { provider: 'local', model: 'parent' }, session: { header: {}, requestHeader: () => undefined },
+  const parent = { id: 'parent', options: { provider: 'local', model: 'parent' }, session: { header: {}, requestHeader: () => undefined,
+    snapshotEvents: () => options.allowedModels === undefined ? [] : [{ type: 'subagent/model-selection-policy', data: { allowedModels: options.allowedModels } }] },
     status: 'running', injected: [], inject(message) { this.injected.push(message) }, steer(message) { this.injected.push(message) } }
   let engine, count = 0, exitCode = 0
   const attachScope = agent => {

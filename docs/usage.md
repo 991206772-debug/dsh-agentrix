@@ -8,6 +8,7 @@
 
 | 工具 | 作用 |
 | --- | --- |
+| `delegation_models` | 与派发共用托管模型授权和解析检查；默认检查后续执行模型，可选 role: reviewer；taskId 查看启动快照，检查通过不代表服务商已响应 |
 | `delegation_decide` | 主控提供 `relation: new/continue/update/question`；新需求或方案变化时提供 `mode: direct/delegate` 和非空 `reason`（最多 500 字）。多条待关联消息须给真实 `messageId` |
 | `delegation_inspect` | `operation: list/git_status`，可指定 `directory`；通过原生工具管线运行固定的只读检查，每次最多显示 200 项 |
 | `delegation_note` | `kind: task_plan/findings/progress` 和 `content`；保存本会话本需求的专用记录并返回路径，最多 64 KiB |
@@ -24,6 +25,10 @@
 | `delegation_cancel` | 用户明确取消整个计划时提供 reason 和真实用户消息 messageId；无原因调用不取消、不自动重试 |
 
 插件启用时，主控的自动派单必须经 `delegation_plan/run`；直接调用旧 `subagent/subagent_fork/spawn_teammate` 会收到明确的入口说明，避免绕过角色模型和资源限制。不替换原生工具定义，不干预其他插件的人工操作；关闭插件后恢复原生派单行为。
+
+托管主控和执行者不使用原生 `list_subagent_models` 判断 Agentrix 配置是否可用，启用时会从对应工具列表隐藏该入口。统一用 `delegation_models` 区分授权检查、配置解析和实际请求：有原生会话白名单时，托管派发同样遵守，未授权在创建子代理前阻止；没有原生白名单时，按宿主配置调用的兼容方式使用用户保存的 Agentrix 模型，并标明 `agentrix-config` 来源，不伪装成原生授权。不会修改白名单或通过换入口放宽已记录的限制。当前状态接口提供 `modelRoutingPolicyVersion:1` 与每会话 `modelRouting`；其中 `not-checked` 仅为配置及授权状态，实际请求以任务 `modelRoute.actual` 为准。
+
+多条“继续”消息逐条关联完后才自动恢复原计划。旧判断错误保留为 direct 时，可用 `delegation_decide` 的 `relation:continue,mode:delegate,reason` 明确修正，不必改成 update、添加虚假的新要求或重新建卡；没有新理由时只记录关联并给出下一步，不尝试失败的启动。`delegation_plan(relation:continue)` 复用原任务卡和档案，不用新传入的卡片替换旧计划。
 
 当前需求进入托管计划后，主控和执行者的模型工具列表会隐藏 `team_task_create/update`、原生派单及 `wait_agent`；继续调用也不能创建、修改或勾选另一套任务。辅助看板仍可使用，`team_task_get/list`、`list_agents` 等只读观察保留，但观察结果和看板勾选都不能代替 Agentrix 的验收。子代理交报告后按现有事件通知原主控，无需额外等待工具或审批。
 
