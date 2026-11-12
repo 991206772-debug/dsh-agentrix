@@ -39,7 +39,8 @@ const reasoningOnly = process.argv.includes('--reasoning-only')
 const nextRequest = process.argv.includes('--next-request') || messageInbox
 const directUnresolved = process.argv.includes('--direct-unresolved')
 const directRecovery = process.argv.includes('--direct-recovery') || directUnresolved
-const decisionRecovery = process.argv.includes('--decision-recovery')
+const decisionCancellation = process.argv.includes('--decision-cancel')
+const decisionRecovery = process.argv.includes('--decision-recovery') || decisionCancellation
 const longVerification = process.argv.includes('--long-verification')
 const coordinationConflict = process.argv.includes('--coordination-conflict')
 const ergonomics = process.argv.includes('--ergonomics')
@@ -51,6 +52,7 @@ let followingRequest = false
 let inboxPhase = 0
 const workerGate = Promise.withResolvers()
 const conflictExecutions = new Map(), releases = new Map()
+let directEdits = 0
 const firstReads = new Map()
 const fixturePath = path.join(directory, coordinationConflict ? 'input.txt' : 'result.txt')
 const deliverablePath = path.join(directory, 'result.txt')
@@ -121,12 +123,14 @@ class ScriptedAdapter extends LlmAdapter {
           if (phase === 0) block = tool('edit', { file_path: target, old_string: 'verified', new_string: 'updated' })
           else if (phase === 1) {
             assert.equal(await readFile(target, 'utf8'), 'verified', 'missing decision must prevent the write')
-            block = { type: 'text', text: '本次故意漏记判断后提前结束。' }
-          } else if (phase === 2) {
-            assert.match(JSON.stringify(request.messages), /delegation_decide.*具体理由/)
+            assert.match(JSON.stringify(request.messages), /delegation-decision-recovery/, 'correction reaches the very next request, without ending the turn')
+            assert.match(JSON.stringify(request.messages), /尚无已确认需求.*new/s)
+            assert.ok(!request.tools.some(tool => tool.name === 'edit'), 'business tools stay hidden during correction')
             block = tool('delegation_decide', { mode: 'direct', reason: '只有一处已定位文字，主控修改后直接读取验证即可。' })
-          } else if (phase === 3) block = tool('edit', { file_path: target, old_string: 'verified', new_string: 'updated' })
-          else if (phase === 4) block = tool('read', { path: target })
+          } else if (phase === 2) {
+            assert.ok(request.tools.some(tool => tool.name === 'edit'), 'saving the actual decision restores business tools')
+            block = tool('edit', { file_path: target, old_string: 'verified', new_string: 'updated' })
+          } else if (phase === 3) block = tool('read', { path: target })
           else block = { type: 'text', text: '已核对修改结果。' }
         } else if (phase === 0) block = tool('delegation_decide', { mode: 'direct', reason: '本次仅核对一个隔离文件，主控直接修改并读取验证即可。' })
         else if (step === 0) block = tool('edit', { file_path: target, old_string: 'missing', new_string: 'updated' })
@@ -374,6 +378,7 @@ try {
       file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } },
       output: { schema: { type: 'object', additionalProperties: true }, render: () => [{ type: 'text', text: 'file edited' }] },
       async execute(args) {
+        directEdits++
         assert.equal(args.file_path, path.join(directory, 'result.txt'))
         const content = await readFile(args.file_path, 'utf8')
         if (!content.includes(args.old_string)) throw new Error('old_string was not found')
@@ -394,6 +399,10 @@ try {
     if (session.id === 'root' && event.type === 'tool/call' && event.data.name === 'delegation_wait') parentWaiting = true
   }, { global: true })
   apply(ctx)
+  if (decisionCancellation) ctx.on('tools/post-execute', async (exec, result, next) => {
+    if (exec.name === 'edit' && result.isError) parent.cancel({ kind: 'user' })
+    return next()
+  }, { global: true, prepend: true })
   await until(() => routes.has('/dsh-delegation-first/api/state'), 'plugin routes')
   await state()
   let configStatus
@@ -484,13 +493,25 @@ try {
     await until(() => parent.status === 'idle', 'decision recovery settled')
     const result = await state()
     assert.equal(result.plans.length, 0)
-    assert.equal(result.sessions[0].decision.mode, 'direct')
-    assert.equal(result.sessions[0].decisionCurrent, true)
-    assert.equal(await readFile(path.join(directory, 'result.txt'), 'utf8'), 'updated')
-    assert.equal(requests.length, 6)
-    assert.ok(requests.every(request => request.sessionId === 'root'))
-    assert.equal(events.filter(event => event.id === 'root' && event.type === 'turn/end').length, 1)
-    console.log('PASS: native missing decision blocks the write, resumes the same coordinator once, records the reason and completes without a new agent or human continuation')
+    if (decisionCancellation) {
+      assert.equal(result.sessions[0].decision, null)
+      assert.equal(directEdits, 0)
+      assert.equal(await readFile(path.join(directory, 'result.txt'), 'utf8'), 'verified')
+      assert.equal(requests.length, 1)
+      assert.equal(events.filter(event => event.id === 'root' && event.type === 'turn/end').at(-1).reason.kind, 'aborted')
+      assert.equal(parent.session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.source?.kind === 'delegation-decision-recovery').length, 0)
+      console.log('PASS: native cancellation skips decision correction, never executes the denied edit and never wakes another model or agent')
+    } else {
+      assert.equal(result.sessions[0].decision.mode, 'direct')
+      assert.equal(result.sessions[0].decisionCurrent, true)
+      assert.equal(await readFile(path.join(directory, 'result.txt'), 'utf8'), 'updated')
+      assert.equal(requests.length, 5)
+      assert.ok(requests.every(request => request.sessionId === 'root'))
+      assert.equal(events.filter(event => event.id === 'root' && event.type === 'turn/end').length, 1)
+      assert.equal(directEdits, 1, 'the denied call never runs and only the model-requested retry edits the file')
+      assert.equal(parent.session.snapshotEvents().filter(event => event.type === 'user/message' && event.data.source?.kind === 'delegation-decision-recovery').length, 1)
+      console.log('PASS: native missing decision immediately corrects the same coordinator; tools restore after the real decision, one write succeeds, no new agent or human continuation')
+    }
   } else if (directRecovery) {
     await until(() => parent.status === 'idle', 'direct request settled')
     const result = await state(), execution = result.sessions[0].execution

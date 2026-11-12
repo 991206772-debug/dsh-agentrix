@@ -425,11 +425,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   function nextAction(plan, sessionId = plan?.sessionId, completion = plan?.completion) {
     const pending = pendingMessages(sessionId)
     if (pending.length) return { type: 'resolve_message', messageIds: pending.map(message => message.messageId),
-      message: '用 context.pendingMessages 中的真实 messageId 逐条调用 delegation_decide，确认新消息与需求的关系；继续原需求时沿用原计划。无需扫描历史会话文件寻找编号。' }
+      message: decisionGuidance(sessionId) }
     if (!plan || !isCurrentPlan(plan) && (completion?.outcome === 'completed' || ['accepted', 'cancelled'].includes(planStatus(plan)) || decisionFor(sessionId)?.mode !== 'delegate')) {
       const decision = decisionFor(sessionId), current = decisionCurrent(sessionId)
       return { type: current ? 'handle_request' : 'decide', requestId: sourceOf(sessionId)?.messageId ?? null, mode: decision?.mode ?? null,
-        message: !current ? '用 delegation_decide 确认当前需求的执行方式和理由。旧计划与回执仅作历史背景。'
+        message: !current ? decisionGuidance(sessionId)
           : decision.mode === 'delegate' ? '为当前需求调用 delegation_plan({decisionReason,start:true,...}) 建立并启动计划；旧计划回执不代表当前需求已完成。'
             : '按已确认的当前需求直接处理并验证；旧计划回执不代表当前需求已完成。' }
     }
@@ -685,7 +685,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (plan?.delivery) await publishDelivery(plan, agent, signal)
     if (!plan || !(plan.protocolVersion >= 2) || !isCurrentPlan(plan) || plan.wakeSuppressed || plan.cancelled && plan.completion) { truncatedOutputs.delete(agent.id); return }
     if (pendingMessages(agent.id).length && await recoverDecision(agent.id)) {
-      agent.inject(runtimeMessage(plan, '有尚未关联的真实用户消息。请先用 delegation_decide 的 relation 确认 new/continue/update/question；不要按前缀或字数归类，不新开分类代理，然后继续相应任务。', 'delegation-decision-recovery'))
+      agent.inject(runtimeMessage(plan, decisionGuidance(agent.id), 'delegation-decision-recovery'))
       return
     }
     if (!plan.completion && continueOutput(plan, agent)) { await save(); return }
@@ -831,6 +831,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (expected) return expected.task.role === 'reviewer' ? !REVIEW_TOOLS.has(name) : COORDINATOR_TOOLS.has(name) || conflictingTool(name) || name === 'list_subagent_models'
     const header = agent.session?.header ?? service('sessions')?.get(agent.id)?.header ?? {}
     if (header.origin === 'subagent' || header.parentSession || header.delegationDepth > 0) return false
+    const entry = decisions.get(agent.id)
+    if (!decisionCurrent(agent.id) && entry?.recoveryUsed >= 1 && entry.recoveryKey === decisionRecoveryKey(agent.id) &&
+      (getConfig().gatedTools ?? []).includes(name)) return true
     if (name === 'list_subagent_models') return true
     const plan = plans.get(agent.id)
     if (name === 'delegation_wait') return !plan || !isCurrentPlan(plan) || Boolean(plan.completion)
@@ -1010,17 +1013,31 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const decision = decisionFor(sessionId)
     return Boolean(decision && !pendingMessages(sessionId).length && decision.revisionId === revisionOf(sessionId)?.messageId)
   }
+  function decisionGuidance(sessionId) {
+    const pending = pendingMessages(sessionId), source = sourceOf(sessionId)
+    return [
+      source ? '当前需求已确认；请由主控判断新消息属于 new/continue/update/question，继续或提问沿用原决定，范围改变须更新实际方式和理由。'
+        : '尚无已确认需求：首次确认实际需求用 relation:"new"，不能用 continue/update。',
+      pending.length ? '本会话待关联消息（仅事实，不代替主控判断）：' + JSON.stringify(pending.map(message => ({ messageId: message.messageId, text: brief(message.text, 180) }))) : '',
+      '直接执行或逐条关联消息用 delegation_decide({messageId,relation,mode,reason})；新需求/方案变化由主控选择 direct/delegate 并填写真实取舍理由。新委派也可 delegation_plan({messageId,relation,decisionReason,start:true,...}) 一次确认并派发。多条消息逐条确认，不能默认选最后一条。',
+      '判断保存成功后继续当前需求，仅重试仍需执行且尚未成功的操作；若补充改变范围，按新范围执行。不要查插件源码或历史会话寻找原因，不新开分类代理，不要求用户确认。read/grep/glob、delegation_inspect/note 仍可准备。',
+    ].filter(Boolean).join('\n')
+  }
+  function decisionRecoveryKey(sessionId) {
+    return pendingMessages(sessionId).at(-1)?.messageId ?? revisionOf(sessionId)?.messageId
+  }
   async function recoverDecision(sessionId) {
     if (decisionCurrent(sessionId) || decisionWrites.has(sessionId)) return false
     const entry = decisions.get(sessionId), source = sourceOf(sessionId), revision = revisionOf(sessionId)
     if (!pendingMessages(sessionId).length && entry?.messageResolution?.relation === 'question') return false
-    const key = pendingMessages(sessionId).at(-1)?.messageId ?? revision?.messageId
+    const key = decisionRecoveryKey(sessionId)
     if (!key) return false
     if (entry?.recoveryKey === key && entry.recoveryUsed >= 1) return false
     const previous = clone(entry ?? null)
     decisions.set(sessionId, { ...entry, sessionId, source: clone(source), revision: clone(revision), recoveryKey: key, recoveryUsed: 1 })
     try { await save() }
     catch (error) { if (previous) decisions.set(sessionId, previous); else decisions.delete(sessionId); throw error }
+    refreshCoordinationTools(service('agents')?.get(sessionId))
     return true
   }
   async function recordDecision(args, exec) {
@@ -1037,7 +1054,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (args.messageId && !message) throw new Error('消息编号不存在于本会话的真实用户消息，不能伪造关联' + messageHelp())
     const relation = args.relation ?? (!entry.source ? 'new' : !message ? 'update' : null)
     if (!['new', 'continue', 'update', 'question'].includes(relation)) throw new Error('请用 relation 明确 new/continue/update/question；程序不根据措辞猜需求归属')
-    if (['continue', 'update'].includes(relation) && !entry.source) throw new Error('尚无已确认需求，请先用 new 记录')
+    if (['continue', 'update'].includes(relation) && !entry.source) throw new Error(decisionGuidance(parent.id))
     const reason = typeof args.reason === 'string' ? args.reason.trim() : ''
     const plan = plans.get(parent.id)
     const continuationRepair = relation === 'continue' && interruptedPlan(plan) && args.mode === 'delegate' && reason.length > 0
@@ -2369,7 +2386,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     await save(); return { status: 'cancelled', completion: plan.completion ?? null }
   })
   return {
-    ready, snapshot, observe, allowsVerification, decisionFor, decisionCurrent, recoverDecision, sourceOf, revisionOf,
+    ready, snapshot, observe, allowsVerification, decisionFor, decisionCurrent, decisionGuidance, recoverDecision, sourceOf, revisionOf,
     refreshCoordinationTools, guardCoordination, coordinatorWriteBlock, recordCoordinationFailure, modelRoutingState,
     isToolHiddenByPolicy(sessionId, name) {
       return ['delegation_verify', 'delegation_review'].includes(name) && Boolean(coordinationRestrictions.get(sessionId)?.names.includes(name))

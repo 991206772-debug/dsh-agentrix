@@ -483,6 +483,7 @@ export function apply(ctx) {
     execution.activity = { kind: 'tool', tool: exec.name, target, at: now }
   }
 
+  const missingDecisionCalls = new WeakSet()
   const disposeGuard = ctx.tools.guard((exec) => {
     const coordinationBlock = orchestration.guardCoordination(exec)
     if (coordinationBlock) {
@@ -524,8 +525,11 @@ export function apply(ctx) {
         const decision = orchestration.decisionFor(role.agentId)
         if (!orchestration.decisionCurrent(role.agentId) || decision.mode !== 'direct') {
           state.denied++; state.turnDenied++
-          const message = !orchestration.decisionCurrent(role.agentId)
-            ? '[DSH Agentrix] 本需求尚未记录判断或范围已更新。直接执行先 delegation_decide 记录 direct 和理由；新委派用 delegation_plan({relation,decisionReason,start:true,...}) 一次记录并派发。read/grep/glob、delegation_inspect/note 可先准备，随后自动继续，无需用户确认。'
+          const missing = !orchestration.decisionCurrent(role.agentId)
+          if (missing) missingDecisionCalls.add(exec)
+          const message = missing
+            ? `[DSH Agentrix] ${name} 未执行：请先用 delegation_decide 确认当前消息和执行方式；新委派也可用 delegation_plan({relation,decisionReason,start:true,...})。这是执行判断未补齐，不是目录或文件错误。` +
+              (orchestration.sourceOf(role.agentId) ? '已有需求时由主控判断消息关系。' : '尚无已确认需求，首次用 relation:"new"。')
             : '[DSH Agentrix] 主控已决定委派。新计划用 delegation_plan({decisionReason,start:true,...})；已有计划按 nextAction 继续。范围改变才更新方式和理由。'
           state.last = { tool: name, kind: 'decision', message, at: Date.now() }
           return message
@@ -540,6 +544,23 @@ export function apply(ctx) {
     state.last = { tool: name, kind: verdict.kind, at: Date.now() }
     return verdict.message
   })
+
+  const offDecisionRecovery = ctx.on('tools/post-execute', async (exec, result, next) => {
+    const decision = await next()
+    if (!missingDecisionCalls.delete(exec) || !result.isError || decision.kind !== 'accept' || !current.enabled || exec.signal?.aborted) return decision
+    try {
+      await ready
+      if (!current.enabled || exec.signal?.aborted || !await orchestration.recoverDecision(exec.agent.id) || exec.signal?.aborted) return decision
+    } catch (error) {
+      return { ...decision, content: [...(decision.content ?? result.content), { type: 'text',
+        text: '自动纠正记录未能保存，本次操作仍未执行：' + (error instanceof Error ? error.message : String(error)) }] }
+    }
+    return { ...decision, additionalContexts: [...(decision.additionalContexts ?? []), {
+      id: randomUUID(), role: 'user', source: { kind: 'delegation-decision-recovery' }, content: [{ type: 'text', text:
+        `[DSH Agentrix] 刚才的 ${exec.name} 未执行。下一步先补需求关联和执行判断，不能把策略拦截当作路径错误继续扩大搜索范围。\n` +
+        orchestration.decisionGuidance(exec.agent.id) }],
+    }] }
+  }, { global: true })
 
   const offResult = ctx.on('tools/result', (exec, result) => {
     orchestration.observe(exec, result)
@@ -594,7 +615,7 @@ export function apply(ctx) {
     const state = states.get(agent.id), execution = state?.execution
     if ((execution?.toolCalls > 0 || state?.last?.kind === 'decision') && typeof agent.inject === 'function' && await orchestration.recoverDecision(agent.id)) {
       agent.inject({ id: randomUUID(), role: 'user', source: { kind: 'delegation-decision-recovery' }, content: [{ type: 'text', text:
-        '有待确认的消息关联或尚未记录执行方式。新委派可用 delegation_plan({relation,decisionReason,start:true,...}) 一次记录并派发；直接执行或关联多条消息用 delegation_decide 明确 relation（new/continue/update/question）、实际方式和理由，继续或询问沿用。多条消息指定真实 messageId。随后自动继续，不新开分类代理，不要求用户点击继续。每条待关联消息只自动提醒一次。' }] })
+        orchestration.decisionGuidance(agent.id) }] })
       return
     }
     if (!execution?.unresolvedChanges.length || execution.repairUsed >= 1 || typeof agent.inject !== 'function') return
@@ -1196,6 +1217,7 @@ export function apply(ctx) {
       offAgentCreated,
       offAgentSectionDisposed,
       offResult,
+      offDecisionRecovery,
       offCoordinatorStream,
       offDirectStopping,
     ]) {

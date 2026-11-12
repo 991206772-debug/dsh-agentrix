@@ -18,6 +18,7 @@ after(async () => {
 
 export async function host() {
   const listeners = new Map(), routes = new Map(), definitions = new Map(), cleanups = []
+  const calls = new Map()
   let guard
   const injections = [], agent = { id: 'root', options: { provider: 'local', model: 'coordinator' }, inject: message => injections.push(message) }
   const sessions = { get: id => ({ header: id === 'worker' ? { origin: 'subagent', parentSession: 'root' } : { title: '便签保存内容丢失排查' } }) }
@@ -59,7 +60,17 @@ export async function host() {
       emit('session/event', { id: 'root' }, { type: 'agent/inbox/spliced', data: { inserted: [{ id: messageId, source: { kind: 'user' }, content: [{ type: 'text', text }] }] } })
       emit('session/event', { id: 'root' }, { type: 'turn/start', data: { turn } })
     },
-    call(name, id = 'call', who = agent, args = {}) { return guard({ name, callId: id, agent: who, arguments: args, signal: new AbortController().signal }) },
+    call(name, id = 'call', who = agent, args = {}, signal = new AbortController().signal) {
+      const exec = { name, callId: id, agent: who, arguments: args, signal }
+      calls.set(id, exec)
+      return guard(exec)
+    },
+    async post(id, message) {
+      const hooks = [...(listeners.get('tools/post-execute') ?? [])]
+      const result = { isError: true, error: { message }, content: [{ type: 'text', text: 'Error: ' + message }] }
+      const run = index => index < hooks.length ? hooks[index](calls.get(id), result, () => run(index + 1)) : { kind: 'accept' }
+      return run(0)
+    },
     stream(request, next) {
       const hooks = [...(listeners.get('llm/stream') ?? [])]
       const run = index => index < hooks.length ? hooks[index](request, () => run(index + 1)) : next()
@@ -284,6 +295,31 @@ test('model-confirmed relationships survive reload and only an explicit new requ
   } finally { await h.close() }
 })
 
+test('the first missing-decision denial immediately guides the same coordinator before another model request', async () => {
+  const h = await host(); await h.state()
+  try {
+    h.turn('将当前文档转为 PDF', 'pdf-request')
+    const denial = h.call('pwsh', 'convert')
+    const result = await h.post('convert', denial)
+    assert.equal(result.kind, 'accept')
+    assert.equal(result.additionalContexts?.length, 1, 'corrective context accompanies the failed tool, without waiting for turn-stopping')
+    assert.match(denial, /未执行/)
+    const message = result.additionalContexts[0]
+    assert.equal(message.source.kind, 'delegation-decision-recovery')
+    assert.match(message.content[0].text, /pdf-request/)
+    assert.match(message.content[0].text, /尚无已确认需求.*new/s)
+    assert.match(message.content[0].text, /目录|路径/)
+    assert.equal((await h.state()).decision, null, 'the plugin cannot fabricate a direct decision')
+    assert.equal(h.call('read', 'inspect'), undefined)
+    const repeated = h.call('pwsh', 'repeat')
+    assert.equal((await h.post('repeat', repeated)).additionalContexts, undefined, 'one reminder per pending message')
+    await h.stopping()
+    assert.equal(h.injections.length, 0, 'turn-stopping does not add a second reminder')
+    await h.decide('转换已确认的文档后检查 PDF 文件，主控可直接完成。')
+    assert.equal(h.call('pwsh', 'retry-convert'), undefined)
+  } finally { await h.close() }
+})
+
 test('a missing decision resumes the original coordinator once, with the limit surviving reload and cancellation', async () => {
   process.env.DSH_HOME = path.join(home, 'decision-recovery')
   let h = await host(); await h.state()
@@ -308,6 +344,45 @@ test('a missing decision resumes the original coordinator once, with the limit s
   } finally { await h.close() }
 })
 
+test('immediate decision correction respects cancellation and retains its reminder limit after reload', async () => {
+  let h = await host(); await h.state()
+  try {
+    h.turn('处理指定文档', 'original')
+    const abort = new AbortController(), denial = h.call('pwsh', 'cancelled', h.agent, {}, abort.signal)
+    abort.abort()
+    assert.equal((await h.post('cancelled', denial)).additionalContexts, undefined)
+    const retry = h.call('pwsh', 'active')
+    assert.equal((await h.post('active', retry)).additionalContexts.length, 1)
+    await h.close(); h = await host(); await h.state('root')
+    const afterReload = h.call('pwsh', 'after-reload')
+    assert.equal((await h.post('after-reload', afterReload)).additionalContexts, undefined)
+    await h.stopping()
+    assert.equal(h.injections.length, 0)
+    assert.equal((await h.state()).decision, null)
+  } finally { await h.close() }
+})
+
+test('decision correction lists every real pending message and never authorizes only the latest message', async () => {
+  const h = await host(); await h.state()
+  const decide = args => h.definitions.get('delegation_decide').execute(args, { agent: h.agent })
+  try {
+    h.turn('转换现有文档', 'document')
+    h.turn('先不要转换，改为只核对原文件', 'changed-scope')
+    const denied = h.call('pwsh', 'old-command'), correction = await h.post('old-command', denied)
+    const text = correction.additionalContexts[0].content[0].text
+    assert.match(text, /document/)
+    assert.match(text, /changed-scope/)
+    await assert.rejects(decide({ messageId: 'document', relation: 'continue' }), /尚无已确认需求.*new/s)
+    await decide({ messageId: 'document', relation: 'new', mode: 'direct', reason: '文件已定位，主控直接处理并验证。' })
+    assert.match(h.call('pwsh', 'still-pending'), /delegation_decide/)
+    await decide({ messageId: 'changed-scope', relation: 'update', mode: 'direct', reason: '按补充仅核对原文件，不执行转换。' })
+    const current = await h.state()
+    assert.equal(current.decisionCurrent, true)
+    assert.equal(current.decision.revisionId, 'changed-scope')
+    assert.equal(current.execution.toolCalls, 0, 'correcting a decision never replays the queued command')
+  } finally { await h.close() }
+})
+
 test('a pending or failed decision save never permits business execution, even without native delegation tools', async () => {
   const h = await host(); await h.state(); h.turn('修复指定文档的错字')
   const configuration = (await h.request('GET')).payload
@@ -319,6 +394,10 @@ test('a pending or failed decision save never permits business execution, even w
     h.ctx.tools.schemas = () => schemas().filter(tool => tool.name !== 'subagent')
     assert.match(h.call('edit'), /delegation_decide/)
     await mkdir(runsFile, { recursive: true })
+    const failedSaveDenial = h.call('pwsh', 'failed-save')
+    const failedRecovery = await h.post('failed-save', failedSaveDenial)
+    assert.equal(failedRecovery.additionalContexts, undefined)
+    assert.match(failedRecovery.content.at(-1).text, /未能保存.*仍未执行/)
     await assert.rejects(h.decide())
     assert.equal((await h.state()).decision, null)
     assert.match(h.call('edit'), /delegation_decide/)
