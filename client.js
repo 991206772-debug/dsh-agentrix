@@ -1374,7 +1374,7 @@ window.__ModuleLoader__.load({
         return t('status.' + task.status)
       }
       return h('section', { className: 'ddf-chat-notice ddf-chat-live', 'data-kind': 'progress', role: 'status' },
-        h('style', null, CHAT_NOTICE_STYLES),
+        h('style', null, CHAT_NOTICE_STYLES + ARTIFACT_STYLES),
         h('div', { className: 'ddf-chat-plan-heading', 'aria-label': t('live.title') },
           h('strong', null, fill(t('dock.taskCount'), { count: tasks.length })), h('span', null, fill(t('live.counts'), { running, waiting }))),
         h('p', { className: 'ddf-chat-plan-results' }, fill(t('live.results'), {
@@ -1401,6 +1401,8 @@ window.__ModuleLoader__.load({
               task.execution?.summary ? h('p', null, t('accordion.report') + '：' + task.execution.summary) : null,
               audit ? h(ChatTaskActivity, { t, task: audit, label: t('audit.title'), route: routeOf(audit) ?? task.dispatcherModel, action: current(task, audit) }) : null,
               audit?.execution?.summary ? h('p', null, t('accordion.auditReport') + '：' + audit.execution.summary) : null,
+              h(TaskArtifacts, { t, plan, task, surface: 'chat' }),
+              audit ? h(TaskArtifacts, { t, plan, task, role: 'reviewer', surface: 'chat' }) : null,
               h('p', { className: 'ddf-chat-live-meta' }, t('accordion.acceptance') + '：' + t(task.status === 'accepted' ? 'status.accepted'
                 : task.status === 'cancelled' ? 'view.acceptanceStopped' : 'view.acceptanceReview'), ' · ', checks.length
                 ? fill(t('accordion.verified'), { passed: checks.filter(check => check.result?.passed).length, total: checks.length }) : t('accordion.noChecks')),
@@ -2408,7 +2410,7 @@ window.__ModuleLoader__.load({
         ...pending.map(entry), h('details', null, h('summary', null, t('input.history')), ...plan.inputs.filter(input => !pending.includes(input)).map(entry)))
     }
 
-    function DashboardTaskCard({ t, task, plan, rootTask, onFix }) {
+    function DashboardTaskCard({ t, task, plan, rootTask, onFix, artifactActions }) {
       const status = task.status || 'queued'
       const route = task.modelRoute?.actual ?? task.modelRoute?.resolved ?? task.modelRoute?.requested ?? task.model
       const auditActivity = task.audit ? t('audit.title') + ' · ' + t('audit.' + task.audit.status) : ''
@@ -2464,6 +2466,8 @@ window.__ModuleLoader__.load({
         ...(task.issues ?? []).map(issue => h('p', { key: issue.id, className: 'ddf-board-task-line',
           'data-kind': issue.status === 'open' ? 'error' : undefined }, `${issue.id} · ${issue.finding} · ${(issue.evidence ?? []).join('、')}`)),
         task.issue?.code === 'MODEL_CONFIG_INVALID' ? h('button', { type: 'button', className: 'ddf-board-task-fix', onClick: () => onFix(task.issue.tier) }, t('plans.fixModel')) : null,
+        h(TaskArtifacts, { t, plan, task, artifactActions }),
+        task.audit ? h(TaskArtifacts, { t, plan, task, role: 'reviewer', artifactActions }) : null,
         h(TaskDetails, { t, task, compact: true }))
     }
 
@@ -2478,6 +2482,11 @@ window.__ModuleLoader__.load({
       'focus.tasks': '任务详情', 'focus.close': '收起任务详情', 'focus.context': '需求与主控判断', 'focus.member': '按成员筛选',
       'focus.latest': '回到最新活动', 'focus.details': '查看报告与验收依据', 'focus.passed': '验证通过', 'focus.failed': '验证失败',
       'focus.more': '查看更多（还有 {count} 条）',
+      'artifacts.title': '交付物与报告', 'artifacts.output': '计划交付文件', 'artifacts.workerReport': '执行报告', 'artifacts.reviewReport': '独立审查报告',
+      'artifacts.planned': '计划交付，尚未提交报告', 'artifacts.reported': '已提交报告，待验收', 'artifacts.accepted': '主控已验收',
+      'artifacts.stopped': '任务已停止，未验收', 'artifacts.empty': '尚未记录交付文件或报告路径',
+      'artifacts.locationUnknown': '未记录完整目录，保留原路径。', 'artifacts.note': '计划文件路径不表示文件已生成；交付结果以主控验收为准。',
+      'artifacts.copy': '复制路径', 'artifacts.copied': '已复制', 'artifacts.copyFailed': '复制失败，请选中路径手动复制。',
     })
     Object.assign(en, {
       'focus.title': 'Collaboration activity', 'focus.all': 'All', 'focus.coordinator': 'Coordinator', 'focus.user': 'Requester',
@@ -2490,6 +2499,11 @@ window.__ModuleLoader__.load({
       'focus.tasks': 'Task details', 'focus.close': 'Close task details', 'focus.context': 'Request and coordinator decision', 'focus.member': 'Filter by member',
       'focus.latest': 'Latest activity', 'focus.details': 'View report and acceptance evidence', 'focus.passed': 'Verification passed', 'focus.failed': 'Verification failed',
       'focus.more': 'Show more ({count} earlier records)',
+      'artifacts.title': 'Deliverables and reports', 'artifacts.output': 'Planned output file', 'artifacts.workerReport': 'Worker report', 'artifacts.reviewReport': 'Independent review report',
+      'artifacts.planned': 'Planned; no report submitted', 'artifacts.reported': 'Report submitted; awaiting acceptance', 'artifacts.accepted': 'Accepted by coordinator',
+      'artifacts.stopped': 'Stopped without acceptance', 'artifacts.empty': 'No output or report paths recorded yet',
+      'artifacts.locationUnknown': 'The full directory was not recorded; original path shown.', 'artifacts.note': 'A planned path does not confirm a file exists. Delivery is confirmed by coordinator acceptance.',
+      'artifacts.copy': 'Copy path', 'artifacts.copied': 'Copied', 'artifacts.copyFailed': 'Copy failed. Select the path and copy it manually.',
     })
 
     function collaborationRecords(t, plan, session) {
@@ -2545,13 +2559,54 @@ window.__ModuleLoader__.load({
 
     const FOCUS_PAGE_SIZE = 20
 
-    function CollaborationFeed({ t, plan, session, member, onMember, onOpenTask, history, onMore }) {
+    function artifactLocation(plan, file) {
+      const absolute = value => /^(?:[a-z]:[\\/]|[\\/]{2}|\/)/i.test(value || '')
+      if (absolute(file)) return { path: file }
+      if (!absolute(plan?.cwd)) return { path: file, relative: true }
+      const separator = plan.cwd.includes('\\') ? '\\' : '/'
+      return { path: plan.cwd.replace(/[\\/]+$/, '') + separator + file.replace(/[\\/]/g, separator) }
+    }
+
+    const ARTIFACT_STYLES = `
+.ddf-task-artifacts { min-width:0; margin:12px 0; color:var(--dsw-alias-label-primary,#1f2329); font-size:12px; line-height:1.6; }
+.ddf-artifacts-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 12px; }
+.ddf-artifacts-head strong { font-weight:500; }
+.ddf-artifacts-head span,.ddf-task-artifacts small { color:var(--dsw-alias-label-secondary,#646a73); font-size:11px; }
+.ddf-artifact-file { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:2px 10px; padding:7px 0; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-artifact-file>span,.ddf-artifact-file>small { grid-column:1/-1; }
+.ddf-artifact-file>span { color:var(--dsw-alias-label-secondary,#646a73); font-size:11px; }
+.ddf-artifact-path { min-width:0; overflow-wrap:anywhere; user-select:text; font-size:12px; }
+.ddf-artifact-file button { align-self:start; white-space:nowrap; }
+.ddf-focus-feed>.ddf-task-artifacts { margin:12px 22px; }
+@media(max-width:780px) { .ddf-focus-feed>.ddf-task-artifacts { margin:12px 16px; } }
+`
+
+    function TaskArtifacts({ t, plan, task, role = 'worker', surface = 'task', artifactActions }) {
+      const target = role === 'reviewer' ? task.audit : task
+      const entries = (role === 'reviewer' ? [] : [...new Set(task.outputs ?? [])]).map(file => ({ ...artifactLocation(plan, file), label: t('artifacts.output') }))
+      if (target?.execution?.reportPath) entries.push({ ...artifactLocation(null, target.execution.reportPath), label: t(role === 'reviewer' ? 'artifacts.reviewReport' : 'artifacts.workerReport') })
+      const state = task.status === 'accepted' ? 'accepted' : task.status === 'cancelled' ? 'stopped' : target?.execution || target?.report ? 'reported' : 'planned'
+      return h('section', { className: 'ddf-task-artifacts', 'data-task-artifacts': task.id, 'data-artifact-role': role, 'data-artifact-surface': surface },
+        h('div', { className: 'ddf-artifacts-head' }, h('strong', null, t('focus.' + role) + ' · ' + t('artifacts.title')), h('span', null, t('artifacts.' + state))),
+        ...entries.map((entry, index) => h('div', { key: index, className: 'ddf-artifact-file' }, h('span', null, entry.label),
+          h('code', { className: 'ddf-artifact-path' }, entry.path),
+          artifactActions ? h('button', { type: 'button', className: 'ddf-focus-record-link', 'data-artifact-copy': entry.path,
+            'aria-label': t('artifacts.copy') + '：' + entry.path,
+            onClick: () => artifactActions.copy(entry.path) }, t(artifactActions.result?.path === entry.path && artifactActions.result.status === 'copied' ? 'artifacts.copied' : 'artifacts.copy')) : null,
+          entry.relative ? h('small', null, t('artifacts.locationUnknown')) : null,
+          artifactActions?.result?.path === entry.path && artifactActions.result.status === 'failed' ? h('small', { role: 'status' }, t('artifacts.copyFailed')) : null)),
+        !entries.length ? h('p', null, t('artifacts.empty')) : null,
+        state !== 'accepted' && entries.some(entry => entry.label === t('artifacts.output')) ? h('small', null, t('artifacts.note')) : null)
+    }
+
+    function CollaborationFeed({ t, plan, session, member, onMember, onOpenTask, history, onMore, artifactActions }) {
       const { members, records } = collaborationRecords(t, plan, session)
       const selected = members.some(item => item.id === member) ? member : 'all'
       const matching = selected === 'all' ? records : records.filter(record => record.member === selected)
       const range = history?.[selected], anchor = range ? matching.findIndex(record => record.id === range.firstId) : -1
       const remaining = anchor >= 0 ? anchor : Math.max(0, matching.length - (range?.count ?? FOCUS_PAGE_SIZE))
       const visible = matching.slice(remaining), nextStart = Math.max(0, remaining - FOCUS_PAGE_SIZE)
+      const selectedMember = members.find(item => item.id === selected), selectedTask = plan?.tasks?.find(task => task.id === selectedMember?.taskId)
       return h('section', { className: 'ddf-focus-feed', 'data-collaboration-feed': '', 'aria-label': t('focus.title') },
         h('nav', { className: 'ddf-focus-members', 'aria-label': t('focus.member') },
           ...[{ id: 'all', name: t('focus.all') }, ...members].map(item => h('button', {
@@ -2559,6 +2614,7 @@ window.__ModuleLoader__.load({
             title: [item.role, item.name, item.model].filter(Boolean).join(' · '), onClick: () => onMember(item.id),
           }, h('span', { className: 'ddf-focus-avatar', 'aria-hidden': 'true' }, item.id === 'all' ? '⋯' : item.id === 'coordinator' ? t('focus.coordinator').slice(0, 1) : item.taskId?.slice(0, 2)),
           h('span', null, item.taskId ? item.role + ' · ' + item.name : item.name)))),
+        selectedTask ? h(TaskArtifacts, { t, plan, task: selectedTask, role: selected.startsWith('reviewer:') ? 'reviewer' : 'worker', surface: 'member', artifactActions }) : null,
         h('div', { className: 'ddf-focus-messages', role: 'log', 'aria-label': t('focus.title'), 'aria-live': 'off' },
           remaining > 0 ? h('div', { className: 'ddf-focus-history' }, h('button', { type: 'button', className: 'ddf-board-action',
             'data-load-earlier': '', onClick: () => onMore(selected, matching[nextStart].id, matching.length - nextStart) }, fill(t('focus.more'), { count: remaining }))) : null,
@@ -2574,7 +2630,8 @@ window.__ModuleLoader__.load({
                   record.at !== null ? h('time', { dateTime: new Date(record.at).toISOString() }, new Date(record.at).toLocaleTimeString()) : null),
                 h('div', { className: 'ddf-focus-bubble' }, record.text),
                 h('small', { className: 'ddf-focus-source' }, t('focus.' + source), actor.modelState ? ' · ' + t(actor.modelState) : ''),
-                record.detail ? h('p', { className: 'ddf-focus-path' }, record.detail) : null,
+                ['report', 'auditReport'].includes(record.source) ? !selectedTask && task ? h(TaskArtifacts, { t, plan, task,
+                  role: record.source === 'auditReport' ? 'reviewer' : 'worker', surface: 'report', artifactActions }) : null : record.detail ? h('p', { className: 'ddf-focus-path' }, record.detail) : null,
                 record.taskId && ['report', 'auditReport', 'verification', 'review', 'issue'].includes(record.source) ? h('button', { type: 'button', className: 'ddf-focus-record-link', 'data-open-task': record.taskId,
                   onClick: () => onOpenTask(record.taskId) }, t('focus.details')) : null))
           }),
@@ -2665,7 +2722,7 @@ window.__ModuleLoader__.load({
 }
 `
 
-    function DashboardPage({ t, state, sessionId, plan, openView, enabledView, onFix, detailsOpen, onToggleDetails, notice, updatedAt, member, onMember, onOpenTask, selectedTask, feedRef, onFeedScroll, onLatest, showLatest, drawerButtonRef, history, onMore }) {
+    function DashboardPage({ t, state, sessionId, plan, openView, enabledView, onFix, detailsOpen, onToggleDetails, notice, updatedAt, member, onMember, onOpenTask, selectedTask, feedRef, onFeedScroll, onLatest, showLatest, drawerButtonRef, history, onMore, artifactActions }) {
       const tasks = plan?.tasks ?? [], status = dashboardStatusKey(plan)
       const statusLabel = plan?.completion ? completionLabel(t, plan.completion) : status === 'accepted' && plan.protocolVersion >= 2
         ? t('chat.receiptPending') : t({ failed: 'view.boardFailed', accepted: 'view.boardDone', review: 'view.boardReview' }[status] || 'status.' + status)
@@ -2688,7 +2745,7 @@ window.__ModuleLoader__.load({
           title: enabled ? undefined : t('view.unavailable'), onClick: enabled ? () => openView(id) : undefined }, t('view.' + id))
       })
       return h('div', { className: 'ddf-board-root', 'data-ddf-acceptance': '', 'data-conversation-composer-overlay': '' },
-        h('style', null, DASHBOARD_STYLES + FOCUS_BOARD_STYLES),
+        h('style', null, DASHBOARD_STYLES + FOCUS_BOARD_STYLES + ARTIFACT_STYLES),
         h('main', { className: 'ddf-board ddf-focus-board', 'data-status': status, ref: feedRef, onScroll: onFeedScroll },
           h('header', { className: 'ddf-board-header' },
             h('div', null, h('h1', { className: 'ddf-board-title' }, sessionTitle || t('focus.title')),
@@ -2738,7 +2795,7 @@ window.__ModuleLoader__.load({
               plan.autoDispatch === false && blockers.length && status !== 'cancelled' ? h('p', null, t('plans.autoPaused')) : null,
               modelBlock && status !== 'cancelled' ? h('button', { type: 'button', className: 'ddf-board-action', onClick: () => onFix(modelBlock.issue.tier) }, t('plans.fixModel')) : null) : null),
           h('div', { className: 'ddf-focus-workspace', 'data-drawer-open': detailsOpen },
-            h(CollaborationFeed, { t, plan, session, member, onMember, onOpenTask, history, onMore }),
+            h(CollaborationFeed, { t, plan, session, member, onMember, onOpenTask, history, onMore, artifactActions }),
             h('aside', { id: 'ddf-focus-task-drawer', className: 'ddf-focus-drawer', 'data-task-drawer': '', 'data-selected-task': selectedTask,
               hidden: !detailsOpen, 'aria-label': t('focus.tasks') },
               h('div', { className: 'ddf-focus-drawer-head' }, h('h2', null, t('focus.tasks'))),
@@ -2746,7 +2803,7 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'ddf-board-section-head' }, h('h2', { className: 'ddf-board-section-title' }, t('view.boardTasks')), h('span', { className: 'ddf-board-section-note' }, fill(t('view.boardTaskCount'), { count: tasks.length }))),
                 h('div', { className: 'ddf-board-task-list' }, ...orderedTasks.map((task, index) => h('details', { key: task.id, className: 'ddf-focus-task', open: detailsOpen && (selectedTask ? selectedTask === task.id : index === 0) },
                   h('summary', null, h('strong', null, task.title || task.id), h('span', null, t(task.status === 'queued' && (task.dependsOn ?? []).some(id => tasks.some(other => other.id === id && other.status !== 'accepted')) ? 'accordion.dependency' : 'status.' + task.status))),
-                  h(DashboardTaskCard, { t, task, plan, rootTask, onFix }))))) : h('p', null, t('view.boardNoPlan')),
+                  h(DashboardTaskCard, { t, task, plan, rootTask, onFix, artifactActions }))))) : h('p', null, t('view.boardNoPlan')),
               h('p', { className: 'ddf-focus-record-note' }, t('view.boardReturned') + ' ' + returned + '/' + tasks.length,
                 plan?.activationBudget ? ' · ' + t('view.boardAttempts') + ' ' + plan.activationBudget.used + '/' + plan.activationBudget.limit : ''))),
           state?.legacyHost ? h('p', { className: 'ddf-board-inline-notice', role: 'status' }, t('view.legacyHost')) : null))
@@ -2758,6 +2815,7 @@ window.__ModuleLoader__.load({
       const [detailsOpen, setDetailsOpen] = useState(false)
       const [focus, setFocus] = useState({ key: '', member: 'all', taskId: null })
       const [showLatest, setShowLatest] = useState(false)
+      const [artifactCopy, setArtifactCopy] = useState(null)
       const feedRef = useRef(null)
       const drawerButtonRef = useRef(null)
       const following = useRef({ key: '', member: 'all', active: true })
@@ -2825,6 +2883,13 @@ window.__ModuleLoader__.load({
             h('details', null, h('summary', null, t('view.loadDetails')), h('pre', null, result.error)))
         : !sessionId || !state ? h('p', { className: 'ddf-board-inline-notice', role: 'status' }, t(!sessionId ? 'view.noSession' : 'view.loading')) : null
       return h(DashboardPage, { t, state, sessionId, plan, openView, enabledView, onFix, notice, updatedAt: result.updatedAt,
+        artifactActions: { result: artifactCopy?.key === focusKey ? artifactCopy : null, copy: async path => {
+          try {
+            if (typeof window.navigator?.clipboard?.writeText !== 'function') throw new Error('Clipboard unavailable')
+            await window.navigator.clipboard.writeText(path)
+            setArtifactCopy({ key: focusKey, path, status: 'copied' })
+          } catch { setArtifactCopy({ key: focusKey, path, status: 'failed' }) }
+        } },
         member: selection.member, feedRef, drawerButtonRef, showLatest, history: selection.history,
         onMore: (member, firstId, count) => {
           const page = feedRef.current, anchor = page?.querySelector?.('[data-feed-entry]')

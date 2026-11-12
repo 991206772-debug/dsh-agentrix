@@ -5,6 +5,111 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('focused worker artifacts expose full output and report locations without opening technical details', async () => {
+  const task = { id: 'a', title: '核对接口', status: 'review', outputs: ['reports/result.md', 'E:\\shared\\schema.json'],
+    execution: { status: 'DONE', summary: '核对已返回', reportPath: 'C:\\archive\\reports\\a\\worker-1.md' },
+    audit: { status: 'completed', execution: { summary: '审查已返回', reportPath: 'C:\\archive\\reports\\a\\review-1-1.md' } } }
+  const plan = { sessionId: 'session-current', cwd: 'D:\\workspace\\project', status: 'review', tasks: [task] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: plan.sessionId, plans: [plan], sessions: [] }) }) })
+  const view = f.mountView(plan.sessionId)
+  const text = node => !node ? '' : typeof node !== 'object' ? String(node) : typeof node.type === 'function' ? text(node.type(node.props))
+    : node.children.flat(Infinity).map(text).join(' ')
+  try {
+    await view.flush()
+    view.nodes('button').find(node => node.props?.['data-member-filter'] === 'worker:a').props.onClick(); await view.flush()
+    const artifacts = view.nodes('section').find(node => node.props?.['data-task-artifacts'] === 'a' && node.props['data-artifact-surface'] === 'member')
+    assert.ok(artifacts, 'selecting a worker exposes its outputs outside technical disclosures')
+    assert.match(text(artifacts), /D:\\workspace\\project\\reports\\result\.md/)
+    assert.match(text(artifacts), /E:\\shared\\schema\.json/)
+    assert.match(text(artifacts), /C:\\archive\\reports\\a\\worker-1\.md/)
+    assert.match(text(artifacts), /已提交报告.*待验收/)
+    assert.doesNotMatch(text(artifacts), /review-1-1\.md|已验收/)
+  } finally { view.close(); f.close() }
+})
+
+test('task artifacts are visible beside submitted reports and keep reviewer files separate', async () => {
+  const task = { id: 'a', title: '整理核查结果', status: 'accepted', outputs: ['reports/result.md'],
+    execution: { status: 'DONE', summary: '执行结果已提交', at: 100, reportPath: '/archive/a/worker-1.md' },
+    audit: { status: 'completed', execution: { summary: '独立审查已提交', at: 110, reportPath: '/archive/a/review-1-1.md' } } }
+  const plan = { sessionId: 'session-current', cwd: '/workspace/project', status: 'accepted', tasks: [task] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: plan.sessionId, plans: [plan], sessions: [] }) }) })
+  const view = f.mountView(plan.sessionId)
+  const text = node => !node ? '' : typeof node !== 'object' ? String(node) : typeof node.type === 'function' ? text(node.type(node.props))
+    : node.children.flat(Infinity).map(text).join(' ')
+  const artifacts = surface => view.nodes('section').filter(node => node.props?.['data-task-artifacts'] === 'a' && node.props['data-artifact-surface'] === surface)
+  try {
+    await view.flush()
+    assert.equal(artifacts('report').length, 2, 'worker and review reports expose their file locations inline')
+    assert.ok(artifacts('task').some(node => node.props['data-artifact-role'] === 'worker'), 'the task detail lists outputs before technical diagnostics')
+    view.nodes('button').find(node => node.props?.['data-member-filter'] === 'reviewer:a').props.onClick(); await view.flush()
+    const review = artifacts('member')[0]
+    assert.match(text(review), /独立审查报告.*\/archive\/a\/review-1-1\.md/)
+    assert.match(text(review), /主控已验收/)
+    assert.doesNotMatch(text(review), /reports\/result\.md|worker-1\.md/)
+  } finally { view.close(); f.close() }
+})
+
+test('task artifact locations can be copied and missing directories never become invented absolute paths', async () => {
+  const copied = [], task = { id: 'a', title: '交付核查文件', status: 'running', outputs: ['reports/result.md'] }
+  const plan = { sessionId: 'session-current', cwd: '/workspace/project', status: 'running', tasks: [task] }
+  const f = await sidebarFixture(undefined, { clipboard: async path => { copied.push(path) }, fetchState: async () => ({ ok: true,
+    json: async () => ({ ok: true, sessionId: plan.sessionId, plans: [structuredClone(plan)], sessions: [] }) }) })
+  const view = f.mountView(plan.sessionId)
+  try {
+    await view.flush()
+    view.nodes('button').find(node => node.props?.['data-member-filter'] === 'worker:a').props.onClick(); await view.flush()
+    const copy = view.nodes('button').find(node => node.props?.['data-artifact-copy'] === '/workspace/project/reports/result.md')
+    assert.ok(copy)
+    await copy.props.onClick(); await view.flush()
+    assert.deepEqual(copied, ['/workspace/project/reports/result.md'])
+    assert.match(view.text(), /已复制/)
+    assert.match(view.text(), /计划交付，尚未提交报告/)
+    delete plan.cwd
+    await view.tick()
+    assert.ok(view.nodes('button').some(node => node.props?.['data-artifact-copy'] === 'reports/result.md'))
+    assert.match(view.text(), /未记录完整目录，保留原路径/)
+  } finally { view.close(); f.close() }
+})
+
+test('chat child-task accordions expose worker and reviewer file locations without opening the acceptance page', async () => {
+  const plan = { sessionId: 'session-current', cwd: 'D:/workspace/project', status: 'running', tasks: [{ id: 'a', title: '核查文件', status: 'review',
+    outputs: ['reports/result.md'], execution: { summary: '报告已提交', reportPath: 'C:/archive/a/worker-1.md' },
+    audit: { status: 'completed', execution: { summary: '复核已返回', reportPath: 'C:/archive/a/review-1-1.md' } } }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: plan.sessionId, plans: [plan], sessions: [] }) }) })
+  const dock = f.mountDock(plan.sessionId)
+  try {
+    await dock.flush()
+    const artifacts = dock.nodes('section').filter(node => node.props?.['data-artifact-surface'] === 'chat')
+    assert.equal(artifacts.length, 2)
+    assert.match(dock.text(), /D:\/workspace\/project\/reports\/result\.md/)
+    assert.match(dock.text(), /C:\/archive\/a\/worker-1\.md/)
+    assert.match(dock.text(), /C:\/archive\/a\/review-1-1\.md/)
+    assert.doesNotMatch(dock.text(), /主控已验收/)
+  } finally { dock.close(); f.close() }
+})
+
+test('artifact copy failures remain readable and stopped tasks never imply accepted deliverables', async () => {
+  const task = { id: 'a', title: '已停止任务', status: 'cancelled', outputs: ['result.md'], audit: { status: 'cancelled' } }
+  const plan = { sessionId: 'session-current', status: 'cancelled', tasks: [task] }
+  const f = await sidebarFixture(undefined, { clipboard: async () => { throw new Error('Clipboard permission denied') },
+    fetchState: async () => ({ ok: true, json: async () => ({ ok: true, sessionId: plan.sessionId, plans: [plan], sessions: [] }) }) })
+  const view = f.mountView(plan.sessionId)
+  try {
+    await view.flush()
+    view.nodes('button').find(node => node.props?.['data-member-filter'] === 'worker:a').props.onClick(); await view.flush()
+    await view.nodes('button').find(node => node.props?.['data-artifact-copy'] === 'result.md').props.onClick(); await view.flush()
+    assert.match(view.text(), /复制失败，请选中路径手动复制/)
+    assert.match(view.text(), /任务已停止，未验收/)
+    assert.doesNotMatch(view.text(), /主控已验收/)
+    view.nodes('button').find(node => node.props?.['data-member-filter'] === 'reviewer:a').props.onClick(); await view.flush()
+    assert.match(view.text(), /尚未记录交付文件或报告路径/)
+    assert.equal(view.nodes('section').find(node => node.props?.['data-artifact-surface'] === 'member').props['data-artifact-role'], 'reviewer')
+  } finally { view.close(); f.close() }
+})
+
 test('focused feed initially shows the latest twenty records and reveals earlier records twenty at a time', async () => {
   const plan = { sessionId: 'session-current', protocolVersion: 2, source: { messageId: 'history-request', text: '核对所有验证结果' }, status: 'review',
     tasks: [{ id: 'a', title: '核对报告', status: 'review', checks: Array.from({ length: 54 }, (_, index) => ({ tool: 'read',
@@ -1070,6 +1175,7 @@ async function sidebarFixture(initialCatalog = { status: 'ready', value: { group
     },
   }
   const window = {
+    navigator: options.clipboard ? { clipboard: { writeText: options.clipboard } } : {},
     __ModuleLoader__: { load: ({ factory }) => factory(() => React).apply(ctx) },
     setInterval(fn) { const id = ++sequence; timers.set(id, fn); return id },
     clearInterval(id) { timers.delete(id) },
