@@ -12,7 +12,8 @@ const nextRequest = process.argv.includes('--next-request')
 const directProgress = process.argv.includes('--direct-progress')
 const coordinationConflict = process.argv.includes('--coordination-conflict')
 const mixedRefusal = process.argv.includes('--mixed-refusal')
-const accordion = process.argv.includes('--accordion')
+const focusBoard = process.argv.includes('--focus-board')
+const accordion = process.argv.includes('--accordion') || focusBoard
 const waitingDependencies = process.argv.includes('--waiting-dependencies')
 const liveProgress = process.argv.includes('--live-progress') || directProgress || coordinationConflict || mixedRefusal || accordion || waitingDependencies
 let config = { ok: true, modelRouting: 'roles', reviewerModelPolicy: 'dispatcher-snapshot', mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS, locked: false,
@@ -101,6 +102,20 @@ if (accordion) {
     { ...baseTask, id: 'publication', title: '确认发布意见', status: 'review',
       execution: { status: 'DONE', summary: '发布意见已返回，读取检查已有结果，尚未由主控逐条验收。' } }],
   })
+  if (focusBoard) {
+    plans[0].sessionTitle = '博客文章三维度评审 · 演示'
+    plans[0].createdAt = now - 200000
+    plans[0].decision.at = now - 195000
+    plans[0].tasks[0].supervision = { ...running, evidence: [
+      { callId: 'demo-read-1', tool: 'read', at: now - 90000, failed: false },
+      { callId: 'demo-grep-1', tool: 'grep', at: now - 45000, failed: false },
+    ], checkpoint: { at: now - 30000, phase: 'investigating', summary: '已核对功能说明，正在逐项检查文章表述。', nextStep: '完成剩余事实核查' } }
+    plans[0].tasks[1].execution.at = now - 25000
+    plans[0].tasks[1].audit.supervision.startedAt = now - 20000
+    plans[0].tasks[2].finishedAt = now - 12000
+    plans[0].tasks[3].execution.at = now - 16000
+    plans[0].tasks[3].checks[0].result.at = now - 10000
+  }
 }
 if (coordinationConflict) {
   plans[0].goal = '生成独立接口调试页面'
@@ -187,7 +202,7 @@ window.__ModuleLoader__ = {load({factory}) {
   const root = ReactDOM.createRoot(document.getElementById('root'));
   const navRoot = ReactDOM.createRoot(document.getElementById('sidebar'));
   const overlayRoot = ReactDOM.createRoot(document.getElementById('overlay'));
-  const entries = new Map(); let dictionaries, selected='session-demo-login', panel=${process.argv.includes('--config') ? "'dsh-delegation-first'" : 'null'}, activeView='${liveProgress ? 'chat' : 'delegation-acceptance'}', pending='';
+  const entries = new Map(); let dictionaries, selected='session-demo-login', panel=${process.argv.includes('--config') ? "'dsh-delegation-first'" : 'null'}, activeView='${liveProgress && !focusBoard ? 'chat' : 'delegation-acceptance'}', pending='';
   const drafts = new Map();
   const state = {status:'ready', value:${JSON.stringify(catalog)}, error:null};
   const listeners = new Set();
