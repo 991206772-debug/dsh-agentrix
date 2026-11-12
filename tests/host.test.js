@@ -644,6 +644,10 @@ test('history and archive routes expose saved tasks, Markdown downloads, and rea
     assert.match(missing.body.error, /不存在|移动/)
     assert.equal((await request('/dsh-delegation-first/api/history', 'POST')).status, 405)
     assert.equal((await request('/dsh-delegation-first/api/archive', 'POST')).status, 405)
+    assert.equal((await request('/dsh-delegation-first/api/delivery?sessionId=root&seq=3')).body.delivery, null)
+    assert.equal((await request('/dsh-delegation-first/api/delivery?sessionId=root&seq=-1')).status, 400)
+    assert.equal((await request('/dsh-delegation-first/api/delivery?seq=3')).status, 400)
+    assert.equal((await request('/dsh-delegation-first/api/delivery', 'POST')).status, 405)
   } finally { await h.close() }
 })
 test('plans retain the original human request across approval turns and state is scoped to the requested session', async () => {

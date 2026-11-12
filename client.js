@@ -510,6 +510,9 @@ window.__ModuleLoader__.load({
       'cfg.oldModelRouting': '运行中的插件尚未载入按角色分配模型，新配置暂不可保存。请等待插件自然重载；当前仍按旧规则执行。',
       'completion.blocked': '尚未完成，已阻塞', 'completion.partial': '部分完成，其余尚未验收', 'completion.partialStopped': '部分完成，其余已停止',
       'completion.accepted': '已验收 {done}/{total}', 'completion.id': '回执编号', 'completion.deliverables': '已验收交付物',
+      'delivery.title': '交付结果', 'delivery.pending': '任务已验收，正在发送结果', 'delivery.failed': '交付消息发送失败，验收结果已保留',
+      'delivery.failedHint': '可继续本会话补发结果，无需重新执行子任务。', 'delivery.preview': '这里展示正文预览；完整内容请打开文件。',
+      'delivery.readFailed': '正文暂未能读取，请打开交付文件核对：',
       'completion.evidence': '验证证据', 'completion.remaining': '未完成项', 'completion.reason': '原因',
       'completion.next': '最终交付结论与未完成项以程序回执为准。', 'completion.blockedNext': '处理失败原因后，让主 Agent 明确重试；当前回执不会自动继续。',
       'completion.blockedAttempts': '该任务已达到每任务执行次数上限（{limit} 次）。请在 DSH Agentrix 提高“每任务最多执行”后，再让主 Agent 明确重试；也可以新建计划。',
@@ -533,6 +536,9 @@ window.__ModuleLoader__.load({
       'cfg.oldModelRouting': 'The running plugin still uses legacy model routing. Saving is disabled until the plugin reloads naturally.',
       'completion.blocked': 'Incomplete, blocked', 'completion.partial': 'Partially completed, remaining work not accepted', 'completion.partialStopped': 'Partially completed, remaining work stopped',
       'completion.accepted': '{done}/{total} accepted', 'completion.id': 'Receipt ID', 'completion.deliverables': 'Accepted deliverables',
+      'delivery.title': 'Delivered result', 'delivery.pending': 'Accepted, sending the result', 'delivery.failed': 'Result delivery failed; acceptance is preserved',
+      'delivery.failedHint': 'Continue this conversation to resend the result without rerunning subtasks.', 'delivery.preview': 'This is an inline preview. Open the file for the complete content.',
+      'delivery.readFailed': 'Inline content could not be read. Check the deliverable file: ',
       'completion.evidence': 'Verification evidence', 'completion.remaining': 'Unfinished work', 'completion.reason': 'Reason',
       'completion.next': 'The program receipt records the final delivery outcome and unfinished work.', 'completion.blockedNext': 'Resolve the cause, then ask the coordinator to retry explicitly; this receipt will not continue automatically.',
       'completion.blockedAttempts': 'This task reached the per-task attempt limit ({limit}). Increase Maximum attempts in DSH Agentrix, then ask the coordinator to retry explicitly, or create a new plan.',
@@ -1406,9 +1412,51 @@ window.__ModuleLoader__.load({
           onClick: () => openView(VIEW_ID) }, t('view.details')) : null)
     }
 
-    function ChatIssueNotice({ t, sessionId, seq, useChat, openView, progress }) {
+    const deliveryMessages = new Map()
+    function DeliveryMessage({ t, delivery, openFile }) {
+      const failed = delivery.status === 'failed'
+      return h('section', { className: 'ddf-delivery', 'data-delivery-receipt': delivery.receiptId },
+        h('style', null, '.ddf-delivery{margin:18px 0;color:var(--dsw-alias-label-primary,#1f2329);font:inherit;line-height:1.8;overflow-wrap:anywhere}.ddf-delivery>p{margin:10px 0}.ddf-delivery-files{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}.ddf-delivery-files button{border:1px solid var(--dsw-alias-border-l1,#d0d3d8);border-radius:6px;padding:7px 12px;background:transparent;color:inherit;font:inherit;cursor:pointer}.ddf-delivery-document{margin-top:22px;padding-top:14px;border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb)}.ddf-delivery-document p{white-space:pre-wrap;margin:12px 0}.ddf-delivery-document h2,.ddf-delivery-document h3{margin:20px 0 10px;line-height:1.5}.ddf-delivery-error{color:var(--dsw-alias-state-danger-primary,#d14343)}'),
+        h('div', { role: failed ? 'alert' : 'status' }, h('strong', null, t(delivery.status === 'pending' ? 'delivery.pending' : failed ? 'delivery.failed' : 'delivery.title')),
+          ' · ', fill(t('completion.accepted'), { done: delivery.accepted, total: delivery.total })),
+        h('p', null, delivery.summary),
+        failed ? h('p', { className: 'ddf-delivery-error' }, delivery.error, '。', t('delivery.failedHint')) : null,
+        h('div', { className: 'ddf-delivery-files' }, ...(delivery.files ?? []).map(file => typeof openFile === 'function'
+          ? h('button', { key: file.path, type: 'button', 'data-delivery-file': file.path, title: file.path, onClick: () => openFile(file.path) }, file.label)
+          : h('p', { key: file.path }, file.label, '：', h('code', null, file.path)))),
+        ...(delivery.documents ?? []).map(document => h('article', { key: document.path || document.label, className: 'ddf-delivery-document' },
+          document.error ? h('p', { className: 'ddf-delivery-error' }, t('delivery.readFailed'), document.label, '（', document.error, '）')
+            : (document.content || '').split(/\r?\n\s*\r?\n/).map((paragraph, index) => {
+              const heading = /^(#{1,6})\s+([^\r\n]+)$/.exec(paragraph)
+              return heading ? h('h' + Math.min(heading[1].length + 1, 6), { key: index }, heading[2]) : h('p', { key: index }, paragraph)
+            }),
+          document.truncated ? h('p', null, t('delivery.preview')) : null)),
+        ...(delivery.remaining ?? []).map(task => h('p', { key: task.taskId }, task.title, '：', task.reason)))
+    }
+    function ChatIssueNotice({ t, sessionId, seq, useChat, openView, openFile, progress }) {
       const latest = useLatestTail(useChat, seq)
       const result = useChatProgress(progress, sessionId, latest, seq)
+      const active = (result.data?.plans ?? []).find(plan => plan.sessionId === sessionId && plan.delivery?.anchorSeq === seq)?.delivery
+      const [saved, setSaved] = useState(null)
+      useEffect(() => {
+        if (!sessionId || !Number.isSafeInteger(seq) || active) return undefined
+        let alive = true
+        const key = sessionId + ':' + seq
+        const load = deliveryMessages.get(key) ?? fetch('/dsh-delegation-first/api/delivery?sessionId=' + encodeURIComponent(sessionId) + '&seq=' + seq)
+          .then(response => response.ok ? response.json() : null).then(body => body?.ok && body.delivery?.sessionId === sessionId && body.delivery.anchorSeq === seq ? body.delivery : null)
+          .catch(() => null)
+        if (!deliveryMessages.has(key)) {
+          if (deliveryMessages.size >= 32) deliveryMessages.delete(deliveryMessages.keys().next().value)
+          deliveryMessages.set(key, load)
+        }
+        load.then(delivery => {
+          if (delivery?.status !== 'delivered') deliveryMessages.delete(key)
+          if (alive) setSaved({ key, delivery })
+        })
+        return () => { alive = false }
+      }, [sessionId, seq, Boolean(active), active?.status])
+      const delivery = active ?? (saved?.key === sessionId + ':' + seq ? saved.delivery : null)
+      if (delivery) return h(DeliveryMessage, { t, delivery, openFile })
       if (!latest || !sessionId) return null
       const plan = currentPlanOf(result.data, sessionId)
       if (!plan) return null
@@ -3066,7 +3114,7 @@ window.__ModuleLoader__.load({
           inject: () => ({ t }),
         }, ownerProps => h(ChatIssueNotice, {
           t: ownerProps?.t ?? t, sessionId: ownerProps?.sessionId, seq: ownerProps?.seq,
-          useChat: ownerProps?.useChat, openView: ownerProps?.openView, progress,
+          useChat: ownerProps?.useChat, openView: ownerProps?.openView, openFile: ownerProps?.openFile, progress,
         })))
 
         // Put a compact, latest-reply-only progress summary beside the normal

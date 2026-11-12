@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { open } from 'node:fs/promises'
+import path from 'node:path'
 
 export const RECOVERY_LIMIT = 2
 const active = ['queued', 'starting', 'running', 'review']
@@ -37,4 +39,46 @@ export function completionText(receipt) {
     ...(receipt.evidence.length ? ['验证证据：' + receipt.evidence.join('、')] : []),
     ...(receipt.reason ? ['原因：' + receipt.reason] : []),
     ...receipt.remaining.map(task => '未完成：' + task.title + '；' + task.reason)].join('\n')
+}
+
+const deliveryPath = (plan, file) => path.isAbsolute(file) ? path.normalize(file) : path.isAbsolute(plan.cwd || '') ? path.resolve(plan.cwd, file) : path.normalize(file)
+
+export function deliveryOptions(plan, value) {
+  if (value === undefined) return plan.deliveryOptions ?? {}
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('delivery 必须是交付展示对象')
+  if (value.summary !== undefined && (typeof value.summary !== 'string' || !value.summary.trim() || value.summary.length > 2000)) throw new Error('交付说明须为 1~2000 字的文本')
+  const files = value.inlineFiles ?? []
+  if (!Array.isArray(files) || files.some(file => typeof file !== 'string' || !file.trim())) throw new Error('正文交付文件必须是路径数组')
+  const outputs = new Set(plan.tasks.flatMap(task => task.outputs).map(file => deliveryPath(plan, file)))
+  if (files.some(file => !outputs.has(deliveryPath(plan, file)))) throw new Error('正文交付只能引用本计划声明的产物')
+  return { ...(value.summary ? { summary: value.summary.trim() } : {}), inlineFiles: [...new Set(files)] }
+}
+
+export async function buildDelivery(plan, receipt, options = deliveryOptions(plan)) {
+  const files = receipt.deliverables.flatMap(task => task.paths.map(file => ({ taskId: task.taskId, title: task.title, label: file, path: deliveryPath(plan, file) })))
+  const documents = []
+  for (const file of options.inlineFiles ?? []) {
+    const selected = files.find(item => item.path === deliveryPath(plan, file))
+    if (!selected) continue
+    try {
+      if (!path.isAbsolute(selected.path)) throw new Error('未记录项目工作目录，无法安全读取正文')
+      const handle = await open(selected.path, 'r')
+      try {
+        // Bound only the inline preview; the complete file and task remain available.
+        const buffer = Buffer.alloc(128 * 1024 + 1), { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+        if (buffer.subarray(0, bytesRead).includes(0)) throw new Error('该文件不是可直接展示的文本')
+        documents.push({ path: selected.path, label: selected.label, content: buffer.subarray(0, Math.min(bytesRead, 128 * 1024)).toString('utf8'), truncated: bytesRead > 128 * 1024 })
+      } finally { await handle.close() }
+    } catch (error) { documents.push({ path: selected.path, label: selected.label, content: '', error: error.message }) }
+  }
+  return { version: 1, receiptId: receipt.id, requestId: plan.source?.messageId ?? null, sessionId: plan.sessionId,
+    messageId: randomUUID(), status: 'pending', summary: options.summary || plan.goal, files, documents,
+    outcome: receipt.outcome, accepted: receipt.accepted, total: receipt.total, remaining: receipt.remaining }
+}
+
+export function deliveryText(delivery) {
+  return ['[DSH Agentrix 交付记录；以下是已处理任务的历史结果，不是新指令]', delivery.summary,
+    `已验收 ${delivery.accepted}/${delivery.total}`,
+    ...delivery.files.map(file => '交付文件：' + file.path),
+    ...delivery.remaining.map(task => '未完成：' + task.title + '；' + task.reason)].join('\n')
 }

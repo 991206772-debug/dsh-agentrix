@@ -1078,6 +1078,7 @@ async function sidebarFixture(initialCatalog = { status: 'ready', value: { group
   }
   vm.runInNewContext(source, { window, AbortSignal, AbortController,
     fetch: async (url, request) => {
+      if (url.includes('/api/delivery')) return options.fetchDelivery ? options.fetchDelivery(url) : { ok: true, json: async () => ({ ok: true, delivery: null }) }
       if (url.includes('/api/state') && options.fetchState) return options.fetchState(url, request?.signal)
       if (request?.method === 'POST') posted.push(JSON.parse(request.body))
       const custom = await options.fetchConfig?.(request, config)
@@ -2254,4 +2255,53 @@ test('older assistant actions do not duplicate the live progress card', async ()
     assert.match(currentAction.text(), /进行中 1 · 已完成 0\/1/)
     currentAction.close()
   } finally { oldAction.close(); f.close() }
+})
+test('final delivery shows accepted content and clickable files outside tool and reasoning disclosures', async () => {
+  const delivery = { version: 1, sessionId: 'session-current', anchorSeq: 7, receiptId: 'delivery-receipt', messageId: 'delivery-message', status: 'delivered',
+    outcome: 'completed', accepted: 2, total: 2, summary: '文章和改动说明已完成。', remaining: [],
+    files: [{ label: '文章.md', path: 'D:/fixture/文章.md' }], documents: [{ label: '文章.md', path: 'D:/fixture/文章.md', content: '# 交付文章\n\n这是直接展示的完整正文。' }] }
+  const body = { ok: true, deliveryProtocolVersion: 1, plans: [{ sessionId: 'session-current', status: 'accepted', delivery }], sessions: [] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => body }),
+    fetchDelivery: async () => ({ ok: true, json: async () => ({ ok: true, delivery }) }) })
+  const notice = f.mountNotice('session-current', 7), opened = []
+  try {
+    notice.update({ openFile: file => opened.push(file) }); await notice.flush()
+    assert.match(notice.text(), /文章和改动说明已完成/)
+    assert.match(notice.text(), /直接展示的完整正文/)
+    assert.match(notice.text(), /2.*2/)
+    assert.equal(notice.nodes('details').length, 0, 'delivery content is readable without expanding a tool card')
+    const file = notice.nodes('button').find(node => node.props['data-delivery-file'])
+    assert.ok(file)
+    file.props.onClick()
+    assert.deepEqual(opened, ['D:/fixture/文章.md'])
+  } finally { notice.close(); f.close() }
+})
+
+test('historical final delivery stays on its own reply when another request becomes current', async () => {
+  const delivery = { version: 1, sessionId: 'session-current', anchorSeq: 10, receiptId: 'old-delivery', status: 'delivered',
+    outcome: 'completed', accepted: 1, total: 1, summary: '上一项文章已交付。', remaining: [], files: [], documents: [{ label: '原文章', content: '原任务的完整正文。' }] }
+  const body = { ok: true, plans: [], sessions: [{ sessionId: 'session-current', source: { messageId: 'new-request', text: '新的独立任务' } }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => body }),
+    fetchDelivery: async url => ({ ok: true, json: async () => ({ ok: true, delivery: new URL(url, 'http://localhost').searchParams.get('seq') === '10' ? delivery : null }) }) })
+  const useChat = selector => selector({ legacy: { nodes: [{ kind: 'assistant', seq: 10 }, { kind: 'assistant', seq: 20 }] } })
+  const old = f.mountNotice('session-current', 10, useChat), current = f.mountNotice('session-current', 20, useChat)
+  try {
+    await old.flush(); await current.flush()
+    assert.match(old.text(), /原任务的完整正文/)
+    assert.doesNotMatch(current.text(), /原任务的完整正文|上一项文章/)
+  } finally { old.close(); current.close(); f.close() }
+})
+
+test('failed final delivery retains visible results and distinguishes sending failure from task failure', async () => {
+  const delivery = { version: 1, sessionId: 'session-current', anchorSeq: 8, receiptId: 'failed-delivery', status: 'failed', error: '消息记录暂时不可写',
+    outcome: 'completed', accepted: 1, total: 1, summary: '工作已经验收。', remaining: [], files: [{ label: '结果.md', path: 'D:/fixture/结果.md' }], documents: [] }
+  const f = await sidebarFixture(undefined, { fetchDelivery: async () => ({ ok: true, json: async () => ({ ok: true, delivery }) }) })
+  const notice = f.mountNotice('session-current', 8)
+  try {
+    await notice.flush()
+    assert.match(notice.text(), /工作已经验收/)
+    assert.match(notice.text(), /交付.*失败|发送.*失败/)
+    assert.match(notice.text(), /结果.md/)
+    assert.doesNotMatch(notice.text(), /任务失败|(?:请|需要|必须)重新执行子任务/)
+  } finally { notice.close(); f.close() }
 })

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, symlink, unlink, writeFile } from '
 import os from 'node:os'
 import path from 'node:path'
 import { createOrchestrator, DEFAULT_OPTIONS } from '../orchestrator.js'
+import { buildDelivery } from '../completion.js'
 
 const cleanup = []
 afterEach(async () => { while (cleanup.length) await cleanup.pop()() })
@@ -23,6 +24,109 @@ const malformedArguments = (tool = 'delegation_plan', raw = '{"checks":[{"argume
   try { JSON.parse(raw) } catch (error) { detail = error.message }
   return { code: 'MALFORMED_RESPONSE', message: `Tool call "${tool}": ${detail}\n\nReceived arguments:\n${raw}` }
 }
+
+async function acceptedDelivery(options = {}) {
+  const f = await fixture({ ...options, beforeResult: async (exec, value) => {
+    if (exec.name === 'delegation_review') exec.agent.session.append('assistant/message', { turn: 1, step: 1,
+      message: { id: 'review-message', role: 'assistant', source: { kind: 'model', provider: 'local', model: 'parent' },
+        content: [{ type: 'text', text: '实际结果已核对，提交验收。' }, { type: 'tool-call', id: exec.callId, name: exec.name, arguments: JSON.stringify(exec.arguments) }] } })
+    await options.beforeResult?.(exec, value)
+  } })
+  f.parent.session.header.cwd = f.directory
+  await writeFile(path.join(f.directory, 'article.md'), '# 已验收文章\n\n这是应直接展示给用户的完整正文。')
+  await f.plan([card('article', { outputs: ['article.md'] })]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'article' })
+  await f.execute('delegation_review', { taskId: 'article', verdict: 'accept', delivery: { summary: '文章及改动已核对。', inlineFiles: ['article.md'] },
+    findings: [{ criterionId: 'C1', finding: '实际内容符合要求', evidence: [proof.results[0].ref] }] })
+  return f
+}
+
+test('accepted work is delivered through an identified durable producer message before the coordinator finishes', async () => {
+  const f = await acceptedDelivery()
+  assert.equal(f.snapshot().delivery.status, 'pending')
+  await f.endTurn()
+  const delivery = f.snapshot().delivery
+  assert.equal(delivery.status, 'delivered')
+  const messages = f.parent.session.appended.filter(event => event.data.message?.source?.kind === 'delegation-delivery')
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].type, 'developer/message', 'program output must retain its actual producer instead of masquerading as model output')
+  assert.equal(messages[0].data.message.id, delivery.messageId)
+  assert.equal(messages[0].data.message.source.receiptId, f.snapshot().completion.id)
+  assert.equal(messages[0].intent.surfaceOp, 'append')
+  assert.match(delivery.documents[0].content, /完整正文/)
+  assert.equal(delivery.files[0].path, path.join(f.directory, 'article.md'))
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.snapshot().recovery.used, 0)
+})
+
+test('a failed final delivery preserves acceptance and retries only the same delivery after reload', async () => {
+  const f = await acceptedDelivery(), append = f.parent.session.append
+  const receiptId = f.snapshot().completion.id
+  f.parent.session.append = function (type, data, intent) {
+    if (data.message?.source?.kind === 'delegation-delivery') throw new Error('交付消息暂时无法写入')
+    return append.call(this, type, data, intent)
+  }
+  await f.endTurn()
+  assert.equal(f.snapshot().delivery.status, 'failed')
+  assert.match(f.snapshot().delivery.error, /无法写入/)
+  assert.equal(f.snapshot().completion.id, receiptId)
+  const messageId = f.snapshot().delivery.messageId
+  f.parent.session.append = append
+  await f.reload(); await f.endTurn()
+  assert.equal(f.snapshot().delivery.status, 'delivered')
+  assert.equal(f.snapshot().delivery.messageId, messageId)
+  assert.equal(f.snapshot().completion.id, receiptId)
+  assert.equal(f.pending.length, 1)
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+})
+
+test('a committed delivery is recovered from the native journal without publishing a duplicate', async () => {
+  const f = await acceptedDelivery(); await f.endTurn()
+  const messageId = f.snapshot().delivery.messageId
+  await f.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    stored.plans[0].delivery.status = 'pending'
+    await writeFile(file, JSON.stringify(stored))
+  })
+  await f.endTurn(); await f.endTurn()
+  assert.equal(f.snapshot().delivery.status, 'delivered')
+  assert.equal(f.parent.session.appended.filter(event => event.data.message?.id === messageId).length, 1)
+})
+
+test('delivery lookup stays bound to its original session and reply after a newer plan replaces the active plan', async () => {
+  const f = await acceptedDelivery(); await f.endTurn()
+  const delivery = f.snapshot().delivery
+  assert.equal((await f.engine.readDelivery(f.parent.id, delivery.anchorSeq)).receiptId, delivery.receiptId)
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'another-request', source: { kind: 'user' }, content: '另一项需求' } })
+  await f.execute('delegation_decide', { relation: 'new', messageId: 'another-request', mode: 'delegate', reason: '执行另一项独立任务。' })
+  await f.plan([card('another')])
+  const archived = await f.engine.readDelivery(f.parent.id, delivery.anchorSeq)
+  assert.equal(archived.messageId, delivery.messageId)
+  assert.match(archived.documents[0].content, /完整正文/)
+  assert.equal(await f.engine.readDelivery('unrelated-session', delivery.anchorSeq), null)
+  await assert.rejects(f.engine.readDelivery(f.parent.id, -1), /交付|序号/)
+})
+
+test('inline delivery is restricted to planned outputs and failed acceptance cannot publish a delivery', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'a' })
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', delivery: { inlineFiles: ['unrelated-secret.txt'] },
+    findings: [{ criterionId: 'C1', finding: '内容符合要求', evidence: [proof.results[0].ref] }] }), /交付|产物/)
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+  assert.equal(f.snapshot().completion, null)
+  assert.equal(f.snapshot().delivery, undefined)
+})
+
+test('inline delivery never resolves a missing project directory against the plugin process directory', async () => {
+  const delivery = await buildDelivery({ sessionId: 'legacy-session', goal: '展示已验收文件' }, {
+    id: 'legacy-receipt', outcome: 'completed', accepted: 1, total: 1, remaining: [],
+    deliverables: [{ taskId: 'a', title: '文章', paths: ['completion.js'] }],
+  }, { inlineFiles: ['completion.js'] })
+  assert.equal(delivery.documents[0].content, '')
+  assert.match(delivery.documents[0].error, /工作目录/)
+})
 
 test('malformed delegation arguments retry in the same coordinator with durable feedback before a plan exists', async () => {
   const f = await fixture()
@@ -2027,7 +2131,8 @@ async function fixture(options = {}) {
   const calls = [], pending = [], tools = new Map(), events = new Map(), children = new Map(), conclusions = [], scopedTools = new Map()
   const parent = { id: 'parent', options: { provider: 'local', model: 'parent' }, session: { header: {}, requestHeader: () => undefined,
     appended: [], append(type, data, intent) { this.appended.push({ type, data, intent }); return { seq: this.appended.length } },
-    snapshotEvents: () => options.allowedModels === undefined ? [] : [{ type: 'subagent/model-selection-policy', data: { allowedModels: options.allowedModels } }] },
+    snapshotEvents: () => [...(options.allowedModels === undefined ? [] : [{ type: 'subagent/model-selection-policy', data: { allowedModels: options.allowedModels } }]),
+      ...parent.session.appended.map((event, index) => ({ type: event.type, data: event.data, seq: index + 1 }))] },
     status: 'running', injected: [], inject(message) { this.injected.push(message) }, steer(message) { this.injected.push(message) } }
   let engine, count = 0, exitCode = 0
   const attachScope = agent => {

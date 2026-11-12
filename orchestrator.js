@@ -2,7 +2,7 @@ import { lstat, mkdir, open, readFile, realpath, rename, stat, unlink, writeFile
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { createTaskRecords } from './task-records.js'
-import { buildCompletion, completionText, incompleteReason, RECOVERY_LIMIT } from './completion.js'
+import { buildCompletion, completionText, incompleteReason, RECOVERY_LIMIT, deliveryOptions, buildDelivery, deliveryText } from './completion.js'
 import { startSupervision, observeTool, observeUsage, observeRequest, SUPERVISION_POLICY } from './supervision.js'
 import { createUsageLedger } from './usage.js'
 
@@ -116,6 +116,7 @@ function compactResult(value) {
     activationBudget: value.plan.activationBudget, dispatchWait: value.plan.dispatchWait,
     interruption: value.plan.interruption,
     coordinatorIssue: value.plan.coordinatorIssue, coordinationIssue: value.plan.coordinationIssue, messageResolution: value.plan.messageResolution,
+    ...(value.plan.delivery ? { delivery: { status: value.plan.delivery.status, messageId: value.plan.delivery.messageId, error: value.plan.delivery.error } } : {}),
     inputs: (value.plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)).map(input => ({ id: input.id, text: brief(input.text, 400), status: input.status })),
     tasks: value.plan.tasks.map(compactTask) }
   if (value.task) result.task = compactTask(value.task)
@@ -390,6 +391,27 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   function runtimeMessage(plan, text, kind = 'delegation-recovery') {
     return { id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { kind, planId: plan.archive.id } }
   }
+  function deliveryAnchor(session, turn) {
+    return session.snapshotEvents?.().findLast(event => event.type === 'assistant/message' && event.data?.turn === turn &&
+      event.data.message?.content?.some(block => block.type === 'text' && block.text.trim()))?.seq ?? null
+  }
+  async function publishDelivery(plan, agent, signal) {
+    const delivery = plan.delivery
+    if (!delivery || delivery.receiptId !== plan.completion?.id || delivery.status === 'delivered' || signal?.aborted) return
+    try {
+      const existing = agent.session.snapshotEvents?.().find(event => event.type === 'developer/message' &&
+        event.data?.message?.id === delivery.messageId && event.data.message.source?.kind === 'delegation-delivery')
+      const event = existing ?? agent.session.append('developer/message', { message: { id: delivery.messageId, role: 'developer',
+        source: { kind: 'delegation-delivery', receiptId: delivery.receiptId, requestId: delivery.requestId, archiveId: plan.archive.id },
+        content: [{ type: 'text', text: deliveryText(delivery) }] } }, { surfaceOp: 'append' })
+      delivery.messageSeq = event.seq; delivery.status = 'delivered'; delivery.deliveredAt = Date.now(); delete delivery.error
+      remember(plan, 'plan.delivered', '已向聊天交付验收结果及文件入口', undefined, { receiptId: delivery.receiptId, messageId: delivery.messageId })
+    } catch (error) {
+      delivery.status = 'failed'; delivery.error = messageOf(error)
+      remember(plan, 'plan.delivery_failed', '任务验收已保留，交付消息写入失败：' + delivery.error)
+    }
+    await save()
+  }
   const queuedInputs = plan => [...(plan.inputs ?? []).filter(input => input.status === 'queued'), ...pendingMessages(plan.sessionId)]
   const unresolvedInputs = plan => [...(plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)), ...pendingMessages(plan.sessionId).map(message => ({ id: message.messageId, text: message.text, status: 'unclassified' }))]
   const interruptedPlan = plan => Boolean(plan && (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt || plan.cancelled && plan.cancelledBy === 'host' && !plan.cancellation))
@@ -660,6 +682,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       return
     }
     const plan = plans.get(agent.id)
+    if (plan?.delivery) await publishDelivery(plan, agent, signal)
     if (!plan || !(plan.protocolVersion >= 2) || !isCurrentPlan(plan) || plan.wakeSuppressed || plan.cancelled && plan.completion) { truncatedOutputs.delete(agent.id); return }
     if (pendingMessages(agent.id).length && await recoverDecision(agent.id)) {
       agent.inject(runtimeMessage(plan, '有尚未关联的真实用户消息。请先用 delegation_decide 的 relation 确认 new/continue/update/question；不要按前缀或字数归类，不新开分类代理，然后继续相应任务。', 'delegation-decision-recovery'))
@@ -1567,6 +1590,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       }
     }
     const parentPlan = plans.get(session?.id)
+    if (event?.type === 'turn/end' && Number.isSafeInteger(parentPlan?.delivery?.turn) && parentPlan.delivery.turn === event.data?.turn && !closed) {
+      parentPlan.delivery.anchorSeq = deliveryAnchor(session, event.data.turn) ?? event.seq
+      if (!pendingRecords.has(parentPlan.archive.id)) pendingRecords.set(parentPlan.archive.id, { plan: parentPlan, events: [] })
+      backgroundSave()
+    }
     if (event?.type === 'assistant/message') {
       const expected = expectedRoutes.get(session?.id)
       if (!closed && getConfig().enabled !== false && (expected || service('agents')?.get(session?.id))) {
@@ -1770,7 +1798,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     } finally { delete check.verifying }
   }
   async function review(args, exec) {
-    const { plan } = ownPlan(exec), task = taskOf(plan, args.taskId)
+    const { plan, parent } = ownPlan(exec), task = taskOf(plan, args.taskId)
+    const presentation = args.delivery === undefined ? null : deliveryOptions(plan, args.delivery)
     if (task.status !== 'review') throw new Error('只能评审已经返回结果的任务')
     args = { ...args, findings: reviewFindings(task, args.findings), issues: reviewFindings(task, args.issues),
       resolutions: Array.isArray(args.resolutions) ? args.resolutions.map(item => ({ ...item, evidence: reviewEvidence(task, item.evidence) })) : args.resolutions }
@@ -1846,6 +1875,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
               await save(); return
             }
             closeIssues(); task.review = acceptedReview; task.status = 'accepted'; delete task.pendingAcceptance
+            if (presentation) plan.deliveryOptions = presentation
             remember(plan, 'task.accepted', '主 Agent 已逐条验收通过', task, { findings: task.review.findings })
             if (planStatus(plan) === 'accepted') {
               remember(plan, 'plan.completed', '所有子任务已验收，计划完成')
@@ -1854,7 +1884,16 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
                 remember(plan, 'plan.receipt', completionText(completion), undefined, { completion })
               } else finishPlan(plan)
             }
-            try { await save() } catch (error) { task.status = 'review'; task.review = null; plan.completion = null; throw error }
+            if (plan.completion?.outcome === 'completed' && !plan.delivery) {
+              plan.delivery = await buildDelivery(plan, plan.completion)
+              const events = parent.session.snapshotEvents?.() ?? []
+              const anchor = events.findLast(event => event.type === 'assistant/message' &&
+                event.data?.message?.content?.some(block => block.type === 'tool-call' && block.id === exec.callId))
+                ?? events.findLast(event => event.type === 'assistant/message')
+              plan.delivery.turn = anchor?.data?.turn ?? null
+              plan.delivery.anchorSeq = deliveryAnchor(parent.session, plan.delivery.turn)
+            }
+            try { await save() } catch (error) { task.status = 'review'; task.review = null; plan.completion = null; delete plan.delivery; throw error }
             await pump()
           },
           async rollback() {
@@ -2284,9 +2323,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     await save(); const failure = await pump(); if (failure) throw failure
     return { audit: clone(task.audit) }
   })
-  routeTool('delegation_review', '主控逐条评审。findings 优先填写验证结果给出的 criterionId（C1、C2）、finding 和 evidence（直接复制 ref，不加前缀或说明）。accept 需要验证与独立审查通过；最后验收自动生成回执并结束。rework 须给具体问题及证据。', {
+  routeTool('delegation_review', '主控逐条评审。findings 填验证给出的 criterionId、finding 和 evidence ref。accept 需要验证与独立审查通过；最后验收生成回执，向聊天交付结果后结束。delivery.summary 填简短说明；用户要求直接看正文时，用 delivery.inlineFiles 指定本计划 outputs 中的文件，由程序展示已验收内容。rework 须给具体问题及证据。', {
     taskId: string, verdict: { type: 'string', enum: ['accept', 'rework'] }, feedback: string, concernsResolution: string, issueIds: array(string),
     inputIds: array(string), additionalCriteria: array(string),
+    delivery: object({ summary: { type: 'string', description: '面向用户的简短交付说明，最多 2000 字。' },
+      inlineFiles: array({ type: 'string', description: '用户要求直接阅读的正文文件，只能引用本计划 outputs。' }) }),
     issues: array({ ...object({ criterion: { type: 'integer', description: '旧格式，从 0 开始；优先使用 criterionId。' }, criterionId: { type: 'string', description: '验证结果提供的标准编号，例如 C1。' }, severity: { type: 'string', enum: ['critical', 'important', 'minor'] }, finding: string, evidence: array(string) }), required: ['severity', 'finding', 'evidence'] }),
     resolutions: array({ ...object({ id: string, status: { type: 'string', enum: ['ADDRESSED'] }, evidence: array(string) }), required: ['id', 'status', 'evidence'] }),
     findings: array({ ...object({ criterion: { type: 'integer', description: '旧格式，从 0 开始；优先使用 criterionId。' }, criterionId: { type: 'string', description: '直接复制 C1、C2 等标准编号，不能自行重新编号。' }, finding: { type: 'string', description: '主控根据实际验证给出的逐条结论；程序不会代填通过。' }, evidence: array({ type: 'string', description: '直接复制本任务本次 delegation_verify 返回的 ref，不添加前缀、文件说明或引号。' }) }), required: ['finding', 'evidence'] }),
@@ -2350,6 +2391,12 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (task.supervision) { task.supervision.lastActivityAt = Date.now(); task.supervision.activity = { kind: 'tool', tool: exec.name, at: Date.now() }; backgroundSave() }
     },
     async history(before) { await ready; if (writing) await writing; return records.history(before) },
+    async readDelivery(sessionId, seq) {
+      await ready; if (writing) await writing
+      const delivery = plans.get(sessionId)?.delivery
+      if (typeof sessionId === 'string' && Number.isSafeInteger(seq) && seq >= 0 && delivery?.anchorSeq === seq) return clone(delivery)
+      return records.readDelivery(sessionId, seq)
+    },
     async readArchive(id) {
       await ready
       const plan = [...plans.values()].find(plan => plan.archive?.id === id)

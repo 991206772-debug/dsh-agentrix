@@ -13,9 +13,10 @@ const directProgress = process.argv.includes('--direct-progress')
 const coordinationConflict = process.argv.includes('--coordination-conflict')
 const mixedRefusal = process.argv.includes('--mixed-refusal')
 const focusBoard = process.argv.includes('--focus-board')
+const finalDelivery = process.argv.includes('--final-delivery')
 const accordion = process.argv.includes('--accordion') || focusBoard
 const waitingDependencies = process.argv.includes('--waiting-dependencies')
-const liveProgress = process.argv.includes('--live-progress') || directProgress || coordinationConflict || mixedRefusal || accordion || waitingDependencies
+const liveProgress = process.argv.includes('--live-progress') || directProgress || coordinationConflict || mixedRefusal || accordion || waitingDependencies || finalDelivery
 let config = { ok: true, modelRouting: 'roles', reviewerModelPolicy: 'dispatcher-snapshot', mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS, locked: false,
   models: { worker: { provider: invalid ? 'retired-demo' : 'demo', model: 'routine-model' }, reviewer: null }, file: 'C:/isolated-test/delegation-first/default.json',
   defaults: { mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS }, ranges: { threshold: { min: 0, max: 20 }, ...OPTION_RANGES },
@@ -192,6 +193,14 @@ if (process.argv.includes('--audit')) {
   plans[0].activationBudget = { limit: 8, used: 3, remaining: 5 }
 }
 if (process.argv.includes('--legacy')) delete plans[0].source
+if (finalDelivery) {
+  Object.assign(plans[0], { status: 'accepted', tasks: [accepted], source: { messageId: 'demo-article-request', text: '写出文章正文，我看看' },
+    completion: { id: 'demo-delivery-receipt', outcome: 'completed', accepted: 1, total: 1, deliverables: [], evidence: [], remaining: [] },
+    delivery: { version: 1, sessionId: plans[0].sessionId, anchorSeq: 7, messageId: 'demo-delivery-message', receiptId: 'demo-delivery-receipt',
+      status: 'delivered', outcome: 'completed', accepted: 1, total: 1, remaining: [], summary: '文章正文和改动说明均已核对，以下可直接阅读。',
+      files: [{ label: '文章正文.md', path: 'D:/demo/文章正文.md' }, { label: '改动说明.md', path: 'D:/demo/改动说明.md' }],
+      documents: [{ label: '文章正文.md', path: 'D:/demo/文章正文.md', content: '# 让结果回到对话里\n\n一次任务的完成，应该从用户能读到结果开始。执行者写好文件、主控核对内容之后，聊天里会出现明确的结论和文件入口。\n\n## 先看结果，再看过程\n\n正文直接展开，不用点开思考或工具记录。想查看完整文件，点击上面的文章正文；想了解调整依据，打开改动说明。\n\n## 交付之后\n\n这些结果保留在对应回合里。开始新需求时，旧文章仍在原来的位置，不会混入新任务。' }] } })
+}
 if (process.argv.includes('--receipts')) {
   Object.assign(plans[0], { protocolVersion: 2, status: 'cancelled' })
   Object.assign(plans[0].tasks[1], { status: 'cancelled', stop: { reason: '用户取消剩余测试，交付物尚未验收', source: 'coordinator', at: Date.now() } })
@@ -216,6 +225,7 @@ window.__ModuleLoader__ = {load({factory}) {
     load:async()=>state.value, refresh(){for(const fn of listeners)fn();}};
   const openView = id => { activeView=id; renderView(); };
   function LiveChat() {
+    ${finalDelivery ? "const tail=entries.get('conversation.chat.turnTail'); return React.createElement('div',{className:'preview-other-view','data-fixture-view':'chat'}, React.createElement('p',null,'写出文章正文，我看看'), tail?React.createElement(tail.component,{sessionId:selected,seq:7,useChat:selector=>selector({legacy:{nodes:[{kind:\"assistant\",seq:7}]}}),openFile:path=>{window.__openedDeliveryFile=path;document.querySelector(\"[data-opened-delivery]\").textContent=\"已打开：\"+path}}):null,React.createElement('p',{'data-opened-delivery':''}));" : ''}
     return React.createElement('div',{className:'preview-other-view','data-fixture-view':'chat'},
       React.createElement('p',null,${JSON.stringify(mixedRefusal || accordion || waitingDependencies ? plans[0].source.text : '工作台保留两个接口，参数自动生成，固定参数改为配置项')}),
       React.createElement('p',null,${JSON.stringify(coordinationConflict ? '主控曾输出“已交付”，下方程序状态显示真实进度。' : '主控正在核对当前方案与执行结果。')}));
@@ -283,6 +293,9 @@ const server = http.createServer(async (request, response) => {
       const name = url.pathname.slice(1)
       response.end(await readFile(path.join(assetDirectory, name)).catch(() => readFile(path.join(assetDirectory, name.replace('.js', '.production.min.js'))))); return }
     response.setHeader('content-type', 'application/json; charset=utf-8')
+    if (url.pathname.endsWith('/api/delivery')) {
+      response.end(JSON.stringify({ ok: true, delivery: finalDelivery && url.searchParams.get('seq') === '7' ? plans[0].delivery : null })); return
+    }
     if (url.pathname.endsWith('/api/config')) {
       if (process.argv.includes('--config-read-error')) { response.statusCode = 503; response.end(JSON.stringify({ ok: false, error: '配置服务暂不可用（隔离测试）' })); return }
       if (request.method === 'POST') {

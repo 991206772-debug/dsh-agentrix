@@ -35,12 +35,12 @@ const MAX_BODY_BYTES = 64 * 1024
  */
 const DISCIPLINE = [
   "## Agentrix",
-  "先读文件，小任务直接验证；委派用 delegation_plan({decisionReason,start:true,...})。同类合批，独立才拆。",
-  "主控定方案、验收，不代做；worker执行，审查沿用分发者模型。查 delegation_models。按风险填 reviewPolicy/reviewReason，高风险独审。",
+  "先读文件，小任务直接验证；委派用delegation_plan({decisionReason,start:true,...})。同类合批，独立才拆。",
+  "主控规划验收，worker执行；审查沿用分发者模型。delegation_models查模型，按风险填reviewPolicy/reviewReason，高风险独审。",
   "delegation_verify({taskId}) 后 delegation_review 按 criterionId/ref 逐条验收。标准限用户要求及必要验证。重要问题才返工，minor记录；复查不扩围。",
   "先 delegation_decide 记 direct/理由及 relation(new/continue/update/question)。补充先答复；变更用 inputIds/additionalCriteria steer 原代理，纯答复 acknowledge。报进度；修改失败须修复并核对原产物。",
-  "错配/故障先处理，重复操作核对价值。有进展不因Token、次数、时长停止或换代理。按 nextAction 行动，delegation_wait 等通知，不轮询。交 report，长调查/阻塞记 checkpoint。",
-  "stop仅取消且须原因。达标验收，以回执交付并结束。详见 delegation-first。",
+  "处理错配/故障，核对重复操作。有进展不因Token、次数、时长停止或换代理。按nextAction行动，delegation_wait等通知，不轮询。交report，长调查/阻塞记checkpoint。",
+  "stop仅取消且须原因。验收delivery填summary/inlineFiles，正文限outputs；交付后结束。",
 ].join('\n')
 
 /** Automatic routing is advisory; explicit modes retain their operation gates. */
@@ -743,6 +743,7 @@ export function apply(ctx) {
       coordinationPolicyVersion: COORDINATION_POLICY_VERSION,
       modelRoutingPolicyVersion: 1,
       requestBindingVersion: 2,
+      deliveryProtocolVersion: 1,
       reviewerModelPolicy: REVIEWER_MODEL_POLICY,
       requestUsage: orchestration.requestUsages(selectedId),
       // No execution here, so this is the global view only — a status probe, not
@@ -960,6 +961,12 @@ export function apply(ctx) {
         const page = await orchestration.history(query.get('before') ?? undefined)
         sendJson(response, 200, { ok: true, ...page }); return
       }
+      if (kind === 'delivery') {
+        const seq = query.get('seq')
+        if (seq === null || !/^\d+$/.test(seq)) { sendJson(response, 400, { ok: false, error: '交付查询需要非负消息序号 seq' }); return }
+        const delivery = await orchestration.readDelivery(query.get('sessionId'), Number(seq))
+        sendJson(response, 200, { ok: true, delivery }); return
+      }
       const id = query.get('id')
       const archive = await orchestration.readArchive(id)
       if (query.get('format') === 'markdown') {
@@ -1033,6 +1040,7 @@ export function apply(ctx) {
     register(`${API_BASE}/config`, configRoute)
     register(`${API_BASE}/history`, archiveRoute('history'))
     register(`${API_BASE}/archive`, archiveRoute('archive'))
+    register(`${API_BASE}/delivery`, archiveRoute('delivery'))
   }
 
   try {

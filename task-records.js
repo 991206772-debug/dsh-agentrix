@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
-import { completionText, incompleteReason } from './completion.js'
+import { randomUUID, createHash } from 'node:crypto'
+import { completionText, incompleteReason, deliveryText } from './completion.js'
 
 const RECORD_ID = /^\d{4}-\d{2}-\d{2}T[\d-]+Z-[a-f0-9-]{36}$/
 const labels = { queued: '待派单', starting: '正在派单', running: '执行中', review: '待评审',
@@ -40,6 +40,8 @@ export function taskSummary(plan) {
       incompleteReason(task))) : '全部子任务已验收。',
     '', '本档案提供继续处理所需的记录；重新加载后，活动子任务须先清理，再按现有规则重试。']
   if (plan.completion) lines.push('', '## 程序交付回执', '', completionText(plan.completion))
+  if (plan.delivery) lines.push('', '## 向用户交付', '', '- 发送状态：' + ({ pending: '准备发送', delivered: '已发送', failed: '发送失败，验收结果保留' }[plan.delivery.status] || '未记录'),
+    ...(plan.delivery.error ? ['- 发送错误：' + plan.delivery.error] : []), '', deliveryText(plan.delivery))
   if (plan.interruption) lines.push('', '## 执行中断与恢复', '',
     '- 中断原因：' + plan.interruption.reason, '- 中断时间：' + time(plan.interruption.at),
     '- 恢复时间：' + time(plan.interruption.resumedAt),
@@ -157,6 +159,11 @@ export function taskSummary(plan) {
 export function createTaskRecords(file) {
   const root = file.replace(/\.json$/, '') + '.archive'
   const index = path.join(root, 'index')
+  const deliveries = path.join(root, 'deliveries')
+  const deliveryKey = (sessionId, seq) => {
+    if (typeof sessionId !== 'string' || !sessionId.trim() || sessionId.length > 256 || !Number.isSafeInteger(seq) || seq < 0) throw invalid('交付查询需要有效会话和非负消息序号')
+    return path.join(deliveries, createHash('sha256').update(sessionId).digest('hex') + '-' + seq + '.json')
+  }
   function attach(plan) {
     const id = plan.archive?.id
     if (id !== undefined && !RECORD_ID.test(id)) throw invalid('任务档案编号无效')
@@ -183,6 +190,10 @@ export function createTaskRecords(file) {
       createdAt: plan.createdAt, updatedAt: plan.updatedAt, cwd: plan.cwd,
       accepted: plan.tasks.filter(task => task.status === 'accepted').length, total: plan.tasks.length }
     await replace(path.join(index, archive.id + '.json'), JSON.stringify(descriptor))
+    if (Number.isSafeInteger(plan.delivery?.anchorSeq)) {
+      await mkdir(deliveries, { recursive: true })
+      await replace(deliveryKey(plan.sessionId, plan.delivery.anchorSeq), JSON.stringify({ archiveId: archive.id, receiptId: plan.delivery.receiptId }))
+    }
   }
   async function history(before) {
     if (before !== undefined && !RECORD_ID.test(before)) throw invalid('历史任务游标无效')
@@ -206,6 +217,14 @@ export function createTaskRecords(file) {
     ])
     return { plan: JSON.parse(state), markdown }
   }
+  async function readDelivery(sessionId, seq) {
+    let reference
+    try { reference = JSON.parse(await readFile(deliveryKey(sessionId, seq), 'utf8')) }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error }
+    const descriptor = await readDescriptor(reference.archiveId)
+    const plan = JSON.parse(await readFile(path.join(descriptor.directory, 'task.json'), 'utf8'))
+    return plan.sessionId === sessionId && plan.delivery?.anchorSeq === seq && plan.delivery.receiptId === reference.receiptId ? plan.delivery : null
+  }
   function reportPath(plan, task) {
     return path.join(attach(plan).directory, 'reports', task.id,
       `${task.role === 'reviewer' ? 'review-' + task.forAttempt : 'worker'}-${task.attempts}.md`)
@@ -226,5 +245,5 @@ export function createTaskRecords(file) {
     if (path.resolve(evidence.outputPath) !== path.resolve(expected)) throw invalid('完整验证输出路径与证据不匹配')
     return readFile(expected, 'utf8')
   }
-  return { attach, write, history, read, reportPath, writeVerification, readVerification }
+  return { attach, write, history, read, readDelivery, reportPath, writeVerification, readVerification }
 }

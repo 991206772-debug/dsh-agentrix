@@ -34,6 +34,8 @@ const switchCoordinator = process.argv.includes('--switch-coordinator')
 const coordinatorQuota = process.argv.includes('--coordinator-quota')
 const requestRefusal = process.argv.includes('--request-refusal')
 const messageInbox = process.argv.includes('--message-inbox')
+const finalDelivery = process.argv.includes('--final-delivery')
+const reasoningOnly = process.argv.includes('--reasoning-only')
 const nextRequest = process.argv.includes('--next-request') || messageInbox
 const directUnresolved = process.argv.includes('--direct-unresolved')
 const directRecovery = process.argv.includes('--direct-recovery') || directUnresolved
@@ -262,13 +264,15 @@ class ScriptedAdapter extends LlmAdapter {
         additionalCriteria: ['提供面向交付操作员的页面引导'],
       })
       else if (explicitWait && phase === 2) block = tool('delegation_wait', {})
-      else if (phase === 2 || truncateOutput && phase < 5) block = { type: 'text', text: '保留当前输出，继续原计划。' }
+      else if (phase === 2 || truncateOutput && phase < 5) block = { type: reasoningOnly ? 'reasoning' : 'text', text: '保留当前输出，继续原计划。' }
       else if (coordinatorQuota) {
         await until(async () => (await state()).plans[0].tasks[0].audit?.status === 'completed', 'review report returned before scripted coordinator quota error')
         throw new LlmError('429: exceed quota limit', 'QUOTA')
       }
       else if (task.status === 'review' && !task.checks[0].result) block = tool('delegation_verify', { taskId: 'a', checkIndex: 0 })
-      else if (task.status === 'review') block = tool('delegation_review', { taskId: 'a', verdict: 'accept', findings: task.criteria.map((_criterion, criterion) => ({ criterion, finding: '已读取隔离文件并核对要求', evidence: [task.checks[0].result.callId] })) })
+      else if (task.status === 'review') block = tool('delegation_review', { taskId: 'a', verdict: 'accept',
+        ...(finalDelivery ? { delivery: { summary: '隔离正文已验收并交付。', inlineFiles: [fixturePath] } } : {}),
+        findings: task.criteria.map((_criterion, criterion) => ({ criterion, finding: '已读取隔离文件并核对要求', evidence: [task.checks[0].result.callId] })) })
       else if ((truncateOutput || supplement) && task.status === 'running') block = { type: 'text', text: '等待原子代理报告和独立审查返回。' }
       else throw new Error('Unexpected coordinator request after terminal tool: ' + task.status)
     } else if (requestRefusal && request.model === 'low-worker') {
@@ -603,6 +607,28 @@ try {
   console.log('METRICS ' + JSON.stringify({ requests: requests.length,
     byModel: Object.fromEntries([...new Set(requests.map(request => request.model))].map(model => [model, requests.filter(request => request.model === model).length])),
     inputCharacters: requests.reduce((sum, request) => sum + request.inputCharacters, 0) }))
+  if (finalDelivery) {
+    const journal = parent.session.snapshotEvents(), delivery = plan.delivery
+    const messages = journal.filter(event => event.type === 'developer/message' && event.data.message?.source?.kind === 'delegation-delivery')
+    assert.equal(messages.length, 1)
+    assert.equal(delivery.status, 'delivered')
+    assert.equal(messages[0].data.message.id, delivery.messageId)
+    assert.equal(messages[0].data.message.source.receiptId, plan.completion.id)
+    assert.equal(delivery.documents[0].content, 'verified')
+    const ended = journal.findLast(event => event.type === 'turn/end')
+    const lastText = journal.findLast(event => event.type === 'assistant/message' && event.data.turn === ended.data.turn &&
+      event.data.message.content.some(block => block.type === 'text' && block.text.trim()))
+    assert.equal(delivery.anchorSeq, lastText?.seq ?? ended.seq, 'delivery must use the actual native chat footer anchor, including tool-only endings')
+    if (reasoningOnly) assert.equal(lastText, undefined)
+    assert.ok(messages[0].seq < ended.seq, 'delivery must be committed before turn/end')
+    assert.ok(parent.session.deriveMessages().some(message => message.id === delivery.messageId), 'delivery remains reconstructable after reload')
+    let exposed
+    await routes.get('/dsh-delegation-first/api/delivery')({ method: 'GET', url: '/dsh-delegation-first/api/delivery?sessionId=root&seq=' + delivery.anchorSeq },
+      { writeHead(code) { assert.equal(code, 200) }, end(body) { exposed = JSON.parse(body) } })
+    assert.equal(exposed.delivery.messageId, delivery.messageId)
+    assert.equal(exposed.delivery.documents[0].content, 'verified')
+    console.log('PASS: native final delivery commits one identified producer message after acceptance and before turn/end, retains inline text, and adds no model call')
+  }
   const coordinatorCalls = requests.filter(request => request.sessionId === 'root').length
   if (truncateOutput) assert.ok(coordinatorCalls >= 7 && coordinatorCalls <= 8, 'the original coordinator resumes each truncated output and may wait once for the child')
   else assert.equal(coordinatorCalls, coordinationConflict ? 12 : supplement ? 8 : 5, 'only the scripted operations and existing recovery use the original coordinator')
