@@ -18,6 +18,96 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('one plan call records delegation and starts its configured worker without a separate run', async () => {
+  const f = await fixture()
+  const result = await f.execute('delegation_plan', { goal: '一次派发隔离任务', decisionReason: '执行者核对文件，主控验证验收。', start: true, tasks: [card('a')] })
+  assert.equal(f.engine.decisionFor(f.parent.id).mode, 'delegate')
+  assert.equal(result.plan.tasks[0].status, 'running')
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].request.agentOptions.model, 'cheap')
+  assert.equal(result.nextAction.type, 'wait')
+  await f.execute('delegation_run')
+  assert.equal(f.calls.length, 1, 'a legacy duplicate run must not start a second worker')
+})
+
+test('batch verification runs every configured check once and retains separate evidence without accepting the task', async () => {
+  const f = await fixture()
+  await f.plan([card('a', { checks: [{ tool: 'read', arguments: { path: 'result.txt' } }, { tool: 'pwsh', arguments: { command: 'node --test' } }] })])
+  await f.execute('delegation_run'); await f.complete(0, { stopReason: 'completed', output: [] })
+  const result = await f.execute('delegation_verify', { taskId: 'a' })
+  assert.equal(result.passed, true)
+  assert.deepEqual(result.results.map(item => item.checkIndex), [0, 1])
+  assert.equal(new Set(result.results.map(item => item.ref)).size, 2)
+  assert.deepEqual(result.criteria, [{ id: 'C1', criterion: 0, text: '交付物存在且内容符合要求' }])
+  assert.ok(result.results.every(item => item.criteria === undefined && item.nextAction === undefined))
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+  assert.equal(f.snapshot().completion, null)
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '两项检查均已实际核对', evidence: result.results.map(item => item.ref) }] })
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+})
+
+test('combined dispatch keeps plan-only compatibility and does not launch an invalid model', async () => {
+  for (const start of [undefined, false]) {
+    const f = await fixture()
+    await f.execute('delegation_plan', { goal: '只保存', decisionReason: '保存后再检查', ...(start === undefined ? {} : { start }), tasks: [card('a')] })
+    assert.equal(f.calls.length, 0)
+    assert.equal(f.snapshot().tasks[0].status, 'queued')
+  }
+  const invalid = await fixture({ models: { worker: { provider: 'local', model: 'missing' } } })
+  await assert.rejects(invalid.execute('delegation_plan', { goal: '校验后才启动', decisionReason: '执行者检查', start: true, tasks: [card('a')] }), /model unavailable|模型/)
+  assert.equal(invalid.calls.length, 0)
+  assert.equal(invalid.snapshot().tasks[0].attempts, 0)
+})
+
+test('batch verification retains failed checks and rejects overlapping verification and acceptance', async () => {
+  const f = await fixture()
+  await f.plan([card('a', { checks: [{ tool: 'pwsh', arguments: { command: 'node --test' } }, { tool: 'read', arguments: { path: 'result.txt' } }] })])
+  await f.execute('delegation_run'); await f.complete(0, { stopReason: 'completed', output: [] })
+  const entered = Promise.withResolvers(), gate = Promise.withResolvers(), original = f.ctx.tools.execute
+  let count = 0
+  f.setExit(1)
+  f.ctx.tools.execute = async exec => {
+    count++
+    if (count === 1) { entered.resolve(); await gate.promise }
+    return original(exec)
+  }
+  const checking = f.execute('delegation_verify', { taskId: 'a' })
+  await entered.promise
+  await assert.rejects(f.execute('delegation_verify', { taskId: 'a' }), /正在执行/)
+  await assert.rejects(f.execute('delegation_verify', { taskId: 'a', checkIndex: 1 }), /正在执行/)
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [] }), /等待正在执行/)
+  gate.resolve()
+  const result = await checking
+  assert.deepEqual(result.results.map(item => item.passed), [false, true])
+  assert.equal(result.passed, false)
+  assert.equal(count, 2)
+  assert.equal(f.snapshot().completion, null)
+  await assert.rejects(f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [] }), /尚未全部通过/)
+  f.setExit(0)
+  const single = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  assert.equal(single.passed, true)
+  assert.ok(single.ref)
+  assert.equal(single.results, undefined, 'legacy single-check shape is preserved')
+})
+
+test('cancellation during batch verification stops later checks and cannot record post-cancel success', async () => {
+  const f = await fixture()
+  await f.plan([card('a', { checks: [{ tool: 'read', arguments: { path: 'result.txt' } }, { tool: 'read', arguments: { path: 'other.txt' } }] })])
+  await f.execute('delegation_run'); await f.complete(0, { stopReason: 'completed', output: [] })
+  const original = f.ctx.tools.execute
+  let count = 0
+  f.ctx.tools.execute = async exec => {
+    count++
+    await f.execute('delegation_cancel', { reason: '用户在验证期间取消' })
+    return original(exec)
+  }
+  await assert.rejects(f.execute('delegation_verify', { taskId: 'a' }), /取消/)
+  assert.equal(count, 1)
+  assert.equal(f.snapshot().tasks[0].checks[0].result, null)
+  assert.equal(f.snapshot().completion.outcome, 'cancelled')
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+})
+
 test('managed report schemas expose only fields belonging to the current child role', async () => {
   const f = await fixture({ scopedTools: true })
   await f.plan([card('a', { complexity: 'complex' })]); await f.execute('delegation_run')

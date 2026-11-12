@@ -34,13 +34,13 @@ const MAX_BODY_BYTES = 64 * 1024
  * `delegation-first` skill and is loaded only when the task calls for it.
  */
 const DISCIPLINE = [
-  "## DSH Agentrix：主控职责",
-  "按上下文判断关联和分工：小任务直接验证，工作多用 delegation_plan/run，复杂任务加独立审查。",
-  "主控定方案，worker执行；审查沿用派发时的主控模型。主控不重复实现；用 delegation_verify 验证，delegation_review 按 criterionId/ref 逐条验收。",
-  "默认读摘要，详情指定 taskId。用户补充先答复；变更用 inputIds/additionalCriteria steer 原代理，纯答复用 acknowledge。仅重要问题返工，minor 记录，复查不扩围。",
-  "先读文件。用 delegation_decide 记录 relation（new/continue/update/question）；新需求/方案变化给 direct/delegate 和理由，其余沿用。普通回复不算记录；阶段变化简短告知，修改失败须修复并核对原产物。",
-  "错配、重复故障先处理原因；Token、次数、时长不终止或换代理。按 nextAction 行动，等待用 delegation_wait 或结束回复等通知，不轮询。短任务交 report，长调查/阻塞记 checkpoint。",
-  "stop 只取消且须传原因。完成以程序回执为准；最后验收后自动结束，无需总结。详见 delegation-first 手册。",
+  "## Agentrix",
+  "先读文件。小任务直接验证；工作多用 delegation_plan({decisionReason,start:true,...}) 一次派发。同类小改合批且保留逐项标准；有独立价值才拆。复杂任务加独立审查。",
+  "主控定方案、验收，不重复实现；worker执行，审查沿用派发时主控模型。delegation_verify({taskId}) 验证全部检查，再 delegation_review 按 criterionId/ref 逐条验收。",
+  "详情指定 taskId。补充先答复；变更用 inputIds/additionalCriteria steer 原代理，纯答复 acknowledge。重要问题才返工，minor 记录，复查不扩围。",
+  "直接做先 delegation_decide 记 direct/理由；多条消息逐条记 relation(new/continue/update/question)，继续/提问沿用。阶段变化告知，修改失败须修复并核对原产物。",
+  "错配、重复故障先处理；Token、次数、时长不终止或换代理。按 nextAction 行动，用 delegation_wait 等通知，不轮询。短任务交 report，长调查/阻塞记 checkpoint。",
+  "stop 仅取消且须原因。完成以回执为准；验收后自动结束。详见 delegation-first。",
 ].join('\n')
 
 /** Automatic routing is advisory; explicit modes retain their operation gates. */
@@ -249,7 +249,7 @@ function denialMessage(tool, state, config, kind, policy) {
     `[DSH Agentrix] ${head}`,
     state.route ? routingLine(state.route) : '',
     '',
-    '请调用 delegation_plan 建立有验收标准的任务卡，再调用 delegation_run。',
+    '请调用 delegation_plan，提供验收标准、decisionReason 和 start:true，一次建立并派发任务。',
     '查看进度用 delegation_status，纠偏/停止用 delegation_control。',
     '',
     '派单前把任务卡写全（缺一项对方就会跑偏）：',
@@ -501,7 +501,7 @@ export function apply(ctx) {
     if (orchestration.allowsVerification(exec)) return undefined
     if (current.enabled && current.delegationTools.includes(name)) {
       state.denied++; state.turnDenied++
-      const message = '[DSH Agentrix] 请通过 delegation_plan 建立任务卡，再用 delegation_run 派发；这样才能应用执行/审查角色的模型配置、并发限制和验收流程。读取与准备工具仍可继续使用。'
+      const message = '[DSH Agentrix] 请用 delegation_plan({decisionReason,start:true,...}) 一次建卡并派发，应用角色模型、并发限制和验收流程。已有未启动计划才用 delegation_run。读取与准备工具仍可继续使用。'
       state.last = { tool: name, kind: 'managed-dispatch', message, at: Date.now() }
       return message
     }
@@ -524,8 +524,8 @@ export function apply(ctx) {
         if (!orchestration.decisionCurrent(role.agentId) || decision.mode !== 'direct') {
           state.denied++; state.turnDenied++
           const message = !orchestration.decisionCurrent(role.agentId)
-            ? '[DSH Agentrix] 本需求尚未记录判断或范围已更新。正式执行前请调用 delegation_decide，记录 direct 或 delegate 及具体理由；随后自动继续原任务。read/grep/glob、delegation_inspect/note 可先准备，无需用户确认。'
-            : '[DSH Agentrix] 主控已决定委派。请用 delegation_plan/run 执行；若范围改变，先用 delegation_decide 更新方式和理由。'
+            ? '[DSH Agentrix] 本需求尚未记录判断或范围已更新。直接执行先 delegation_decide 记录 direct 和理由；新委派用 delegation_plan({relation,decisionReason,start:true,...}) 一次记录并派发。read/grep/glob、delegation_inspect/note 可先准备，随后自动继续，无需用户确认。'
+            : '[DSH Agentrix] 主控已决定委派。新计划用 delegation_plan({decisionReason,start:true,...})；已有计划按 nextAction 继续。范围改变才更新方式和理由。'
           state.last = { tool: name, kind: 'decision', message, at: Date.now() }
           return message
         }
@@ -593,7 +593,7 @@ export function apply(ctx) {
     const state = states.get(agent.id), execution = state?.execution
     if ((execution?.toolCalls > 0 || state?.last?.kind === 'decision') && typeof agent.inject === 'function' && await orchestration.recoverDecision(agent.id)) {
       agent.inject({ id: randomUUID(), role: 'user', source: { kind: 'delegation-decision-recovery' }, content: [{ type: 'text', text:
-        '有待确认的消息关联或尚未记录执行方式。请用 delegation_decide 的 relation 明确 new/continue/update/question；新需求或方案变化提供 direct/delegate 和具体理由，继续或询问沿用原决定。多条消息指定真实 messageId。随后自动继续，不新开分类代理，不要求用户点击继续。每条待关联消息只自动提醒一次。' }] })
+        '有待确认的消息关联或尚未记录执行方式。新委派可用 delegation_plan({relation,decisionReason,start:true,...}) 一次记录并派发；直接执行或关联多条消息用 delegation_decide 明确 relation（new/continue/update/question）、实际方式和理由，继续或询问沿用。多条消息指定真实 messageId。随后自动继续，不新开分类代理，不要求用户点击继续。每条待关联消息只自动提醒一次。' }] })
       return
     }
     if (!execution?.unresolvedChanges.length || execution.repairUsed >= 1 || typeof agent.inject !== 'function') return
@@ -1133,9 +1133,9 @@ export function apply(ctx) {
             const unresolved = failures.length ? '尚未成功修改：' + failures.map(item => `${item.target || item.tool}（${item.reason}）`).join('；') : ''
             const decision = orchestration.decisionFor(agentId)
             const messages = orchestration.pendingMessages(agentId)
-            const pending = messages.length && !summary ? '待关联用户消息（仅事实，尚未归属需求）：' + messages.map(message => message.messageId + '：' + message.text.slice(0, 180)).join('；') + '。用 delegation_decide 的 relation 指明 new/continue/update/question；多条消息分别关联，不能按字数猜测。' : ''
+            const pending = messages.length && !summary ? '待关联用户消息（仅事实，尚未归属需求）：' + messages.map(message => message.messageId + '：' + message.text.slice(0, 180)).join('；') + '。新委派用 delegation_plan({relation,decisionReason,start:true,...}) 同时关联并派发；直接执行或多条消息分别关联才用 delegation_decide，不能按字数猜测。' : ''
             const choice = orchestration.decisionCurrent(agentId) ? '本需求已记录执行方式：' + decision.mode + '。范围未变无需重复记录。'
-              : '本需求尚未记录判断或范围已补充；准备后用 delegation_decide 记录，也可在建计划时提供 decisionReason。'
+              : '本需求尚未记录判断或范围已补充；新委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run；直接执行先记录 direct。'
             return [DISCIPLINE, pending, choice, missing, unresolved, summary].filter(Boolean).join('\n\n')
           } catch {
             return DISCIPLINE

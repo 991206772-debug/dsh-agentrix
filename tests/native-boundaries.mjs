@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { apply } from '../index.js'
 
 const scenario = process.argv[2] ?? 'long-output'
-assert.ok(['long-output', 'stale-evidence', 'concerns', 'queue-parallel', 'queue-write', 'queue-stop', 'queue-cancel'].includes(scenario))
+assert.ok(['efficient-dispatch', 'long-output', 'stale-evidence', 'concerns', 'queue-parallel', 'queue-write', 'queue-stop', 'queue-cancel'].includes(scenario))
 if (!process.env.DSH_MODULE_ROOT) throw new Error('DSH_MODULE_ROOT is required')
 const native = name => import(pathToFileURL(path.join(process.env.DSH_MODULE_ROOT, name, 'lib/index.js')).href)
 const { Context } = await native('cordis')
@@ -30,9 +30,12 @@ delete process.env.DSH_DELEGATION_FIRST
 const ctx = new Context(), routes = new Map(), requests = [], results = [], events = [], handles = [], releases = new Map()
 const phases = new Map(), observed = {}, gate = Promise.withResolvers()
 const queue = scenario.startsWith('queue-'), parents = new Set(['root', ...(queue ? ['holder'] : [])])
+const efficient = scenario === 'efficient-dispatch'
 const target = path.join(directory, 'result.txt'), tail = 'TAIL: pending real database verification', concern = 'Database behavior remains unverified'
 const text = 'verified fixture content\n'.repeat(scenario === 'long-output' ? 400 : 1) + (scenario === 'long-output' ? tail : '')
 await writeFile(target, text)
+const batchTargets = [target, ...efficient ? [path.join(directory, 'second.txt'), path.join(directory, 'third.txt')] : []]
+for (const file of batchTargets.slice(1)) await writeFile(file, 'independently checked: ' + path.basename(file))
 ctx.provide('webServer', { register(route) { routes.set(route.path, route.handler); return () => routes.delete(route.path) } })
 for (const service of [SessionProjectionRegistry, SessionStore, AgentRegistry, SystemPrompt, LlmRuntime, ToolRuntime, AgentLoop, SubagentRuntime, Spawn]) ctx.plugin(service)
 ctx.plugin(LocalFileSystem, { cwd: directory })
@@ -61,15 +64,15 @@ class ScriptedAdapter extends LlmAdapter {
     const snapshot = await state(), plan = planOf(snapshot, request.sessionId), task = plan?.tasks[0]
     let block
     if (parents.has(request.sessionId)) {
-      if (!plan) block = tool('delegation_plan', { goal: '隔离回归：' + scenario, decisionReason: '执行者读取隔离文件，主控实际验证验收。', tasks: [{
+      if (!plan) block = tool('delegation_plan', { goal: '隔离回归：' + scenario, decisionReason: '执行者读取隔离文件，主控实际验证验收。', ...(efficient ? { start: true } : {}), tasks: [{
         id: 'a', title: '检查隔离产物', instructions: '读取 result.txt 并提交正式报告', scope: directory, outputs: [target],
         writes: scenario === 'queue-write' ? [target] : [], complexity: 'routine', criteria: ['文件内容符合本次要求'],
-        checks: [{ tool: 'read', arguments: { file_path: target } }],
+        checks: batchTargets.map(file => ({ tool: 'read', arguments: { file_path: file } })),
       }] })
-      else if (phase === 1) block = tool('delegation_run', {})
+      else if (phase === 1 && !efficient) block = tool('delegation_run', {})
       else if (queue && request.sessionId === 'root' && phase === 2 && scenario === 'queue-stop') block = { type: 'text', text: '等待现有任务释放并发名额。' }
       else if (task.status !== 'review') block = tool('delegation_wait', {})
-      else if (!task.checks[0].result) block = tool('delegation_verify', { taskId: 'a', checkIndex: 0 })
+      else if (!task.checks.every(check => check.result)) block = tool('delegation_verify', { taskId: 'a', ...(efficient ? {} : { checkIndex: 0 }) })
       else if (scenario === 'long-output' && !observed.readFull) {
         const result = lastResult('delegation_verify')
         assert.match(JSON.stringify(result.content), /truncated/)
@@ -102,7 +105,7 @@ class ScriptedAdapter extends LlmAdapter {
         }
         block = tool('delegation_review', { taskId: 'a', verdict: 'accept',
           ...(scenario === 'concerns' ? { concernsResolution: '本次验收静态文件，真实数据库验证仍为明确限制。' } : {}),
-          findings: [{ criterionId: 'C1', finding: '已读取实际产物及验证结果', evidence: [task.checks[0].result.ref] }] })
+          findings: [{ criterionId: 'C1', finding: '已读取实际产物及验证结果', evidence: task.checks.map(check => check.result.ref) }] })
       }
     } else {
       const owner = snapshot.plans.find(plan => plan.tasks.some(task => task.childId === request.sessionId))
@@ -178,7 +181,7 @@ try {
   }
   await until(async () => Boolean(planOf(await state())?.completion), 'formal receipt')
   const plan = planOf(await state())
-  assert.equal((await state()).coordinationPolicyVersion, 4)
+  assert.equal((await state()).coordinationPolicyVersion, 5)
   assert.equal(plan.completion.outcome, scenario === 'queue-cancel' ? 'cancelled' : 'completed')
   assert.equal(plan.recovery.used, 0)
   assert.equal(plan.activationBudget.used, scenario === 'queue-cancel' ? 0 : 1)
@@ -189,6 +192,13 @@ try {
     assert.equal(plan.tasks[0].review.findings[0].evidence[0], plan.tasks[0].checks[0].result.callId)
   }
   if (scenario === 'stale-evidence') assert.ok(plan.tasks[0].evidence.some(item => item.callId === observed.old.callId), 'obsolete evidence is retained only as history')
+  if (efficient) {
+    assert.equal(requests.filter(item => item.id === 'root').length, 4, 'one combined dispatch, wait, batch verification and acceptance')
+    assert.equal(requests.length, 6, 'the worker retains its two real AgentLoop steps')
+    assert.equal(results.filter(item => item.agentId === 'root' && item.name === 'delegation_verify').length, 1)
+    assert.equal(results.filter(item => item.agentId === 'root' && item.name === 'read').length, 3)
+    assert.equal(new Set(plan.tasks[0].checks.map(check => check.result.ref)).size, 3)
+  }
   console.log('PASS: installed native boundary ' + scenario + ' ' + JSON.stringify({ requests: requests.length, releases: [...releases.values()] }))
 } finally {
   gate.resolve()

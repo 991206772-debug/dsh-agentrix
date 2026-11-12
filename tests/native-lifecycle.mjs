@@ -349,7 +349,7 @@ try {
     await until(() => parentWaiting || events.some(event => event.id === 'root' && event.type === 'turn/end'), 'coordinator claimed delivery while the worker is still running')
     assert.ok(parentWaiting, JSON.stringify({ requests, events }))
     const running = (await state()).plans[0]
-    assert.equal((await state()).coordinationPolicyVersion, 4)
+    assert.equal((await state()).coordinationPolicyVersion, 5)
     assert.equal(running.status, 'running')
     assert.equal(running.completion, null)
     assert.equal(running.tasks[0].execution, null)

@@ -1,6 +1,6 @@
 # 结构化任务卡
 
-主控通过 `delegation_plan({goal,relation,messageId,decisionReason,tasks})` 提交任务。`decisionReason` 是本次委派的具体理由（非空，最多 500 字），与消息关联一起保存；relation 为 new/continue/update/question，多条待处理消息必须填写真实 messageId；若已经调用 `delegation_decide` 记录 delegate，可省略。建立计划不启动代理。一个计划最多 16 个任务，每任务最多 4 个主控验证步骤。
+主控通过 `delegation_plan({goal,relation,messageId,decisionReason,start:true,tasks})` 一次记录委派、建立计划并派发。`decisionReason` 是本次委派的具体理由（非空，最多 500 字），与消息关联一起保存；relation 为 new/continue/update/question，多条待处理消息必须填写真实 messageId；若已经调用 `delegation_decide` 记录 delegate，可省略。省略 start 或填 false 仍仅保存，不启动代理。一个计划最多 16 个任务，每任务最多 4 个主控验证步骤。同类小改合为一个任务，保留逐项标准和检查；有独立判断、验证或并行价值才拆分，不按文件数拆卡。
 
 | 字段 | 要求 |
 | --- | --- |
@@ -24,6 +24,7 @@
 {
   "goal": "补充登录失败场景验证",
   "relation": "new",
+  "start": true,
   "decisionReason": "执行模型按既有结构补充测试，主控独立验证结果并逐项验收。",
   "tasks": [{
     "id": "login-tests",

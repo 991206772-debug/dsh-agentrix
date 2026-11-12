@@ -11,7 +11,7 @@ export const DEFAULT_OPTIONS = Object.freeze({
   models: { worker: null, reviewer: null },
 })
 export const REVIEWER_MODEL_POLICY = 'dispatcher-snapshot'
-export const COORDINATION_POLICY_VERSION = 4
+export const COORDINATION_POLICY_VERSION = 5
 const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork'])
 const COORDINATOR_TOOLS = new Set(['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_wait', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
 const EXECUTOR_TOOLS = new Set(['delegation_checkpoint', 'delegation_report'])
@@ -258,6 +258,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const noteRequests = new Map(), noteWrites = new Map()
   const stagedResults = new Map(), pendingTransports = new Map(), committing = new Set()
   const waitingParents = new Map()
+  const verifyingTasks = new WeakSet()
   const coordinationFailures = new Set(), coordinationCalls = new Map(), coordinationRestrictions = new Map()
   const toolDefinitions = new Map(), reportSchemas = new Map()
   const inboxes = new Map()
@@ -1501,6 +1502,23 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     } finally { permits.delete(callId) }
   }
   async function verify(args, exec) {
+    const { plan } = ownPlan(exec), task = taskOf(plan, args.taskId)
+    if (verifyingTasks.has(task)) throw new Error('该任务的批量验证正在执行，请等待结果')
+    if (args.checkIndex !== undefined) return verifyCheck(args, exec)
+    if (task.checks.some(check => check.verifying)) throw new Error('请等待正在执行的验证完成')
+    verifyingTasks.add(task)
+    try {
+      const results = []
+      for (let checkIndex = 0; checkIndex < task.checks.length; checkIndex++) {
+        if (exec.signal?.aborted) throw exec.signal.reason ?? new Error('验证已取消')
+        if (plan.cancelled || task.status === 'cancelled') throw new Error('任务已取消，停止后续验证')
+        const { criteria: _criteria, nextAction: _nextAction, ...evidence } = await verifyCheck({ ...args, checkIndex }, exec)
+        results.push({ checkIndex, ...evidence })
+      }
+      return { taskId: task.id, passed: results.every(result => result.passed), results, criteria: criteriaOf(task) }
+    } finally { verifyingTasks.delete(task) }
+  }
+  async function verifyCheck(args, exec) {
     const { plan, parent } = ownPlan(exec), task = taskOf(plan, args.taskId)
     if (task.status !== 'review') throw new Error('只有待评审任务可以运行主控验证')
     if (!Number.isInteger(args.checkIndex) || !task.checks[args.checkIndex]) throw new Error('验证步骤编号无效（从 0 开始）')
@@ -1513,6 +1531,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     try {
       await save()
       const { result, callId } = await executePermitted(parent, check.tool, check.arguments, exec)
+      if (exec.signal?.aborted) throw exec.signal.reason ?? new Error('验证已取消')
+      if (plan.cancelled || task.status === 'cancelled') throw new Error('任务已取消，本次验证不登记为成功')
       const value = result.value, exitCode = value?.exitCode
       const shell = ['pwsh', 'bash'].includes(check.tool)
       // Shell success requires an actual exit code. A background job or missing status is inconclusive.
@@ -1540,7 +1560,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     args = { ...args, findings: reviewFindings(task, args.findings), issues: reviewFindings(task, args.issues),
       resolutions: Array.isArray(args.resolutions) ? args.resolutions.map(item => ({ ...item, evidence: reviewEvidence(task, item.evidence) })) : args.resolutions }
     if (task.pendingAcceptance) throw new Error('当前验收正在通过工具管线确认，不能重复提交')
-    if (task.checks.some(check => check.verifying)) throw new Error('请等待正在执行的验证完成')
+    if (verifyingTasks.has(task) || task.checks.some(check => check.verifying)) throw new Error('请等待正在执行的验证完成')
     if (args.verdict === 'rework') {
       const inputs = selectInputs(plan, args.inputIds), criteria = additionalCriteria(task, args, inputs)
       if (task.audit && ['queued', ...LIVE].includes(task.audit.status)) throw new Error('独立审查尚未结束，请等待结果，避免修改审查中的交付物')
@@ -1656,7 +1676,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (args.action === 'steer') {
       const target = task.audit?.status === 'running' ? task.audit : task
       if (target.status !== 'running') throw new Error('只能向正在执行的子任务发送纠偏消息')
-      if (target.execution || task.pendingAcceptance || task.checks.some(check => check.verifying)) throw new Error('报告或验证正在确认；请等待结果，核对补充要求后再决定返工')
+      if (target.execution || task.pendingAcceptance || verifyingTasks.has(task) || task.checks.some(check => check.verifying)) throw new Error('报告或验证正在确认；请等待结果，核对补充要求后再决定返工')
       const inputs = selectInputs(plan, args.inputIds), criteria = additionalCriteria(task, args, inputs)
       const message = [requireText(args.message, '纠偏内容'), ...inputs.map(input => '用户补充：' + input.text),
         ...(criteria.length ? ['新增验收标准：', ...criteria] : [])].join('\n')
@@ -1872,14 +1892,16 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     try { await write } finally { if (noteWrites.get(target) === write) noteWrites.delete(target) }
     return { path: target, sessionId: parent.id, requestId: source?.messageId ?? null, kind: args.kind }
   })
-  routeTool('delegation_plan', '主控提交可验证的任务拆分。包含依赖、可修改路径、验收标准和主控验证工具参数；不开始执行。', {
+  routeTool('delegation_plan', '主控提交可验证的任务拆分。通常一并提供 decisionReason 和 start:true，保存决定、计划并直接按配置派发，无需另调 decide/run。同类小修改合成一个任务；省略 start 或传 false 时仅建计划，兼容旧流程。', {
     goal: string, relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
+    start: { type: 'boolean', description: 'true 表示建计划后立即校验模型、权限与预算并派发；省略或 false 仅建立计划。' },
     decisionReason: { type: 'string', description: '非空，最多 500 字；可在建计划时一并记录委派理由及 relation；不填写时需在 run 前记录。' }, tasks: array({ ...object({ id: string, title: string, instructions: string, scope: string,
       outputs: array(string), writes: array(string), dependsOn: array(string), complexity: { type: 'string', enum: ['routine', 'complex'] }, complexityReason: string,
       criteria: array(string), checks: array({ ...object({ tool: { type: 'string', enum: CHECK_TOOLS }, arguments: { type: 'object', additionalProperties: true } }), required: ['tool', 'arguments'] }) }),
       required: ['id', 'title', 'instructions', 'scope', 'outputs', 'writes', 'complexity', 'criteria', 'checks'] }),
   }, ['goal', 'tasks'], async (args, exec) => {
     const parent = own(exec), previous = plans.get(parent.id)
+    if (args.start !== undefined && typeof args.start !== 'boolean') throw new Error('start 必须为 true 或 false')
     if (storageError) throw new Error(`任务保存或恢复异常，请先处理：${storageError}`)
     if (previous && !['accepted', 'cancelled'].includes(planStatus(previous))) throw new Error('当前计划尚未验收；请监督、返工或取消后再建新计划')
     if (pendingMessages(parent.id).length && args.decisionReason === undefined) throw new Error('建立计划前须明确消息关联；可在本次 delegation_plan 一并提供 relation/messageId/decisionReason，或先用 delegation_decide 确认')
@@ -1904,9 +1926,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       ...(typeof sessionTitle === 'string' ? { sessionTitle } : {}), ...(cwd ? { cwd } : {}), sessionId: parent.id,
       createdAt: Date.now(), updatedAt: Date.now(), autoDispatch: false, cancelled: false, cancelledBy: null, dispatchWait: null }
     remember(plan, 'plan.created', '计划已建立，共 ' + plan.tasks.length + ' 个子任务')
-    plans.set(parent.id, plan); await save(); return { plan: snapshot().find(plan => plan.sessionId === parent.id) }
+    plans.set(parent.id, plan); await save()
+    return args.start ? runPlan({}, exec) : { plan: snapshot().find(plan => plan.sessionId === parent.id) }
   })
-  routeTool('delegation_run', '按依赖和全局并发上限执行当前计划。无依赖任务自动派单；前置任务须主控验收后才继续。若返回 dispatchWait，说明正在等待其他会话释放名额或写入冲突结束，等待即可，不要反复调用。失败不自动重试；历史无原因取消在明确继续且仍有执行额度时沿用原计划恢复。', {}, [], async (_args, exec) => {
+  async function runPlan(_args, exec) {
     const { plan, parent } = ownPlan(exec)
     if (getConfig().enabled && plan.decisionProtocolVersion >= 1 && (!decisionCurrent(parent.id) || decisionFor(parent.id).mode !== 'delegate')) throw new Error('启动前请用 delegation_decide 记录 delegate 和具体理由，再自动继续 delegation_run；建计划时可用 decisionReason 一并记录')
     if (plan.cancelled) {
@@ -1924,7 +1947,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     plan.autoDispatch = true; remember(plan, 'plan.started', '开始按依赖与并发限制执行计划')
     await save(); const failure = await pump(); if (failure) throw failure
     return { plan: snapshot().find(item => item.sessionId === plan.sessionId) }
-  })
+  }
+  routeTool('delegation_run', '启动已经建立但未启动的计划，或在明确处理问题后继续原计划。新委派优先用 delegation_plan 的 start:true 一次完成。按依赖和全局并发限制派单；dispatchWait 时等通知，不反复调用。失败不自动重试，仍执行原模型、预算和恢复校验。', {}, [], runPlan)
   routeTool('delegation_status', '默认返回计划摘要；detail=full 必须指定 taskId。额外指定 checkIndex 可分段读取该检查的完整验证输出：offset 为从 0 开始的字符位置，limit 默认 4000、最多 8000；按 nextOffset 继续，不反复读取全量详情。', {
     taskId: string, detail: { type: 'string', enum: ['summary', 'full'] }, checkIndex: { type: 'integer' }, offset: { type: 'integer' }, limit: { type: 'integer' },
   }, [], async (args, exec) => {
@@ -1960,7 +1984,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     deliverSupervision(plan, parent)
     return { plan: snapshotPlan(plan), notifications }
   })
-  routeTool('delegation_verify', '主控执行任务卡指定的验证步骤（checkIndex 从 0 开始）。返回真实证据 ref 和标准 C1、C2 对照；验收时直接引用这些编号。保留原始 callId，不消耗动手预算。', { taskId: string, checkIndex: { type: 'integer' } }, ['taskId', 'checkIndex'], verify)
+  routeTool('delegation_verify', '主控验证已返回任务。默认顺序执行该任务全部检查，一次返回逐项结果、证据 ref 和标准 C1、C2；指定 checkIndex（从 0 开始）只重验该项。验证后仍须由主控判断内容并逐条验收，不消耗动手预算。', { taskId: string, checkIndex: { type: 'integer', description: '省略时执行全部检查；指定时仅执行该步骤，从 0 开始。' } }, ['taskId'], verify)
   routeTool('delegation_audit', '对已返回任务安排一个独立只读审查，复杂任务会自动安排。重复请求不会重复开启；失败后的重试必须说明已处理的原因，同样受启动预算与次数限制。', {
     taskId: string, message: string,
   }, ['taskId'], async (args, exec) => {

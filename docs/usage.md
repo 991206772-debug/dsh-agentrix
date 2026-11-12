@@ -11,13 +11,13 @@
 | `delegation_decide` | 主控提供 `relation: new/continue/update/question`；新需求或方案变化时提供 `mode: direct/delegate` 和非空 `reason`（最多 500 字）。多条待关联消息须给真实 `messageId` |
 | `delegation_inspect` | `operation: list/git_status`，可指定 `directory`；通过原生工具管线运行固定的只读检查，每次最多显示 200 项 |
 | `delegation_note` | `kind: task_plan/findings/progress` 和 `content`；保存本会话本需求的专用记录并返回路径，最多 64 KiB |
-| `delegation_plan` | 提交目标、任务卡、依赖、修改路径、任务复杂度、标准和验证步骤；可用 `relation/messageId/decisionReason` 同时记录消息关联与委派理由 |
-| `delegation_run` | 开始调度，无依赖任务自动派出 |
+| `delegation_plan` | 新委派推荐携带 `relation/messageId/decisionReason/start:true`，一次记录、建计划并派发；省略 start 或填 false 仍仅保存 |
+| `delegation_run` | 启动已有未启动计划，或明确处理问题后继续；合并派发后无需重复调用 |
 | `delegation_wait` | 等待现有任务的报告、故障或用户新消息；原代理继续运行，不轮询模型、不消耗纠偏次数 |
 | `delegation_status` | 默认摘要；可选 taskId，detail: summary/full；full 必须指定任务，只返回该任务完整报告和证据 |
 | `delegation_checkpoint` | 执行者或只读审查者在长调查、阶段转换或阻塞时记录结论及成功工具证据；短任务只交最终报告 |
 | `delegation_control` | `steer` 纠偏、`stop` 取消且必须提供原因、`retry` 有依据地重试；正常返回无需 stop |
-| `delegation_verify` | 用 DSH 工具管线执行指定验证，返回实际证据编号 |
+| `delegation_verify` | 默认一次顺序执行任务全部检查，返回逐项证据；可用 checkIndex 单项重验，保留正式验收 |
 | `delegation_report` | 当前执行者或审查者提交身份绑定的完整报告，工具确认后自动结束，主控不能代报 |
 | `delegation_audit` | 请求独立审查；复杂任务自动安排，失败后须给出原因处理说明才重试 |
 | `delegation_review` | 逐条验收，或按问题编号、标准与实际证据返工 |
@@ -41,6 +41,7 @@
 {
   "goal": "补充登录失败路径测试并核对结果",
   "relation": "new",
+  "start": true,
   "decisionReason": "测试补充交给执行模型，主控读取结果、运行测试并最终验收。",
   "tasks": [{
     "id": "login-tests",
@@ -63,14 +64,15 @@
 
 验证步骤支持 `read`、`grep`、`glob`、`pwsh`、`bash`，参数遵守当前 DSH 工具定义；例如原生 `read` 使用 `file_path`，不能把旧示例中的 `path` 当成当前参数。计划派发前会读取当前工具 schema，缺少必填字段时不会启动子 Agent。只读任务的 `writes` 用空数组。不能用后台 shell 任务作为已通过的验证。
 
-任务返回后，主 Agent 对每个验证步骤调用：
+同类小修改合为一任务，保留每项标准和必要检查；只有独立判断、不同验证或并行价值才拆分，不按文件数量强制建卡。任务返回后，主 Agent 一次执行全部检查：
 
 ```js
-delegation_verify({taskId: 'login-tests', checkIndex: 0})
+delegation_verify({taskId: 'login-tests'})
+// 必要重验时只执行一个检查，旧的单步返回格式保持兼容：
 delegation_verify({taskId: 'login-tests', checkIndex: 1})
 ```
 
-`checkIndex` 从 0 开始，验收标准可直接引用返回的 `C1/C2`。主控阅读返回结果后，在 `delegation_review` 的 `findings` 中逐条写明结论，`evidence` 引用该检查当前返回的 `ref` 或 `callId`。重新验证同一步骤后，旧的两种编号都不能用于验收，历史仍保留。编造编号、缺少条目、验证失败、后台命令或无退出码的 shell 结果，都不能通过验收。
+批量返回 `results` 中每项的 `checkIndex/ref/passed` 与真实输出摘要，顶层只返回一份 `criteria`；任一项失败时整体 `passed:false`，但保留每项结果。`checkIndex` 从 0 开始，验收标准可直接引用返回的 `C1/C2`。主控阅读返回结果后，在 `delegation_review` 的 `findings` 中逐条写明结论，`evidence` 引用该检查当前返回的 `ref` 或 `callId`。批量运行时禁止重入或提前验收，取消后不继续后续检查。重新验证同一步骤后，旧的两种编号都不能用于验收，历史仍保留。编造编号、缺少条目、验证失败、后台命令或无退出码的 shell 结果，都不能通过验收。
 
 验证输出超过 2000 字符时，只在默认响应中显示摘要，原文保存在 `outputPath`。`truncated: true` 和 `readOutput` 会明确提示继续读取。主控可以调用 `delegation_status({taskId:'login-tests',detail:'full',checkIndex:0,offset:0,limit:4000})` 分段核查原文；`offset` 为从 0 开始的字符位置，按 `nextOffset` 继续，直到其为 `null`。每次最多返回 8000 字符。旧任务未保存原文时显示 `available: summary`，不补造完整结果。读取成功不等于内容符合要求。
 

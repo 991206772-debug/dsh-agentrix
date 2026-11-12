@@ -123,7 +123,7 @@ test('host guards and request tools share managed coordination policy, including
     assert.match(h.call('write', 'denied-write', h.agent, { file_path: 'tool.html' }), /尚未验收/)
     const response = await new Promise(resolve => h.routes.get('/dsh-delegation-first/api/state')({ method: 'GET', url: '/dsh-delegation-first/api/state?sessionId=root' },
       { writeHead() {}, end(text) { resolve(JSON.parse(text)) } }))
-    assert.equal(response.coordinationPolicyVersion, 4)
+    assert.equal(response.coordinationPolicyVersion, 5)
     assert.equal(response.plans[0].coordinationIssue.callId, 'denied-write')
     assert.equal(response.plans[0].completion, null)
     assert.equal(h.call('team_task_list'), undefined)
@@ -365,6 +365,7 @@ test('workflow-hidden acceptance tools do not mark delegation unavailable or poi
   try {
     h.emit('agent/created', { agent: h.agent })
     h.turn('调研项目功能与架构')
+    assert.ok(sections.some(section => /待关联用户消息[\s\S]*委派.*start:true/.test(section.text())), 'pending-message guidance must offer combined dispatch rather than require a separate classification call')
     await h.definitions.get('delegation_plan').execute({ goal: '调研并总结项目', decisionReason: '执行者调研，主控在正式报告返回后验证验收。',
       tasks: [{ id: 'investigation', title: '项目调研', instructions: '读取实际文件并形成报告', scope: '调研', outputs: ['findings.md'], writes: ['findings.md'],
         complexity: 'routine', criteria: ['报告符合项目事实'], checks: [{ tool: 'read', arguments: { file_path: 'findings.md' } }] }] },
