@@ -605,7 +605,8 @@ test('history and archive routes expose saved tasks, Markdown downloads, and rea
       id: 'a', title: '核对文件', instructions: '读取测试文件', scope: '测试数据', outputs: ['fixture.txt'], writes: [],
       complexity: 'routine', criteria: ['文件内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'fixture.txt' } }],
     }] })
-    await call('delegation_cancel', {})
+    h.emit('session/event', { id: 'root' }, { type: 'user/message', data: { id: 'cancel-history', source: { kind: 'user' }, content: '取消当前计划' } })
+    await call('delegation_cancel', { reason: '用户取消当前计划', messageId: 'cancel-history' })
     const history = await request('/dsh-delegation-first/api/history')
     assert.equal(history.status, 200)
     const id = history.body.items.find(item => item.goal === '保留接口测试档案').id
@@ -654,14 +655,16 @@ test('plans retain the original human request across approval turns and state is
     const ongoing = await h.definitions.get('delegation_status').execute({},
       { agent: h.agent, callId: 'status', signal: new AbortController().signal })
     assert.equal(ongoing.plan.source.text, '修复登录失败提示，并补充测试')
-    await h.definitions.get('delegation_cancel').execute({},
+    h.emit('session/event', { id: 'root' }, { type: 'user/message', data: { id: 'cancel-original', source: { kind: 'user' }, content: '取消原计划' } })
+    await h.definitions.get('delegation_cancel').execute({ reason: '用户取消原计划', messageId: 'cancel-original' },
       { agent: h.agent, callId: 'cancel', signal: new AbortController().signal })
     h.turn('修改首页标题')
     const next = await h.definitions.get('delegation_plan').execute({ goal: '新任务', relation: 'new', decisionReason: '新任务交给执行者，主控核对最终文件。', tasks: plan.plan.tasks },
       { agent: h.agent, callId: 'next-plan', signal: new AbortController().signal })
     assert.equal(next.plan.source.text, '修改首页标题')
     assert.equal(next.plan.source.messageId, '4')
-    await h.definitions.get('delegation_cancel').execute({},
+    h.emit('session/event', { id: 'root' }, { type: 'user/message', data: { id: 'cancel-next', source: { kind: 'user' }, content: '取消下一计划' } })
+    await h.definitions.get('delegation_cancel').execute({ reason: '用户取消下一计划', messageId: 'cancel-next' },
       { agent: h.agent, callId: 'cancel-next', signal: new AbortController().signal })
   } finally { await h.close() }
 })

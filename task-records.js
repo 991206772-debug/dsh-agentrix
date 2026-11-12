@@ -40,6 +40,13 @@ export function taskSummary(plan) {
       incompleteReason(task))) : '全部子任务已验收。',
     '', '本档案提供继续处理所需的记录；重新加载后，活动子任务须先清理，再按现有规则重试。']
   if (plan.completion) lines.push('', '## 程序交付回执', '', completionText(plan.completion))
+  if (plan.interruption) lines.push('', '## 执行中断与恢复', '',
+    '- 中断原因：' + plan.interruption.reason, '- 中断时间：' + time(plan.interruption.at),
+    '- 恢复时间：' + time(plan.interruption.resumedAt),
+    '- 接续方式：用户明确继续后沿用原计划，只恢复未完成部分；已返回报告继续验证验收，失败任务须处理原因后明确重试。')
+  if (plan.cancellation) lines.push('', '## 整计划取消来源', '',
+    '- 用户消息：' + plan.cancellation.messageId, '- 取消原因：' + plan.cancellation.reason,
+    '- 取消时间：' + time(plan.cancellation.at))
   if (plan.coordinationIssue) {
     const issue = plan.coordinationIssue
     lines.push('', '## ' + (issue.role === 'coordinator' ? '主控操作未执行' : '协作操作未执行'), '',

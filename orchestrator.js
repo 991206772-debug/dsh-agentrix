@@ -95,6 +95,7 @@ function compactResult(value) {
   if (value.plan) result.plan = { sessionId: value.plan.sessionId, goal: brief(value.plan.goal, 300), status: value.plan.status,
     decision: value.plan.decision, nextAction: value.plan.nextAction,
     activationBudget: value.plan.activationBudget, dispatchWait: value.plan.dispatchWait,
+    interruption: value.plan.interruption,
     coordinatorIssue: value.plan.coordinatorIssue, coordinationIssue: value.plan.coordinationIssue, messageResolution: value.plan.messageResolution,
     inputs: (value.plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)).map(input => ({ id: input.id, text: brief(input.text, 400), status: input.status })),
     tasks: value.plan.tasks.map(compactTask) }
@@ -262,6 +263,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const decisions = new Map(), decisionWrites = new Set()
   const coordinatorUsage = new Map()
   const plans = new Map(), live = new Map(), permits = new Map(), expectedRoutes = new Map(), disposers = []
+  const interrupting = new Map()
   const noteRequests = new Map(), noteWrites = new Map()
   const stagedResults = new Map(), pendingTransports = new Map(), committing = new Set()
   const waitingParents = new Map()
@@ -277,7 +279,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const service = name => ctx.get(name)
   const sourceOf = id => decisions.get(id)?.messages ? decisions.get(id).source : getSource(id) ?? decisions.get(id)?.source ?? null
   const revisionOf = id => decisions.get(id)?.messages ? decisions.get(id).revision : getRevision(id) ?? decisions.get(id)?.revision ?? null
-  const pendingMessages = id => (decisions.get(id)?.messages ?? []).filter(message => !message.resolution && !message.withdrawn)
+  const pendingMessages = id => (decisions.get(id)?.messages ?? []).filter(message => !message.resolution && !message.withdrawn && !message.cancellation)
   function receiveHuman(sessionId, message, target = 'next-turn') {
     if (!message?.id || message.source?.kind !== 'user') return
     const header = service('sessions')?.get(sessionId)?.header ?? service('agents')?.get(sessionId)?.session?.header ?? {}
@@ -362,6 +364,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const queuedInputs = plan => [...(plan.inputs ?? []).filter(input => input.status === 'queued'), ...pendingMessages(plan.sessionId)]
   const unresolvedInputs = plan => [...(plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)), ...pendingMessages(plan.sessionId).map(message => ({ id: message.messageId, text: message.text, status: 'unclassified' }))]
   function nextAction(plan) {
+    if (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt && pendingMessages(plan.sessionId).length) return { type: 'resolve_message', message: '先用 delegation_decide 确认真实新消息；继续原需求时自动接续中断计划，不新建任务卡。' }
+    if (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt) return { type: 'run', message: '执行已中断，进度保留。用户明确继续后调用 delegation_run，沿用原计划恢复未完成任务；已返回报告继续验证验收，不必新建计划。' }
     if (plan.completion || plan.cancelled) return { type: 'finished', message: '以程序交付回执为准；不要重复启动或清理。' }
     if (pendingMessages(plan.sessionId).length) return { type: 'resolve_message', message: '先用 delegation_decide 确认新消息与需求的关联。' }
     if (unresolvedInputs(plan).length) return { type: 'handle_input', message: '先处理用户补充，沿用原代理同步要求。' }
@@ -654,6 +658,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   function coordinatorWriteBlock(exec) {
     const plan = pendingPlan(exec.agent.id)
     if (!plan) return
+    if (isCurrentPlan(plan) && plan.interruption && !plan.interruption.resumedAt) return '[DSH Agentrix] 原计划执行已中断，任务与成果仍保留。用户已要求继续时用 delegation_run 恢复原任务并继续验收，无需新建任务卡。'
     if (isCurrentPlan(plan)) return '[DSH Agentrix] 当前计划尚未验收。请监督或返工任务；主控验证通过 delegation_verify 执行，避免与子 Agent 重复修改。'
     const target = exec.arguments?.file_path ?? exec.arguments?.path ?? exec.arguments?.notebook_path
     if (typeof target !== 'string' || !target.trim()) return
@@ -845,8 +850,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
           pendingRecords.set(plan.archive.id, { plan, events: [] })
         }
         for (const task of targetsOf(plan)) if (LIVE.includes(task.status)) {
+          task.interruption = { source: 'reload', at: Date.now(), previousStatus: task.status }
+          plan.interruption ??= { source: 'reload', at: Date.now(), reason: 'DSH 或插件重新加载，执行已中断；明确继续后沿用原计划恢复。' }
           task.status = 'blocked'; task.recovered = true
-          task.error = 'DSH 或插件已重新加载。先停止旧子任务，再重试，避免重复执行。'
+          task.error = plan.interruption.reason
           remember(plan, 'task.interrupted', task.error, task)
         }
         for (const task of plan.tasks) {
@@ -954,6 +961,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     } finally { decisionWrites.delete(parent.id) }
     if (message && coordinatorUsage.get(parent.id)?.messageId === message.messageId) coordinatorUsage.set(parent.id, { entry: usageFor(parent.id) })
     onRequestResolved(parent.id, clone(next))
+    if (message && relation === 'continue' && plan?.source?.messageId === source.messageId &&
+      (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt || plan.cancelled && plan.cancelledBy === 'host' && !plan.cancellation)) await runPlan({}, exec)
     return { decision: clone(decision), source: clone(source), messageResolution: clone(resolution), pendingMessages: clone(pendingMessages(parent.id)) }
   }
   function taskOf(plan, id) {
@@ -983,6 +992,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       protocolVersion: task.protocolVersion, dispatcherModel: task.dispatcherModel ? clone(task.dispatcherModel) : null,
       model: null, modelRoute: null, childId: null, error: null, progress: null }
   }
+  function applyAuditResult(owner, task) {
+    for (const resolution of task.resolutions ?? []) {
+      const issue = owner.issues.find(item => item.id === resolution.id)
+      issue.status = resolution.status === 'ADDRESSED' ? 'addressed' : 'open'
+      issue.resolutionEvidence = resolution.evidence; issue.reviewedAttempt = owner.attempts
+    }
+    appendIssues(owner, task.issues ?? [], 'reviewer')
+  }
   function auditPrompt(plan, task) {
     return [
       '你是独立的只读审查者，同时核对需求符合性和代码质量。不要修改文件、执行命令或继续委派；主控负责实际运行验证。',
@@ -1004,6 +1021,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   }
   function pauseAfterFailure(plan, task) {
     if (!plan.autoDispatch) return
+    if (task.issue?.code !== 'MODEL_ROUTE_MISMATCH') {
+      remember(plan, 'task.failure_isolated', `任务 ${task.id} 的故障仅影响本任务；依赖任务等待，无关任务继续，不自动重试故障任务`, task)
+      return
+    }
     plan.autoDispatch = false
     remember(plan, 'plan.paused', `子任务 ${task.id} 失败，已暂停后续自动派单；处理失败原因后由主 Agent 按具体任务 retry`)
     for (const queued of targetsOf(plan)) if (queued.status === 'queued') {
@@ -1034,6 +1055,40 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       remember(plan, 'task.auto_recovery_queued', message, task)
     }
     remember(plan, 'plan.auto_recovery', `沿用原计划自动恢复 ${tasks.length} 个任务`)
+  }
+  async function resumeInterrupted(plan, parent, signal) {
+    const interrupted = targetsOf(plan).filter(task => task.interruption && task.status === 'blocked' && (!task.issue || task.issue.code === 'HOST_INTERRUPTED'))
+    for (const task of interrupted) {
+      signal?.throwIfAborted()
+      if (task.childId && !['released', 'drained', 'none'].includes(task.release?.status)) {
+        await service('subagents').drainChildren(parent, [task.childId])
+        signal?.throwIfAborted()
+        task.release = { status: 'drained', at: Date.now() }
+      }
+      task.recovered = false
+      if (closed || plan.cancelled) throw new Error('当前计划已停止，不能恢复执行')
+      if (live.has(targetKey(plan, task))) throw new Error('旧执行仍在释放，请等待本次中断清理完成后继续原计划')
+      if (task.execution?.commitState === 'committed') {
+        task.issue = null; task.error = task.execution.reason ?? null
+        task.status = ['DONE', 'DONE_WITH_CONCERNS'].includes(task.execution.status) ? task.role === 'reviewer' ? 'completed' : 'review' : 'blocked'
+        if (task.status === 'completed') applyAuditResult(taskOf(plan, task.id), task)
+        else if (task.status === 'review' && task.complexity === 'complex' && task.audit?.forAttempt !== task.attempts) queueAudit(task)
+        delete task.interruption
+        remember(plan, 'task.report_restored', '正式报告已确认，保留原结果继续验证验收，不重复执行', task)
+        continue
+      }
+      if (task.attempts >= getConfig().maxAttempts) continue
+      task.status = 'queued'; task.error = null; task.issue = null
+      task.feedback = '沿用原需求继续中断的任务。先核对已有文件、阶段记录和工具结果，只完成未完成部分；不要重复已经成功的操作。' + (task.feedback ? '\n' + task.feedback : '')
+      remember(plan, 'task.resumed', '已核对旧执行释放状态，沿用原任务继续未完成部分', task, { interruption: clone(task.interruption) })
+      delete task.interruption
+    }
+    if (plan.interruption) {
+      plan.interruption.resumedAt = Date.now()
+      remember(plan, 'plan.resumed', '用户明确继续，保留原任务、报告与验收证据，恢复未完成部分')
+    }
+    invalidateCompletion(plan)
+    plan.wakeSuppressed = false
   }
   function pauseAtActivationLimit(plan) {
     const budget = activationBudget(plan, getConfig().maxActivations)
@@ -1108,15 +1163,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         task.status = 'blocked'; task.error = task.execution.reason
       }
       if (task.status === 'review' && task.role === 'reviewer') task.status = 'completed'
-      if (task.status === 'completed') {
-        const owner = handle.owner
-        for (const resolution of task.resolutions ?? []) {
-          const issue = owner.issues.find(item => item.id === resolution.id)
-          issue.status = resolution.status === 'ADDRESSED' ? 'addressed' : 'open'
-          issue.resolutionEvidence = resolution.evidence; issue.reviewedAttempt = owner.attempts
-        }
-        appendIssues(owner, task.issues ?? [], 'reviewer')
-      }
+      if (task.status === 'completed') applyAuditResult(handle.owner, task)
       if (task.status === 'review' && task.protocolVersion && task.complexity === 'complex') queueAudit(task)
       task.finishedAt = Date.now()
       remember(plan, ['review', 'completed'].includes(task.status) ? 'task.returned' : task.status === 'blocked' ? 'task.blocked' : 'task.failed',
@@ -1391,34 +1438,46 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         backgroundSave()
       }
     }
-    if (!closed && parentPlan?.protocolVersion >= 2 && planStatus(parentPlan) !== 'accepted' && event?.type === 'turn/end' && ['aborted', 'error'].includes(event.data?.reason?.kind)) {
+    if (!closed && parentPlan?.protocolVersion >= 2 && !parentPlan.cancelled && planStatus(parentPlan) !== 'accepted' && event?.type === 'turn/end' && ['aborted', 'error'].includes(event.data?.reason?.kind)) {
       const aborted = event.data.reason.kind === 'aborted'
       const issue = !aborted && modelServiceIssue(event.data.reason.error, 'coordinator', usageTarget(session.id))
       if (issue) parentPlan.coordinatorIssue = issue
       const reason = aborted ? '宿主中断当前执行，尚未完成验收' : issue ? issue.message + '。' + issue.details : '主控执行失败：' + messageOf(event.data.reason.error)
       parentPlan.wakeSuppressed = true; parentPlan.autoDispatch = false
       invalidateCompletion(parentPlan)
-      if (aborted) { parentPlan.cancelled = true; parentPlan.cancelledBy = 'host' }
-      for (const task of targetsOf(parentPlan)) if (task.status !== 'accepted' && task.status !== 'completed' && (aborted || ['queued', ...LIVE].includes(task.status))) {
-        if (aborted) task.stop = { reason, source: 'host', at: Date.now(), previousStatus: task.status }
+      if (aborted) parentPlan.interruption = { source: 'host', at: Date.now(), reason }
+      for (const task of targetsOf(parentPlan)) if (['queued', ...LIVE].includes(task.status)) {
+        if (aborted) {
+          task.interruption = { source: 'host', at: Date.now(), previousStatus: task.status }
+          task.error = reason
+          task.issue = { code: 'HOST_INTERRUPTED', retryable: false, message: reason }
+        }
         else {
           task.error ||= reason
           task.issue ||= issue || { code: 'COORDINATOR_FAILED', retryable: false, message: reason }
         }
-        task.status = aborted ? 'cancelled' : 'blocked'
+        task.status = 'blocked'
       }
       const handles = [...live.values()].filter(handle => handle.planSessionId === parentPlan.sessionId)
       for (const handle of handles) { clearTaskTimers(handle); handle.controller.abort(new Error(reason)) }
-      return (async () => {
+      const operation = (async () => {
         await Promise.all(handles.map(async handle => {
-          await releaseChild(handle, handle.task)
+          const failure = await releaseChild(handle, handle.task)
+          if (failure) {
+            handle.task.recovered = true
+            remember(parentPlan, 'task.cleanup_failed', '旧执行清理失败，恢复前必须先完成清理：' + messageOf(failure), handle.task)
+          }
           if (live.get(handle.key) === handle) live.delete(handle.key)
           expectedRoutes.delete(handle.task.childId); handle.done.resolve()
         }))
-        remember(parentPlan, aborted ? 'plan.host_cancelled' : 'plan.host_failed', reason)
-        finishPlan(parentPlan, aborted ? null : reason)
+        remember(parentPlan, aborted ? 'plan.host_interrupted' : 'plan.host_failed', reason)
+        finishPlan(parentPlan, reason)
         await save()
-      })().catch(error => { storageError = messageOf(error) })
+      })()
+      interrupting.set(parentPlan.sessionId, operation)
+      return operation.catch(error => { storageError = messageOf(error) }).finally(() => {
+        if (interrupting.get(parentPlan.sessionId) === operation) interrupting.delete(parentPlan.sessionId)
+      })
     }
     if (event?.type !== 'turn/end' || event.data?.reason?.kind !== 'error') return
     for (const plan of plans.values()) {
@@ -1704,7 +1763,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const reason = task.protocolVersion >= 2 ? requireText(args.reason, '取消原因；完成后无需 stop，请提交报告并验收', 2000) : args.reason || '主控已停止任务'
       invalidateCompletion(plan)
       task.stop = { reason, source: 'coordinator', at: Date.now(), previousStatus: task.status }
-      task.status = 'cancelled'; plan.autoDispatch = false; plan.dispatchWait = null
+      task.status = 'cancelled'; plan.dispatchWait = null
       for (const target of task.audit ? [task, task.audit] : [task]) {
         const targetId = targetKey(plan, target), handle = live.get(targetId)
         target.status = 'cancelled'
@@ -1938,13 +1997,26 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   })
   async function runPlan(_args, exec) {
     const { plan, parent } = ownPlan(exec)
+    await interrupting.get(plan.sessionId)
+    exec.signal?.throwIfAborted()
     if (getConfig().enabled && plan.decisionProtocolVersion >= 1 && (!decisionCurrent(parent.id) || decisionFor(parent.id).mode !== 'delegate')) throw new Error('启动前请用 delegation_decide 记录 delegate 和具体理由，再自动继续 delegation_run；建计划时可用 decisionReason 一并记录')
+    if (plan.cancelled && plan.cancelledBy === 'host' && !plan.cancellation) {
+      plan.cancelled = false; plan.cancelledBy = null
+      plan.interruption = { source: 'host', at: Date.now(), reason: '沿用原计划恢复旧版本记录的宿主中断' }
+      for (const task of targetsOf(plan)) if (task.status === 'cancelled' && task.stop?.source === 'host') {
+        remember(plan, 'task.legacy_interruption', '用户明确继续原计划，保留旧宿主停止记录', task, { stop: clone(task.stop) })
+        task.status = 'blocked'
+        if (!task.issue || task.issue.code === 'HOST_INTERRUPTED') task.interruption = { source: 'host', at: Date.now(), previousStatus: task.stop.previousStatus }
+        delete task.stop
+      }
+    }
     if (plan.cancelled) {
       const recoverable = recoverableTasks(plan, true)
-      if (!recoverable.length) throw new Error('计划已取消，请提高 maxAttempts 后明确 retry，或创建新计划')
+      if (!recoverable.length) throw new Error('计划已明确取消，不会自动重开。用户决定继续时，处理真实原因后用 delegation_control retry 恢复原任务；无需新建需求或会话')
       queuePlanRecovery(plan, recoverable, '上一轮计划被无原因取消；沿用原任务继续，先核对已有产物和失败原因，再完成本次任务。')
       await save()
     }
+    if (plan.interruption && !plan.interruption.resumedAt || targetsOf(plan).some(task => task.interruption)) await resumeInterrupted(plan, parent, exec.signal)
     if (plan.tasks.some(task => task.recovered)) throw new Error('请先用 delegation_control stop 清理恢复前的子任务，再继续执行')
     if (activationBudget(plan, getConfig().maxActivations).remaining <= 0 && plan.tasks.some(task => task.status === 'queued')) {
       const message = pauseAtActivationLimit(plan); await save(); throw new Error(message)
@@ -2034,42 +2106,34 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     taskId: string, action: { type: 'string', enum: ['steer', 'stop', 'retry', 'acknowledge'] }, message: string, reason: string,
     inputIds: array(string), additionalCriteria: array(string),
   }, ['action'], control)
-  routeTool('delegation_cancel', '取消整个计划，停止并清理其活动子任务。明确用户取消时传 reason；失败或超时后无原因调用会沿用原计划自动恢复可重试任务，不会把计划误标为已停止。', { reason: string }, [], async (args, exec) => {
+  routeTool('delegation_cancel', '仅在用户明确取消整个计划时调用。须提供 reason 和本会话新增真实用户消息的 messageId；自己推测同模型不可用不能作为用户取消。单任务失败只处理该任务；中断后继续用 delegation_run，无需新建计划。', { reason: string, messageId: string }, [], async (args, exec) => {
     const { plan, parent } = ownPlan(exec)
     if (planStatus(plan) === 'accepted') return { status: 'accepted', completion: plan.completion ?? null }
+    if (plan.cancelled) return { status: 'cancelled', completion: plan.completion ?? null }
     const serviceIssue = pendingServiceIssue(plan)
     const hasLive = targetsOf(plan).some(task => LIVE.includes(task.status))
-    if (!args.reason && serviceIssue) {
-      const message = serviceIssue.message + '。' + serviceIssue.action
-      remember(plan, 'plan.service_recovery_required', message)
-      const completion = plan.completion ?? (hasLive ? null : finishPlan(plan, message))
-      await save(); return { status: 'blocked', issue: clone(serviceIssue), completion }
-    }
-    const recoverable = !args.reason && !hasLive && plan.tasks.filter(task => ['failed', 'blocked'].includes(task.status)
-      && !task.recovered && task.attempts < getConfig().maxAttempts)
-    if (recoverable.length) {
-      queuePlanRecovery(plan, recoverable, '上一轮执行失败或超时；沿用原计划继续，先核对已有产物和失败原因，再完成本次任务。')
-      remember(plan, 'plan.auto_recovery', `无原因取消未终止计划，自动恢复 ${recoverable.length} 个可重试任务`)
-      await save(); const failure = await pump(); if (failure) throw failure
-      if (service('agents')?.get(parent.id) === parent) parent.inject?.(runtimeMessage(plan,
-        `系统已拦截无原因的整计划取消，沿用原计划自动恢复：${recoverable.map(task => task.id).join('、')}。请读取 delegation_status，继续监督并完成验证验收；若用户确实要取消，必须再次提供明确 reason。`, 'delegation-recovery'))
+    if (!args.reason) {
+      const message = serviceIssue ? serviceIssue.message + '。' + serviceIssue.action
+        : '计划未取消。整计划取消须关联真实用户消息；已有任务继续，失败项处理原因后明确 retry，中断用 delegation_run 恢复原计划。'
+      remember(plan, 'plan.cancellation_rejected', message)
+      const completion = plan.completion ?? (!hasLive && targetsOf(plan).some(task => ['failed', 'blocked'].includes(task.status)) ? finishPlan(plan, message) : null)
       await save()
-      return { status: 'recovering', taskIds: recoverable.map(task => task.id), completion: null }
+      return { status: serviceIssue ? 'blocked' : planStatus(plan), ...(serviceIssue ? { issue: clone(serviceIssue) } : {}), message, completion }
     }
-    if (!args.reason && !hasLive && plan.tasks.some(task => ['failed', 'blocked'].includes(task.status))) {
-      const limit = getConfig().maxAttempts
-      const message = `计划未取消：失败任务已达到每任务执行次数上限（${limit}）。请提高 maxAttempts 后明确 retry，或提供 reason 取消。`
-      remember(plan, 'plan.auto_recovery_blocked', message)
-      await save()
-      return { status: 'blocked', completion: plan.completion ?? finishPlan(plan, message) }
-    }
+    const reason = requireText(args.reason, '取消原因', 2000)
+    const messages = (decisions.get(parent.id)?.messages ?? []).filter(message => !message.withdrawn)
+    const message = messages.at(-1)
+    if (!args.messageId || message?.messageId !== args.messageId || message.messageId === plan.source?.messageId ||
+      message.at < plan.createdAt || message.cancellation) throw new Error('整计划取消必须关联本会话新增的真实用户消息 messageId；主控推测故障或自行填写 reason 不能代替用户取消。单任务失败只处理该任务，中断后用 delegation_run 沿用原计划继续')
+    plan.cancellation = { source: 'user-message', messageId: message.messageId, text: message.text, reason, at: Date.now() }
+    message.cancellation = clone(plan.cancellation)
     invalidateCompletion(plan)
-    plan.cancelled = true; plan.cancelledBy = args.reason ? 'explicit' : 'implicit'; plan.autoDispatch = false; plan.wakeSuppressed = true
+    plan.cancelled = true; plan.cancelledBy = 'explicit'; plan.autoDispatch = false; plan.wakeSuppressed = true
     cancellingPlans.add(plan)
     try { for (const task of plan.tasks) if (task.status !== 'accepted') {
-      await control({ taskId: task.id, action: 'stop', reason: '主控明确取消整个计划' }, exec)
+      await control({ taskId: task.id, action: 'stop', reason }, exec)
     } } finally { cancellingPlans.delete(plan) }
-    remember(plan, 'plan.cancelled', args.reason ? '主 Agent 已停止计划：' + args.reason : '主 Agent 已停止计划，历史记录保留')
+    remember(plan, 'plan.cancelled', '用户明确停止计划：' + reason, undefined, { cancellation: clone(plan.cancellation) })
     finishPlan(plan)
     await save(); return { status: 'cancelled', completion: plan.completion ?? null }
   })
@@ -2126,8 +2190,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         '\n先说明理解与影响；执行变更用 delegation_control steer(inputIds,additionalCriteria,message) 同步原代理；结果已返回则核对后 delegation_review rework。纯答复用 acknowledge(inputIds,message) 记录，不改变交付标准。未处理前不能验收。' : ''
       const coordination = plan.coordinationIssue && !plan.coordinationIssue.resolvedAt
         ? `协作操作未成功：${plan.coordinationIssue.tool}；${plan.coordinationIssue.message}\n下一步：${plan.coordinationIssue.nextAction}` : ''
+      const interruption = plan.interruption && !plan.interruption.resumedAt
+        ? '执行已中断，原任务和证据保留；用户明确继续后用 delegation_run 恢复，不必新建计划。已返回报告继续验证验收，服务错误仍需单独处理后重试。' : ''
       return [`当前计划：${brief(plan.goal, 200)}\n状态：${planStatus(plan)}；${plan.tasks.map(task => `${task.id}=${task.status}${task.audit ? '（独立审查=' + task.audit.status + '）' : ''}`).join('，')}。启动预算：${budget.used}/${budget.limit}，剩余 ${budget.remaining}（含独立审查）。调用 delegation_status 获取证据并继续监督；最终交付结论以程序回执为准，最后一次验收后自动结束，不用 stop 清理。`, plan.completion ? completionText(plan.completion) : '尚未完成。报告由原执行者提交，主控等待通知后验证验收；团队看板和 list_agents 不是托管任务的完成依据。', coordination, issue ? issue.message + '。' + issue.action : '', pending, waiting, paused,
-        association, failures.length ? `失败原因：\n${failures.join('\n')}` : ''].filter(Boolean).join('\n')
+        interruption, association, failures.length ? `失败原因：\n${failures.join('\n')}` : ''].filter(Boolean).join('\n')
     },
     hasPending: sessionId => { const plan = pendingPlan(sessionId); return Boolean(plan && isCurrentPlan(plan)) },
     async dispose() {
@@ -2139,6 +2205,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       for (const plan of plans.values()) {
         plan.autoDispatch = false
         for (const task of targetsOf(plan)) if (LIVE.includes(task.status)) {
+          task.interruption = { source: 'reload', at: Date.now(), previousStatus: task.status }
+          plan.interruption ??= { source: 'reload', at: Date.now(), reason: '插件停止，执行已中断；明确继续后清理旧执行并沿用原任务恢复。' }
           task.status = 'blocked'; task.recovered = true; task.error = '插件停止，旧子任务需要先清理再重试'
           remember(plan, 'task.interrupted', task.error, task)
         }

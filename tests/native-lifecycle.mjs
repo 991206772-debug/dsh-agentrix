@@ -161,7 +161,7 @@ class ScriptedAdapter extends LlmAdapter {
             outputs: [deliverablePath], writes: [], complexity: 'routine', criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: deliverablePath } }] })) })
         else if (phase === 1) {
           await until(async () => { const tasks = (await state()).plans[0].tasks; return tasks[0].status === 'blocked' && tasks[1].status === 'running' }, 'one refused request and another running worker')
-          block = tool('delegation_cancel', {})
+          block = tool('delegation_cancel', { reason: '同模型其他任务必然也会失败，取消全部任务' })
         } else if (phase === 2) {
           const current = (await state()).plans[0]
           assert.equal(current.tasks[0].issue.code, 'MODEL_SERVICE_REQUEST_REFUSED')
@@ -428,6 +428,10 @@ try {
     workerGate.resolve()
   }
   await until(async () => activeNewRequest ? (await state()).plans[0]?.completion?.outcome === 'completed' : events.some(event => event.id === 'root' && event.type === 'turn/end'), 'coordinator completion')
+  if (cancelSupplement) await until(async () => {
+    const stopped = (await state()).plans[0]
+    return stopped.completion?.outcome === 'blocked' && stopped.tasks[0].release?.status === 'released'
+  }, 'host interruption cleanup and receipt')
   const plan = (await state()).plans[0]
   if (roleTools) assert.ok(plan, JSON.stringify(events.filter(event => event.type === 'turn/end')))
   if (decisionRecovery) {
@@ -478,12 +482,13 @@ try {
     console.log('PASS: native ' + (dependentStages ? 'three dependency stages wait, report, verify and accept without completion recovery or replacement workers' : 'new direct demand writes and verifies an unrelated file while the original child continues; overlapping write is denied; the original plan later receives actual acceptance'))
   } else if (cancelSupplement) {
     await until(() => parent.status === 'idle', 'cancelled coordinator cleanup')
-    assert.equal(plan.cancelled, true)
-    assert.equal(plan.completion.outcome, 'cancelled')
+    assert.equal(plan.cancelled, false)
+    assert.equal(plan.completion.outcome, 'blocked')
+    assert.equal(plan.interruption.source, 'host')
     assert.equal(plan.tasks[0].release.status, 'released')
     assert.equal(plan.activationBudget.used, 1)
     assert.equal(new Set(requests.filter(request => request.sessionId !== 'root').map(request => request.sessionId)).size, 1)
-    console.log('PASS: real native user cancellation wins queued supplement, releases the original child once and does not reopen work')
+    console.log('PASS: native host stop interrupts execution, preserves the plan, releases the original child once and does not automatically reopen work')
   } else if (requestRefusal) {
     await until(() => parent.status === 'idle', 'refusal receipt settled')
     assert.equal(plan.cancelled, false)

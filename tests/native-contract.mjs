@@ -108,6 +108,11 @@ try {
     assert.equal(result.isError, false, `${name}: ${JSON.stringify(result)}`)
     return result.value
   }
+  const cancel = async reason => {
+    const messageId = 'cancel-fixture-' + ++sequence
+    ctx.emit('session/event', { id: 'root' }, { type: 'user/message', data: { id: messageId, source: { kind: 'user' }, content: [{ type: 'text', text: '取消当前计划' }] } })
+    return checked('delegation_cancel', { reason, messageId })
+  }
   ctx.emit('session/event', { id: 'root' }, { type: 'agent/inbox/spliced', data: { inserted: [{ id: 'native-request', source: { kind: 'user' }, content: [{ type: 'text', text: '验证隔离环境中的原生工具与委派流程' }] }] } })
   ctx.emit('session/event', { id: 'root' }, { type: 'turn/start', data: { turn: 1 } })
   await checked('delegation_decide', { mode: 'delegate', reason: '由隔离子任务执行，主控通过原生工具管线核对结果和验收证据。' })
@@ -182,7 +187,7 @@ try {
   await routes.get('/dsh-delegation-first/api/state')({ method: 'GET' }, { writeHead() {}, end(body) { response = JSON.parse(body) } })
   assert.equal(response.plans[0].tasks[0].error, failure)
   assert.equal(children.length, 2)
-  const cancelled = await checked('delegation_cancel', { reason: '原生契约测试已验证服务错误，明确结束本场景' })
+  const cancelled = await cancel('原生契约测试已验证服务错误，明确结束本场景')
   assert.equal(cancelled.status, 'cancelled')
   assert.equal((await checked('delegation_status')).plan.tasks[0].error, failure)
   assert.equal(children.length, 2, 'explicit fixture cleanup must not start a recovery child')
@@ -205,7 +210,7 @@ try {
   await checked('delegation_run')
   assert.equal(children.length, 3)
   assert.equal((await checked('delegation_status')).plan.tasks[0].attempts, 1)
-  await checked('delegation_cancel', { reason: '原生契约测试已验证无效模型恢复，明确结束本场景' })
+  await cancel('原生契约测试已验证无效模型恢复，明确结束本场景')
   const savedModels = await saveConfig({ models: { worker: { provider: 'test', model: 'routine' }, reviewer: { provider: 'test', model: 'complex' } } })
   assert.equal(savedModels.status, 200)
   assert.equal(savedModels.payload.reviewerModelPolicy, 'dispatcher-snapshot')
@@ -227,7 +232,7 @@ try {
   assert.equal(disposed.get(children[3].childId), 1)
   assert.equal(mismatch.autoDispatch, false)
   probeMismatch = false
-  await checked('delegation_cancel', { reason: '原生契约测试已验证模型错配拦截，明确结束本场景' })
+  await cancel('原生契约测试已验证模型错配拦截，明确结束本场景')
   await checked('delegation_plan', { goal: '父子模型独立且实际请求可核对', tasks: [modelCard('routine', 'routine'), modelCard('complex', 'complex')] })
   await checked('delegation_run')
   assert.deepEqual(children.slice(-2).map(child => child.request.agentOptions.model), ['routine', 'routine'])
@@ -239,7 +244,7 @@ try {
   assert.deepEqual(verified.tasks.map(task => task.modelRoute.actual.model), ['routine', 'routine'])
   assert.deepEqual(verified.tasks.map(task => task.modelRoute.role), ['worker', 'worker'])
   assert.equal(adapterDispatches, 2)
-  await checked('delegation_cancel', { reason: '原生契约测试已验证模型独立路由，明确结束本场景' })
+  await cancel('原生契约测试已验证模型独立路由，明确结束本场景')
   await checked('delegation_plan', { goal: '复杂任务独立审查与身份约束', tasks: [modelCard('audit', 'complex')] })
   await checked('delegation_run')
   const worker = children.at(-1), workerIndex = children.length - 1
