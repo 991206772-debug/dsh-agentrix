@@ -13,7 +13,8 @@ const directProgress = process.argv.includes('--direct-progress')
 const coordinationConflict = process.argv.includes('--coordination-conflict')
 const mixedRefusal = process.argv.includes('--mixed-refusal')
 const accordion = process.argv.includes('--accordion')
-const liveProgress = process.argv.includes('--live-progress') || directProgress || coordinationConflict || mixedRefusal || accordion
+const waitingDependencies = process.argv.includes('--waiting-dependencies')
+const liveProgress = process.argv.includes('--live-progress') || directProgress || coordinationConflict || mixedRefusal || accordion || waitingDependencies
 let config = { ok: true, modelRouting: 'roles', reviewerModelPolicy: 'dispatcher-snapshot', mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS, locked: false,
   models: { worker: { provider: invalid ? 'retired-demo' : 'demo', model: 'routine-model' }, reviewer: null }, file: 'C:/isolated-test/delegation-first/default.json',
   defaults: { mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS }, ranges: { threshold: { min: 0, max: 20 }, ...OPTION_RANGES },
@@ -64,7 +65,7 @@ if (liveProgress) {
         activity: { kind: 'tool', tool: 'edit', at: now } } }],
   })
 }
-if (mixedRefusal) {
+if (mixedRefusal || waitingDependencies) {
   const now = Date.now(), raw = 'WorkBuddy: Illegal API invocation from an unapproved channel (isolated preview)'
   Object.assign(plans[0], { sessionTitle: '文档评审流程演示', goal: '核对示例文章的事实、结构与用词',
     source: { messageId: 'mixed-request', text: '核对隔离示例文档，给出事实、结构与用词建议' },
@@ -77,6 +78,9 @@ if (mixedRefusal) {
       issue: { code: 'MODEL_SERVICE_REQUEST_REFUSED', message: '执行者模型的本次请求被服务商拒绝', details: raw,
         action: '核对服务商支持的调用方式与限制，处理后明确重试该任务。' } }],
   })
+  if (waitingDependencies) plans[0].tasks[3] = { ...baseTask, id: 'summary', title: '汇总发布前评审', status: 'queued',
+    dependsOn: ['active-0', 'active-1', 'active-2'], scope: '前三项验收后，汇总事实、结构与用词意见。', report: '', checks: [],
+    modelRoute: { role: 'worker', source: 'configured', requested: { provider: 'demo', model: 'routine-model' }, resolved: null, actual: null } }
 }
 if (accordion) {
   const now = Date.now(), raw = 'WorkBuddy: Illegal API invocation from an unapproved channel (isolated preview)'
@@ -192,7 +196,7 @@ window.__ModuleLoader__ = {load({factory}) {
   const openView = id => { activeView=id; renderView(); };
   function LiveChat() {
     return React.createElement('div',{className:'preview-other-view','data-fixture-view':'chat'},
-      React.createElement('p',null,${JSON.stringify(mixedRefusal || accordion ? plans[0].source.text : '工作台保留两个接口，参数自动生成，固定参数改为配置项')}),
+      React.createElement('p',null,${JSON.stringify(mixedRefusal || accordion || waitingDependencies ? plans[0].source.text : '工作台保留两个接口，参数自动生成，固定参数改为配置项')}),
       React.createElement('p',null,${JSON.stringify(coordinationConflict ? '主控曾输出“已交付”，下方程序状态显示真实进度。' : '主控正在核对当前方案与执行结果。')}));
   }
   function Composer() {

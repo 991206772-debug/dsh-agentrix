@@ -18,7 +18,7 @@ test('acceptance distinguishes the current coordination policy from a host still
   }
 })
 
-test('managed chat keeps an explicit incomplete label through errors and acceptance until a delivery receipt exists', async () => {
+test('managed chat shows actual task states and never claims completed delivery before a receipt exists', async () => {
   const plan = { protocolVersion: 2, sessionId: 'session-current', status: 'running', completion: null,
     tasks: [{ id: 'a', title: '生成独立工具', status: 'running' }],
     coordinationIssue: { code: 'COORDINATION_OPERATION_FAILED', tool: 'write', callId: 'denied-write', message: '主控写入被拒绝',
@@ -28,16 +28,18 @@ test('managed chat keeps an explicit incomplete label through errors and accepta
   const dock = f.mountDock('session-current'), action = f.mountAction('session-current')
   try {
     await dock.flush(); await action.flush()
-    assert.match(JSON.stringify(dock.nodes('summary')[0]), /尚未完成.*子任务执行中/)
-    assert.match(action.text(), /尚未完成.*进行中/)
+    assert.match(dock.nodes('summary')[0].props['aria-label'], /1 项任务.*执行中 1.*验收 0\/1/)
+    assert.match(action.text(), /进行中 1.*已验收 0\/1/)
+    assert.doesNotMatch(action.text(), /已完成/)
     assert.match(dock.text(), /主控操作未执行.*主控写入被拒绝.*等待原执行者/)
     assert.equal(plan.tasks[0].error, undefined)
     plan.status = 'review'; plan.tasks[0].status = 'review'
     await dock.tick(); await action.flush()
-    assert.match(JSON.stringify(dock.nodes('summary')[0]), /尚未完成.*待验收/)
+    assert.match(dock.nodes('summary')[0].props['aria-label'], /1 项任务.*待验收 1.*验收 0\/1/)
     plan.status = 'accepted'; plan.tasks[0].status = 'accepted'; plan.coordinationIssue.resolvedAt = 200
     await dock.tick(); await action.flush()
-    assert.match(JSON.stringify(dock.nodes('summary')[0]), /尚未完成.*回执/)
+    assert.match(dock.nodes('summary')[0].props['aria-label'], /1 项任务.*回执生成中.*验收 1\/1/)
+    assert.doesNotMatch(action.text(), /已完成/)
     assert.doesNotMatch(dock.text(), /主控操作未执行/)
     plan.completion = { id: 'verified-receipt', outcome: 'completed', accepted: 1, total: 1, evidence: ['actual-proof'], deliverables: [], remaining: [] }
     await dock.tick(); await action.flush()
@@ -122,6 +124,32 @@ test('coordinator overview groups observed activity, model and tool calls separa
   } finally { dock.close(); f.close() }
 })
 
+test('task totals and running counts stay distinct with a dependent task waiting for acceptance', async () => {
+  const tasks = ['facts', 'structure', 'wording'].map(id => ({ id, title: id, status: 'running' }))
+  tasks.push({ id: 'summary', title: '汇总评审', status: 'queued', dependsOn: ['facts', 'structure', 'wording'] })
+  const plan = { sessionId: 'session-current', protocolVersion: 2, status: 'running', tasks }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true,
+    json: async () => structuredClone({ ok: true, sessionId: plan.sessionId, plans: [plan], sessions: [] }) }) })
+  const dock = f.mountDock(plan.sessionId), notice = f.mountNotice(plan.sessionId)
+  const text = node => !node ? '' : typeof node !== 'object' ? String(node) : typeof node.type === 'function' ? text(node.type(node.props))
+    : node.type === 'style' ? '' : node.children.flat(Infinity).map(text).join(' ')
+  try {
+    await dock.flush(); await notice.flush()
+    assert.match(dock.nodes('summary')[0].props['aria-label'], /4 项任务.*执行中 3.*等待 1/)
+    for (const surface of [dock, notice]) {
+      const items = surface.nodes('details').filter(node => node.props?.['data-task-id'])
+      assert.equal(items.length, 4)
+      const waiting = items.find(node => node.props['data-task-id'] === 'summary')
+      assert.match(text(waiting.children.find(node => node?.type === 'summary')), /等待前置任务/)
+      assert.doesNotMatch(surface.text(), /尚未完成|3 个子任务执行中/)
+      assert.equal(surface.nodes('p').filter(node => node.props?.role === 'status').length, 0, 'do not repeat the strip as a loose status paragraph')
+    }
+    tasks[0].status = 'accepted'
+    await dock.tick()
+    assert.match(dock.nodes('summary')[0].props['aria-label'], /4 项任务.*执行中 2.*等待 1.*验收 1\/4/)
+  } finally { dock.close(); notice.close(); f.close() }
+})
+
 test('the collapsed strip shows real coordinator activity and switches to child queue and acceptance counts', async () => {
   const row = { sessionId: 'session-current', execution: { running: true, toolCalls: 12,
     model: { model: 'observed/coordinator' }, activity: { kind: 'tool', tool: 'grep' }, unresolvedChanges: [] } }
@@ -142,7 +170,7 @@ test('the collapsed strip shows real coordinator activity and switches to child 
       { id: 'a', status: 'running' }, { id: 'b', status: 'running' }, { id: 'c', status: 'queued' }, { id: 'd', status: 'accepted' },
     ] }]
     await dock.tick()
-    assert.match(label(), /尚未完成.*2 个子任务执行中.*等待 1.*验收 1\/4/)
+    assert.match(label(), /4 项任务.*执行中 2.*等待 1.*验收 1\/4/)
     assert.doesNotMatch(label(), /observed\/coordinator|本轮工具调用/)
   } finally { dock.close(); f.close() }
 })
@@ -186,7 +214,7 @@ test('composer labels stay short and distinguish coordinator work from actual ch
       { id: 'a', status: 'running' }, { id: 'b', status: 'running' }, { id: 'c', status: 'queued' },
     ] }]
     await dock.tick()
-    assert.match(JSON.stringify(dock.nodes('summary')[0]), /2 个子任务执行中/)
+    assert.match(dock.nodes('summary')[0].props['aria-label'], /3 项任务.*执行中 2.*等待 1/)
     assert.doesNotMatch(JSON.stringify(dock.nodes('summary')[0]), /主控处理中|已验收|协作进度/)
   } finally { dock.close(); f.close() }
 })
@@ -1270,7 +1298,7 @@ test('mixed failures keep all running task activity visible in the dock and chat
       assert.match(surface.text(), /已验收 0\/4/)
       assert.doesNotMatch(surface.text(), /已完成 0\/4/)
     }
-    assert.match(dock.nodes('summary')[0].props['aria-label'], /3 个子任务执行中.*失败 1.*验收 0\/4/)
+    assert.match(dock.nodes('summary')[0].props['aria-label'], /4 项任务.*执行中 3.*失败 1.*验收 0\/4/)
   } finally { dock.close(); notice.close(); f.close() }
 })
 
@@ -1372,7 +1400,8 @@ test('healthy execution and waits show status cards while accepted legacy tasks 
       assert.ok(!notice.nodes('section').some(node => node.props?.role === 'alert'))
       if (status === 'accepted') assert.equal(notice.text(), '')
       else {
-        assert.match(notice.text(), /协作进度/)
+        assert.match(notice.text(), /1 项任务/)
+        assert.ok(notice.nodes('div').some(node => node.props?.['aria-label'] === '协作进度'))
         assert.ok(notice.nodes('section').some(node => node.props?.['data-kind'] === 'progress' && node.props.role === 'status'))
         if (status === 'planned') assert.match(notice.text(), /等待其他会话释放名额/)
         if (status === 'review') assert.match(notice.text(), /等待主控实际验证/)

@@ -638,7 +638,7 @@ window.__ModuleLoader__.load({
       'input.queued': '待主控接收', 'input.received': '主控已接收，待处理', 'input.forwarded': '已同步至任务', 'input.resolved': '已答复', 'input.withdrawn': '已撤回',
       'input.history': '查看补充信息处理记录', 'input.criteria': '新增验收标准',
       'view.otherRequest': '其他需求的托管记录', 'view.recordedRequest': '托管计划对应需求（当前需求关联未确认）',
-      'live.title': '协作进度', 'live.counts': '执行中 {running} · 已返回 {returned}/{total} · 已验收 {accepted}/{total}',
+      'live.title': '协作进度', 'live.counts': '执行中 {running} · 等待 {waiting}', 'live.results': '已返回 {returned}/{total} · 已验收 {accepted}/{total}',
       'live.current': '当前', 'live.recent': '最近完成的工具', 'live.activityAt': '最近活动', 'live.unknown': '子代理执行中，当前步骤未记录', 'live.toolFailed': '该步骤失败',
       'live.read': '读取文件', 'live.search': '检索内容', 'live.glob': '查找文件', 'live.edit': '修改文件', 'live.write': '写入文件',
       'live.command': '执行命令', 'live.report': '提交报告', 'live.checkpoint': '记录阶段结果',
@@ -661,7 +661,7 @@ window.__ModuleLoader__.load({
       'input.queued': 'Awaiting coordinator receipt', 'input.received': 'Received; awaiting handling', 'input.forwarded': 'Forwarded to task', 'input.resolved': 'Answered', 'input.withdrawn': 'Withdrawn',
       'input.history': 'Supplement handling history', 'input.criteria': 'Additional acceptance criteria',
       'view.otherRequest': 'Managed record for another request', 'view.recordedRequest': 'Request for this plan (current request association unconfirmed)',
-      'live.title': 'Collaboration progress', 'live.counts': 'Running {running} · Returned {returned}/{total} · Accepted {accepted}/{total}',
+      'live.title': 'Collaboration progress', 'live.counts': 'Running {running} · Waiting {waiting}', 'live.results': 'Returned {returned}/{total} · Accepted {accepted}/{total}',
       'live.current': 'Current', 'live.recent': 'Latest completed tool', 'live.activityAt': 'Latest activity', 'live.unknown': 'Worker running; current step not recorded', 'live.toolFailed': 'This step failed',
       'live.read': 'Reading a file', 'live.search': 'Searching contents', 'live.glob': 'Finding files', 'live.edit': 'Editing a file', 'live.write': 'Writing a file',
       'live.command': 'Running a command', 'live.report': 'Submitting a report', 'live.checkpoint': 'Recording stage findings',
@@ -677,10 +677,11 @@ window.__ModuleLoader__.load({
       'service.requestRefused': '模型服务拒绝本次请求。', 'service.refusalScope': '这是本次请求的拒绝结果，不代表模型整体不可用。',
       'service.refusalNext': '核对服务商支持的调用方式与限制，处理后由主控明确重试该任务。', 'service.rawDetails': '原始错误详情',
       'chat.othersContinue': '其他正在运行的任务继续执行。',
-      'accordion.worker': '执行者', 'accordion.reviewing': '独立审查中', 'accordion.scope': '任务范围',
+      'accordion.worker': '执行者', 'accordion.reviewing': '独立审查中', 'accordion.scope': '任务范围', 'accordion.dependency': '等待前置任务',
       'accordion.report': '执行者报告', 'accordion.auditReport': '审查报告', 'accordion.acceptance': '主控验收',
       'accordion.verified': '实际验证通过 {passed}/{total}', 'accordion.noChecks': '尚未记录验证',
       'dock.workers': '{count} 个子任务执行中', 'dock.audit': '独立审查中', 'dock.review': '待验收 {count} 项',
+      'dock.taskCount': '{count} 项任务', 'dock.running': '执行中', 'dock.auditing': '审查中', 'dock.awaitingReview': '待验收',
       'dock.unavailable': '协作暂不可用', 'dock.offline': '状态暂不可用',
       'direct.advice': '系统建议委派，当前尚未启动子代理', 'direct.calls': '本轮工具调用 {count} 次',
       'direct.preparing': '主控准备中', 'decision.title': '主控决定', 'decision.direct': '直接执行', 'decision.delegate': '委派',
@@ -705,10 +706,11 @@ window.__ModuleLoader__.load({
       'service.requestRefused': 'The model service refused this request.', 'service.refusalScope': 'This refusal applies to this request; it does not establish that the model is unavailable.',
       'service.refusalNext': 'Check the provider\'s supported usage and restrictions, then explicitly retry this task after resolving the cause.', 'service.rawDetails': 'Original error details',
       'chat.othersContinue': 'Other running tasks continue.',
-      'accordion.worker': 'Worker', 'accordion.reviewing': 'Independent review in progress', 'accordion.scope': 'Task scope',
+      'accordion.worker': 'Worker', 'accordion.reviewing': 'Independent review in progress', 'accordion.scope': 'Task scope', 'accordion.dependency': 'Waiting for dependencies',
       'accordion.report': 'Worker report', 'accordion.auditReport': 'Review report', 'accordion.acceptance': 'Coordinator acceptance',
       'accordion.verified': '{passed}/{total} checks verified', 'accordion.noChecks': 'No verification recorded',
       'dock.workers': '{count} subtasks running', 'dock.audit': 'Independent review', 'dock.review': '{count} awaiting acceptance',
+      'dock.taskCount': '{count} tasks', 'dock.running': 'Running', 'dock.auditing': 'Reviewing', 'dock.awaitingReview': 'Awaiting acceptance',
       'dock.unavailable': 'Delegation unavailable', 'dock.offline': 'Status unavailable',
       'direct.advice': 'Delegation was suggested; no child agent has started', 'direct.calls': '{count} tool calls this turn',
       'direct.preparing': 'Coordinator preparing', 'decision.title': 'Coordinator decision', 'decision.direct': 'Execute directly', 'decision.delegate': 'Delegate',
@@ -1086,12 +1088,11 @@ window.__ModuleLoader__.load({
       const running = tasks.filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
       const status = chatStatusKey(plan)
       const statusText = status === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${status}`)
-      const rawSummary = result.error && !data ? t('chat.unavailable') : plan
+      const baseSummary = result.error && !data ? t('chat.unavailable') : plan
         ? fill(t(plan.protocolVersion >= 2 || status === 'stopped' ? status === 'running' ? 'chat.activeAcceptedSummary' : 'chat.acceptedSummary'
           : status === 'completed' ? 'chat.completedSummary' : status === 'running' ? 'chat.activeSummary' : 'chat.planSummary'),
           { status: statusText, running, done, total: tasks.length })
         : route?.route === 'direct' ? t('chat.direct') : t('chat.noPlan')
-      const baseSummary = (plan?.protocolVersion >= 2 && !plan.completion ? t('coordination.incomplete') + ' · ' : '') + rawSummary
       const counts = [['queued', 'waitingCount'], ['review', 'reviewCount'], ['failed', 'failedCount'], ['blocked', 'blockedCount']]
         .map(([value, key]) => ({ count: tasks.filter(task => task.status === value && !(value === 'review' && ['queued', 'starting', 'running'].includes(task.audit?.status))).length, key }))
         .concat([{ count: tasks.filter(task => ['starting', 'running'].includes(task.audit?.status)).length, key: 'auditCount' },
@@ -1141,6 +1142,9 @@ window.__ModuleLoader__.load({
 .ddf-chat-notice[data-kind="progress"] .ddf-chat-notice-heading { color:var(--dsw-alias-brand-primary,#4f6ef7); }
 .ddf-chat-live-task + .ddf-chat-live-task { margin-top:8px; padding-top:8px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-chat-live-meta { color:var(--dsw-alias-label-secondary,#646a73); }
+.ddf-chat-plan-heading { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 18px; justify-content:space-between; }
+.ddf-chat-plan-heading strong { font-size:15px; font-weight:600; }
+.ddf-chat-plan-heading span,.ddf-chat-plan-results { color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; font-variant-numeric:tabular-nums; }
 .ddf-chat-task-list { margin-top:10px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-chat-task { min-width:0; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-chat-task-summary { display:grid; grid-template-columns:10px minmax(0,1fr) auto; align-items:center; gap:10px; padding:12px 0; cursor:pointer; list-style:none; }
@@ -1173,7 +1177,7 @@ window.__ModuleLoader__.load({
 .ddf-dock-indicator { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-dock-activity { max-width:9em; }
 .ddf-dock-model { max-width:16ch; }
-.ddf-dock-calls,.ddf-dock-accepted,.ddf-dock-queued,.ddf-dock-failed,.ddf-dock-blocked,.ddf-dock-refused { display:inline-flex; flex:none; align-items:baseline; gap:4px; overflow:visible; font-variant-numeric:tabular-nums; }
+.ddf-dock-calls,.ddf-dock-accepted,.ddf-dock-running,.ddf-dock-auditing,.ddf-dock-review,.ddf-dock-queued,.ddf-dock-failed,.ddf-dock-blocked,.ddf-dock-refused { display:inline-flex; flex:none; align-items:baseline; gap:4px; overflow:visible; font-variant-numeric:tabular-nums; }
 .ddf-dock-calls,.ddf-dock-accepted { padding-left:9px; border-left:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-dock-indicator strong { color:var(--dsw-alias-state-business-primary,#4f6ef7); font-size:14px; font-weight:600; }
 .ddf-dock-accepted strong { color:var(--dsw-alias-state-success-primary,#369b83); }
@@ -1345,6 +1349,8 @@ window.__ModuleLoader__.load({
       if (!tasks.length || plan.completion || accepted === tasks.length && plan.protocolVersion < 2) return null
       const live = task => ['starting', 'running'].includes(task.status)
       const running = tasks.filter(task => live(task) || live(task.audit ?? {})).length
+      const waiting = tasks.filter(task => task.status === 'queued' || task.audit?.status === 'queued').length
+      const waitingOnDependencies = task => (task.dependsOn ?? []).some(id => tasks.some(other => other.id === id && other.status !== 'accepted'))
       const routeOf = task => task?.modelRoute?.actual ?? task?.modelRoute?.resolved ?? task?.modelRoute?.requested ?? task?.model
       const current = (task, target = task) => {
         if (live(target)) {
@@ -1356,19 +1362,23 @@ window.__ModuleLoader__.load({
         }
         if (target !== task) return t('audit.' + target.status)
         if (task.status === 'review') return t('view.acceptanceReview')
-        if (task.status === 'queued') return plan.dispatchWait?.message || t((task.dependsOn ?? []).some(id => tasks.some(other => other.id === id && other.status !== 'accepted')) ? 'view.actualDependency' : 'view.actualQueued')
+        if (task.status === 'queued') return plan.dispatchWait?.message || t(waitingOnDependencies(task) ? 'view.actualDependency' : 'view.actualQueued')
         return t('status.' + task.status)
       }
       return h('section', { className: 'ddf-chat-notice ddf-chat-live', 'data-kind': 'progress', role: 'status' },
-        h('style', null, CHAT_NOTICE_STYLES), h('strong', { className: 'ddf-chat-notice-heading' }, t('live.title') + ' · ' + fill(t('live.counts'), {
-          running, returned: tasks.filter(task => ['review', 'accepted'].includes(task.status)).length, accepted, total: tasks.length })),
+        h('style', null, CHAT_NOTICE_STYLES),
+        h('div', { className: 'ddf-chat-plan-heading', 'aria-label': t('live.title') },
+          h('strong', null, fill(t('dock.taskCount'), { count: tasks.length })), h('span', null, fill(t('live.counts'), { running, waiting }))),
+        h('p', { className: 'ddf-chat-plan-results' }, fill(t('live.results'), {
+          returned: tasks.filter(task => ['review', 'accepted'].includes(task.status)).length, accepted, total: tasks.length })),
         error ? h('p', { className: 'ddf-chat-live-meta' }, t('view.staleTitle')) : null,
         h('div', { className: 'ddf-chat-task-list' }, ...tasks.map((task, index) => {
           const audit = task.audit, auditing = audit && ['queued', 'starting', 'running', 'failed', 'blocked'].includes(audit.status)
           const target = task.status === 'accepted' || task.status === 'cancelled' ? task : auditing ? audit : task
           const route = routeOf(target) ?? (target === audit ? task.dispatcherModel : null)
           const status = requestRefused(target) && ['failed', 'blocked'].includes(target.status) ? t('dock.requestRefused')
-            : target === audit ? live(audit) ? t('accordion.reviewing') : t('audit.' + audit.status) : t('status.' + task.status)
+            : target === audit ? live(audit) ? t('accordion.reviewing') : t('audit.' + audit.status)
+              : task.status === 'queued' && waitingOnDependencies(task) ? t('accordion.dependency') : t('status.' + task.status)
           const problem = task.status === 'accepted' ? null : chatProblem({ status: task.status, cancelled: plan.cancelled, tasks: [task] })
           const checks = task.checks ?? []
           return h('details', { key: task.id, className: 'ddf-chat-task', 'data-task-id': task.id, 'data-status': target.status, open: index === 0 },
@@ -1452,10 +1462,15 @@ window.__ModuleLoader__.load({
       } else if (plan) {
         const tasks = plan.tasks ?? [], status = chatStatusKey(plan), done = tasks.filter(task => task.status === 'accepted').length
         const running = tasks.filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
-        summary = running ? fill(t(tasks.some(task => ['starting', 'running'].includes(task.status)) ? 'dock.workers' : 'dock.audit'), { count: running })
-          : status === 'review' ? fill(t('dock.review'), { count: tasks.filter(task => task.status === 'review').length })
-          : status === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t('chat.' + status)
-        if (plan.protocolVersion >= 2 && !plan.completion) summary = t('coordination.incomplete') + ' · ' + summary
+        summary = status === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled')
+          : tasks.length ? fill(t('dock.taskCount'), { count: tasks.length }) : t('chat.' + status)
+        if (running) {
+          const kind = tasks.some(task => ['starting', 'running'].includes(task.status)) ? 'running' : 'auditing', prefix = t('dock.' + kind)
+          indicators.push({ kind, text: prefix + ' ' + running, prefix, value: running })
+        }
+        const review = tasks.filter(task => task.status === 'review' && !['queued', 'starting', 'running'].includes(task.audit?.status)).length
+        if (review) indicators.push({ kind: 'review', text: t('dock.awaitingReview') + ' ' + review, prefix: t('dock.awaitingReview'), value: review })
+        if (status === 'receiptPending') indicators.push({ kind: 'receipt', text: t('chat.receiptPending') })
         const queued = tasks.filter(task => task.status === 'queued' || task.audit?.status === 'queued').length
         if (queued) indicators.push({ kind: 'queued', text: t('dock.waiting') + ' ' + queued, prefix: t('dock.waiting'), value: queued })
         const problems = tasks.map(task => ['failed', 'blocked'].includes(task.audit?.status) ? task.audit : task)
@@ -1557,10 +1572,7 @@ window.__ModuleLoader__.load({
     }
 
     function ChatPlanNotice({ t, plan, openView, error }) {
-      const running = (plan?.tasks ?? []).filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
       return h('div', null,
-        plan?.protocolVersion >= 2 && !plan.completion ? h('p', { role: 'status', className: 'ddf-chat-notice-hint' }, t('coordination.incomplete') + ' · '
-          + (running ? fill(t('dock.workers'), { count: running }) : t('chat.' + chatStatusKey(plan)))) : null,
         h(CoordinationIssueNotice, { t, plan }), h(ChatPlanBody, { t, plan, openView, error }))
     }
 
