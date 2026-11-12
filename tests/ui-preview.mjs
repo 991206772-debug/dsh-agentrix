@@ -115,6 +115,12 @@ if (accordion) {
     plans[0].tasks[2].finishedAt = now - 12000
     plans[0].tasks[3].execution.at = now - 16000
     plans[0].tasks[3].checks[0].result.at = now - 10000
+    if (process.argv.includes('--many-records')) {
+      for (const [index, target] of [plans[0].tasks[0], plans[0].tasks[1].audit].entries()) {
+        target.supervision.evidence = Array.from({ length: 16 }, (_, step) => ({ callId: `history-${index}-${step}`,
+          tool: step % 2 ? 'grep' : 'read', at: now - 170000 + index * 1000 + step * 7000, failed: false }))
+      }
+    }
   }
 }
 if (coordinationConflict) {

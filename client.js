@@ -2429,6 +2429,7 @@ window.__ModuleLoader__.load({
       'focus.memberEmpty': '该成员尚未产生记录', 'focus.recordsHint': '依据当前快照保留的近期工具活动、阶段记录和报告展示；完整证据见任务详情。',
       'focus.tasks': '任务详情', 'focus.close': '收起任务详情', 'focus.context': '需求与主控判断', 'focus.member': '按成员筛选',
       'focus.latest': '回到最新活动', 'focus.details': '查看报告与验收依据', 'focus.passed': '验证通过', 'focus.failed': '验证失败',
+      'focus.more': '查看更多（还有 {count} 条）',
     })
     Object.assign(en, {
       'focus.title': 'Collaboration activity', 'focus.all': 'All', 'focus.coordinator': 'Coordinator', 'focus.user': 'Requester',
@@ -2440,6 +2441,7 @@ window.__ModuleLoader__.load({
       'focus.memberEmpty': 'No records for this member yet', 'focus.recordsHint': 'Recent tool activity, checkpoints and reports retained in the current snapshot. Full evidence is available in task details.',
       'focus.tasks': 'Task details', 'focus.close': 'Close task details', 'focus.context': 'Request and coordinator decision', 'focus.member': 'Filter by member',
       'focus.latest': 'Latest activity', 'focus.details': 'View report and acceptance evidence', 'focus.passed': 'Verification passed', 'focus.failed': 'Verification failed',
+      'focus.more': 'Show more ({count} earlier records)',
     })
 
     function collaborationRecords(t, plan, session) {
@@ -2493,10 +2495,15 @@ window.__ModuleLoader__.load({
       return { members, records: [...records.values()].sort((a, b) => (a.at ?? 0) - (b.at ?? 0)) }
     }
 
-    function CollaborationFeed({ t, plan, session, member, onMember, onOpenTask }) {
+    const FOCUS_PAGE_SIZE = 20
+
+    function CollaborationFeed({ t, plan, session, member, onMember, onOpenTask, history, onMore }) {
       const { members, records } = collaborationRecords(t, plan, session)
       const selected = members.some(item => item.id === member) ? member : 'all'
-      const visible = selected === 'all' ? records : records.filter(record => record.member === selected)
+      const matching = selected === 'all' ? records : records.filter(record => record.member === selected)
+      const range = history?.[selected], anchor = range ? matching.findIndex(record => record.id === range.firstId) : -1
+      const remaining = anchor >= 0 ? anchor : Math.max(0, matching.length - (range?.count ?? FOCUS_PAGE_SIZE))
+      const visible = matching.slice(remaining), nextStart = Math.max(0, remaining - FOCUS_PAGE_SIZE)
       return h('section', { className: 'ddf-focus-feed', 'data-collaboration-feed': '', 'aria-label': t('focus.title') },
         h('nav', { className: 'ddf-focus-members', 'aria-label': t('focus.member') },
           ...[{ id: 'all', name: t('focus.all') }, ...members].map(item => h('button', {
@@ -2505,6 +2512,8 @@ window.__ModuleLoader__.load({
           }, h('span', { className: 'ddf-focus-avatar', 'aria-hidden': 'true' }, item.id === 'all' ? '⋯' : item.id === 'coordinator' ? t('focus.coordinator').slice(0, 1) : item.taskId?.slice(0, 2)),
           h('span', null, item.taskId ? item.role + ' · ' + item.name : item.name)))),
         h('div', { className: 'ddf-focus-messages', role: 'log', 'aria-label': t('focus.title'), 'aria-live': 'off' },
+          remaining > 0 ? h('div', { className: 'ddf-focus-history' }, h('button', { type: 'button', className: 'ddf-board-action',
+            'data-load-earlier': '', onClick: () => onMore(selected, matching[nextStart].id, matching.length - nextStart) }, fill(t('focus.more'), { count: remaining }))) : null,
           ...visible.map(record => {
             const actor = members.find(item => item.id === record.member) ?? { name: t('focus.user'), role: t('focus.user') }
             const task = plan?.tasks?.find(item => item.id === record.taskId)
@@ -2527,7 +2536,7 @@ window.__ModuleLoader__.load({
 
     const FOCUS_BOARD_STYLES = `
 .ddf-board-root:has(.ddf-focus-board) { overflow:hidden; background:var(--dsw-alias-bg-layer-1,#fff); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; }
-.ddf-focus-board { flex:1 1 auto; height:100%; min-height:0; max-width:1440px; padding:0; gap:0; overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; container:ddf-focus / inline-size; }
+.ddf-focus-board { flex:1 1 auto; height:100%; min-height:0; max-width:1440px; padding:0; gap:0; overflow:auto; overflow-anchor:none; overscroll-behavior:contain; scrollbar-width:thin; container:ddf-focus / inline-size; }
 .ddf-focus-board [hidden] { display:none!important; }
 .ddf-focus-board>.ddf-board-header { flex:none; position:sticky; top:0; z-index:3; background:var(--dsw-alias-bg-layer-1,#fff); padding:18px 22px 13px; margin:0; gap:14px; }
 .ddf-focus-board pre { max-height:none; overflow:visible; }
@@ -2561,6 +2570,7 @@ window.__ModuleLoader__.load({
 .ddf-focus-avatar { width:30px; height:30px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; flex:none; background:var(--dsw-alias-bg-layer-2,#f1f4fa); color:var(--dsw-alias-state-business-primary,#2878e5); font-size:12px; }
 .ddf-focus-members .ddf-focus-avatar { width:23px; height:23px; font-size:10px; }
 .ddf-focus-messages { padding:20px clamp(18px,6%,70px); }
+.ddf-focus-history { margin:0 0 20px; text-align:center; }
 .ddf-focus-message { display:flex; gap:11px; margin:0 0 19px; min-width:0; }
 .ddf-focus-message-main { min-width:0; max-width:calc(100% - 42px); }
 .ddf-focus-byline { display:flex; align-items:baseline; flex-wrap:wrap; gap:5px 10px; margin-bottom:5px; font-size:11px; color:var(--dsw-alias-label-secondary,#646a73); }
@@ -2607,7 +2617,7 @@ window.__ModuleLoader__.load({
 }
 `
 
-    function DashboardPage({ t, state, sessionId, plan, openView, enabledView, onFix, detailsOpen, onToggleDetails, notice, updatedAt, member, onMember, onOpenTask, selectedTask, feedRef, onFeedScroll, onLatest, showLatest, drawerButtonRef }) {
+    function DashboardPage({ t, state, sessionId, plan, openView, enabledView, onFix, detailsOpen, onToggleDetails, notice, updatedAt, member, onMember, onOpenTask, selectedTask, feedRef, onFeedScroll, onLatest, showLatest, drawerButtonRef, history, onMore }) {
       const tasks = plan?.tasks ?? [], status = dashboardStatusKey(plan)
       const statusLabel = plan?.completion ? completionLabel(t, plan.completion) : status === 'accepted' && plan.protocolVersion >= 2
         ? t('chat.receiptPending') : t({ failed: 'view.boardFailed', accepted: 'view.boardDone', review: 'view.boardReview' }[status] || 'status.' + status)
@@ -2680,7 +2690,7 @@ window.__ModuleLoader__.load({
               plan.autoDispatch === false && blockers.length && status !== 'cancelled' ? h('p', null, t('plans.autoPaused')) : null,
               modelBlock && status !== 'cancelled' ? h('button', { type: 'button', className: 'ddf-board-action', onClick: () => onFix(modelBlock.issue.tier) }, t('plans.fixModel')) : null) : null),
           h('div', { className: 'ddf-focus-workspace', 'data-drawer-open': detailsOpen },
-            h(CollaborationFeed, { t, plan, session, member, onMember, onOpenTask }),
+            h(CollaborationFeed, { t, plan, session, member, onMember, onOpenTask, history, onMore }),
             h('aside', { id: 'ddf-focus-task-drawer', className: 'ddf-focus-drawer', 'data-task-drawer': '', 'data-selected-task': selectedTask,
               hidden: !detailsOpen, 'aria-label': t('focus.tasks') },
               h('div', { className: 'ddf-focus-drawer-head' }, h('h2', null, t('focus.tasks'))),
@@ -2703,6 +2713,7 @@ window.__ModuleLoader__.load({
       const feedRef = useRef(null)
       const drawerButtonRef = useRef(null)
       const following = useRef({ key: '', member: 'all', active: true })
+      const historyScroll = useRef(null)
       const refreshRef = useRef(null)
       useEffect(() => {
         if (!sessionId) return
@@ -2729,6 +2740,14 @@ window.__ModuleLoader__.load({
       const plan = currentPlanOf(state, sessionId)
       const focusKey = sessionId + ':' + (state?.sessions?.find(item => item.sessionId === sessionId)?.source?.messageId || plan?.source?.messageId || '') + ':' + (plan?.createdAt ?? '')
       const selection = focus.key === focusKey ? focus : { member: 'all', taskId: null }
+      useEffect(() => {
+        const saved = historyScroll.current, page = feedRef.current
+        historyScroll.current = null
+        if (page && saved?.key === focusKey && saved.member === selection.member) {
+          if (saved.anchor?.isConnected) page.scrollTop += saved.anchor.getBoundingClientRect().top - saved.anchorTop
+          else page.scrollTop = saved.top + page.scrollHeight - saved.height
+        }
+      }, [focusKey, selection.member, selection.history])
       useEffect(() => {
         const reset = following.current.key !== focusKey || following.current.member !== selection.member
         following.current = { key: focusKey, member: selection.member, active: reset || following.current.active }
@@ -2758,7 +2777,17 @@ window.__ModuleLoader__.load({
             h('details', null, h('summary', null, t('view.loadDetails')), h('pre', null, result.error)))
         : !sessionId || !state ? h('p', { className: 'ddf-board-inline-notice', role: 'status' }, t(!sessionId ? 'view.noSession' : 'view.loading')) : null
       return h(DashboardPage, { t, state, sessionId, plan, openView, enabledView, onFix, notice, updatedAt: result.updatedAt,
-        member: selection.member, feedRef, drawerButtonRef, showLatest,
+        member: selection.member, feedRef, drawerButtonRef, showLatest, history: selection.history,
+        onMore: (member, firstId, count) => {
+          const page = feedRef.current, anchor = page?.querySelector?.('[data-feed-entry]')
+          historyScroll.current = page ? { key: focusKey, member, top: page.scrollTop, height: page.scrollHeight,
+            anchor, anchorTop: anchor?.getBoundingClientRect().top } : null
+          following.current.active = false; setShowLatest(true)
+          setFocus(previous => {
+            const current = previous.key === focusKey ? previous : selection
+            return { ...current, key: focusKey, history: { ...current.history, [member]: { firstId, count } } }
+          })
+        },
         onFeedScroll: event => { const element = event.currentTarget; following.current.active = element.scrollHeight - element.scrollTop - element.clientHeight < 48; setShowLatest(!following.current.active) },
         onLatest: () => { following.current.active = true; setShowLatest(false); if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight },
         onMember: member => setFocus({ ...selection, key: focusKey, member }),

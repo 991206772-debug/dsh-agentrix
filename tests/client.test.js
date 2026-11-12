@@ -5,6 +5,33 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('focused feed initially shows the latest twenty records and reveals earlier records twenty at a time', async () => {
+  const plan = { sessionId: 'session-current', protocolVersion: 2, source: { messageId: 'history-request', text: '核对所有验证结果' }, status: 'review',
+    tasks: [{ id: 'a', title: '核对报告', status: 'review', checks: Array.from({ length: 54 }, (_, index) => ({ tool: 'read',
+      result: { callId: 'check-' + index, at: 100 + index, passed: true, summary: '记录 ' + index } })) }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: plan.sessionId, plans: [structuredClone(plan)], sessions: [] }) }) })
+  const view = f.mountView(plan.sessionId)
+  const entries = () => view.nodes('article').filter(node => node.props?.['data-feed-entry'])
+  const more = () => view.nodes('button').find(node => node.props?.['data-load-earlier'] === '')
+  try {
+    await view.flush()
+    assert.equal(entries().length, 20)
+    assert.equal(entries()[0].props['data-feed-entry'], 'verify:a:check-34')
+    assert.equal(entries().at(-1).props['data-feed-entry'], 'verify:a:check-53')
+    assert.ok(more())
+    more().props.onClick(); await view.flush()
+    assert.equal(entries().length, 40)
+    assert.equal(entries()[0].props['data-feed-entry'], 'verify:a:check-14')
+    await view.tick()
+    assert.equal(entries().length, 40, 'polling keeps the revealed range')
+    more().props.onClick(); await view.flush()
+    assert.equal(entries().length, 55)
+    assert.equal(entries()[0].props['data-source'], 'request')
+    assert.equal(more(), undefined, 'the current snapshot has no more records to reveal')
+  } finally { view.close(); f.close() }
+})
+
 test('focused collaboration shows real records in a readonly member-filtered feed', async () => {
   const request = { messageId: 'focus-request', text: '核查两份文档并提交可验证的评审' }
   const plan = { sessionId: 'session-current', protocolVersion: 2, createdAt: 100, status: 'running', source: request,
@@ -40,6 +67,68 @@ test('focused collaboration shows real records in a readonly member-filtered fee
     assert.ok(entries().some(node => node.props['data-source'] === 'report'))
     view.nodes('button').find(node => node.props?.['data-open-task'] === 'b').props.onClick(); await view.flush()
     assert.equal(view.nodes('aside').find(node => node.props?.['data-task-drawer'] === '').props['data-selected-task'], 'b')
+  } finally { view.close(); f.close() }
+})
+
+test('focused history keeps revealed records on refresh and scopes each member range to the current request', async () => {
+  const request = { messageId: 'history-current', text: '核对当前需求' }
+  const task = { id: 'a', title: '核查结果', status: 'review', supervision: { evidence: Array.from({ length: 16 }, (_, index) => ({
+    callId: 'read-' + index, tool: 'read', at: 1 + index, failed: false })) },
+    checks: Array.from({ length: 45 }, (_, index) => ({ tool: 'read', result: { callId: 'check-' + index, at: 100 + index, passed: true } })) }
+  const plan = { sessionId: 'session-current', protocolVersion: 2, source: request, createdAt: 1, status: 'review', tasks: [task] }
+  const row = { sessionId: plan.sessionId, source: request }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone({ ok: true,
+    sessionId: plan.sessionId, plans: [plan], sessions: [row] }) }) })
+  const view = f.mountView(plan.sessionId)
+  const entries = () => view.nodes('article').filter(node => node.props?.['data-feed-entry'])
+  const more = () => view.nodes('button').find(node => node.props?.['data-load-earlier'] === '')
+  const select = async member => { view.nodes('button').find(node => node.props?.['data-member-filter'] === member).props.onClick(); await view.flush() }
+  try {
+    await view.flush(); more().props.onClick(); await view.flush()
+    assert.equal(entries().length, 40)
+    assert.equal(entries()[0].props['data-feed-entry'], 'verify:a:check-5')
+    task.checks.push({ tool: 'read', result: { callId: 'check-45', at: 145, passed: true } })
+    await view.tick()
+    assert.equal(entries()[0].props['data-feed-entry'], 'verify:a:check-5', 'a new result does not remove history the user has already revealed')
+    assert.equal(entries().length, 41)
+    await select('coordinator')
+    assert.equal(entries().length, 20)
+    more().props.onClick(); await view.flush()
+    assert.equal(entries().length, 40)
+    await select('worker:a')
+    assert.equal(entries().length, 16)
+    assert.equal(more(), undefined)
+    await select('all')
+    assert.equal(entries().length, 41, 'each member filter remembers its own revealed range')
+    row.source = plan.source = { messageId: 'history-next', text: '下一项需求' }
+    await view.tick()
+    assert.equal(entries().length, 20, 'a new request starts with the recent records again')
+  } finally { view.close(); f.close() }
+})
+
+test('revealing earlier focused records preserves the reading anchor and does not resume automatic following', async () => {
+  const plan = { sessionId: 'session-current', protocolVersion: 2, status: 'review', tasks: [{ id: 'a', title: '核查历史记录', status: 'review',
+    checks: Array.from({ length: 45 }, (_, index) => ({ tool: 'read', result: { callId: 'history-' + index, at: 100 + index, passed: true } })) }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: plan.sessionId, plans: [plan], sessions: [] }) }) })
+  const view = f.mountView(plan.sessionId)
+  let anchorTop = 250
+  const anchor = { isConnected: true, getBoundingClientRect: () => ({ top: anchorTop }) }
+  const page = { scrollTop: 120, scrollHeight: 3000, clientHeight: 500, querySelector: () => anchor }
+  try {
+    await view.flush()
+    view.nodes('main')[0].props.ref.current = page
+    view.nodes('button').find(node => node.props?.['data-load-earlier'] === '').props.onClick()
+    anchorTop = 2250; page.scrollHeight = 5000
+    await view.flush()
+    assert.equal(page.scrollTop, 2120, 'prepending older records keeps the previously visible record at the same screen position')
+    assert.ok(view.nodes('button').some(node => node.props?.['data-follow-latest'] === ''))
+    await view.tick()
+    assert.equal(page.scrollTop, 2120, 'a refresh while reading older records cannot jump to the bottom')
+    view.nodes('button').find(node => node.props?.['data-load-earlier'] === '').props.onClick()
+    page.scrollTop = 2520; page.scrollHeight = 5400
+    await view.flush()
+    assert.equal(page.scrollTop, 2520, 'an anchor already preserved by the browser must not be moved back to the old scroll offset')
   } finally { view.close(); f.close() }
 })
 
