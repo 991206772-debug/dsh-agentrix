@@ -969,7 +969,9 @@ window.__ModuleLoader__.load({
           entry.result = { sessionId: entry.sessionId, data, error: '', errorStatus: null, loading: false }
           const plan = currentPlanOf(data, entry.sessionId)
           const route = plan?.routing ?? data.sessions?.find(item => item.sessionId === entry.sessionId)?.route
-          entry.terminal = Boolean(plan && (plan.protocolVersion >= 2 ? plan.completion : ['accepted', 'cancelled'].includes(plan.status)))
+          const execution = data.sessions?.find(item => item.sessionId === entry.sessionId)?.execution
+          entry.terminal = Boolean(plan && !execution?.running && !execution?.unresolvedChanges?.length
+            && (plan.protocolVersion >= 2 ? plan.completion : ['accepted', 'cancelled'].includes(plan.status)))
           if (entry.terminal) clearTimer(entry)
           else if (entry.timer === null) entry.timer = window.setInterval(() => { void refresh(entry) }, CHAT_POLL_MS)
         } catch (error) {
@@ -1427,7 +1429,7 @@ window.__ModuleLoader__.load({
         window.addEventListener('resize', fitDetails)
         return () => { document.removeEventListener('pointerdown', close); document.removeEventListener('keydown', close); window.removeEventListener('resize', fitDetails) }
       }, [sessionId])
-      const plan = currentPlanOf(result.data, sessionId)
+      const savedPlan = currentPlanOf(result.data, sessionId)
       const state = result.data?.sessions?.find(item => item.sessionId === sessionId)
       const availability = state?.delegationAvailability
       const missing = availability?.status === 'unavailable' ? h('section', { className: 'ddf-chat-notice', 'data-kind': 'service', role: 'alert' },
@@ -1436,7 +1438,8 @@ window.__ModuleLoader__.load({
         h('p', null, t('direct.checkPlugin'))) : null
       const execution = state?.execution, failures = execution?.unresolvedChanges ?? []
       const backendMissing = result.errorStatus === 404 || result.error && !result.data
-      const terminal = plan && (plan.protocolVersion >= 2 ? plan.completion : plan.completion || plan.status === 'accepted') && !(plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled)
+      const terminal = savedPlan && (savedPlan.protocolVersion >= 2 ? savedPlan.completion : savedPlan.completion || savedPlan.status === 'accepted') && !(savedPlan.coordinatorIssue && !savedPlan.coordinatorIssue.resolvedAt && !savedPlan.cancelled)
+      const plan = terminal && (execution?.running || failures.length) ? null : savedPlan
       if (!backendMissing && !missing && (plan ? terminal : !execution?.running && !failures.length)) return null
       let summary, content, tone = 'progress'
       const indicators = []

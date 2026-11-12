@@ -47,6 +47,48 @@ test('managed chat keeps an explicit incomplete label through errors and accepta
   } finally { dock.close(); action.close(); f.close() }
 })
 
+test('a previous terminal receipt never hides current coordinator work or stops its activity polling', async t => {
+  for (const outcome of ['completed', 'cancelled', 'blocked']) await t.test(outcome, async () => {
+    const request = { messageId: 'continued-request', text: '继续核对当前需求' }
+    const plan = { sessionId: 'session-current', protocolVersion: 2, source: request, createdAt: 100,
+      status: outcome === 'completed' ? 'accepted' : outcome, cancelled: outcome === 'cancelled',
+      tasks: [{ id: 'old-task', title: '原任务', status: outcome === 'completed' ? 'accepted' : outcome }],
+      completion: { id: 'old-receipt', at: 200, outcome, accepted: outcome === 'completed' ? 1 : 0,
+        total: 1, deliverables: [], evidence: [], remaining: [] } }
+    const originalPlan = JSON.stringify(plan)
+    const row = { sessionId: plan.sessionId, source: request, execution: { running: true, startedAt: 300,
+      toolCalls: 1, activity: { kind: 'model' }, model: { model: 'current/coordinator' }, unresolvedChanges: [] } }
+    let fetches = 0
+    const f = await sidebarFixture(undefined, { fetchState: async () => { fetches++; return { ok: true,
+      json: async () => structuredClone({ ok: true, sessionId: plan.sessionId, plans: [plan], sessions: [row] }) } } })
+    const dock = f.mountDock(plan.sessionId)
+    const label = () => dock.nodes('summary')[0]?.props['aria-label'] ?? ''
+    try {
+      await dock.flush()
+      assert.match(label(), /主控处理中.*模型正在生成.*current\/coordinator.*1/)
+      assert.doesNotMatch(label(), /子任务执行中|已停止|已验收/)
+      const firstFetches = fetches
+      row.execution.toolCalls = 3
+      row.execution.activity = { kind: 'tool', tool: 'read' }
+      await dock.tick()
+      assert.ok(fetches > firstFetches, 'a historical receipt must not stop polling the current turn')
+      assert.match(label(), /主控处理中.*读取文件.*3/)
+      row.execution.running = false
+      row.execution.unresolvedChanges = [{ callId: 'current-edit-failed', tool: 'edit', target: 'demo.md', reason: '当前修改尚未成功' }]
+      await dock.tick()
+      assert.match(label(), /修改未完成/)
+      assert.match(dock.text(), /当前修改尚未成功/)
+      row.execution.unresolvedChanges = []
+      await dock.tick()
+      assert.equal(dock.text(), '', 'idle execution without unfinished changes can close normally')
+      const endedFetches = fetches
+      await dock.tick()
+      assert.equal(fetches, endedFetches, 'polling stops after the current work actually ends')
+      assert.equal(JSON.stringify(plan), originalPlan, 'displaying current activity does not alter the historical receipt')
+    } finally { dock.close(); f.close() }
+  })
+})
+
 test('coordinator overview groups observed activity, model and tool calls separately from its decision and request', async () => {
   const row = { sessionId: 'session-current', source: { messageId: 'request', text: '核对接口文档并准备调试工具' },
     decision: { mode: 'direct', reason: '先核对接口与现有代码，再确定实施范围。', model: { model: 'previous/coordinator' } },
