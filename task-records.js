@@ -101,6 +101,7 @@ export function taskSummary(plan) {
         ...(metrics && limits ? [`- 本次执行模型调用：${metrics.requests}${Number.isFinite(limits.requests) ? '/' + limits.requests : ''}；输出 Token：${metrics.outputTokens}${Number.isFinite(limits.outputTokens) ? '/' + limits.outputTokens : '（仅统计，不设插件上限）'}；最近上下文 Token：${metrics.contextTokens}`] : []),
         ...(state.notices?.REQUEST_VOLUME ? ['- 调用次数提醒已记录；原代理继续执行。'] : []),
         ...(state.notices?.ELAPSED_TIME ? ['- 运行时间提醒已记录；任务继续执行。'] : []),
+        ...(state.lastProgress?.summary ? ['- 最近工具证据（尚待验收）：' + state.lastProgress.summary] : []),
         ...(state.pending ? ['- 需要主控处理：' + state.pending.reason] : []),
         ...(state.lastCorrection ? ['- 最近主控纠正：' + state.lastCorrection.message] : []),
         ...(state.wrapUpRequestedAt ? ['- 已提醒原子代理收尾：' + time(state.wrapUpRequestedAt)] : []),

@@ -94,6 +94,11 @@ function modelServiceIssue(error, role, route = {}) {
 }
 
 // Model output is intentionally separate from the full persisted/UI snapshot.
+function compactSupervision(state) {
+  return { pending: state.pending ? { ...state.pending, reason: brief(state.pending.reason, 600) } : null,
+    checkpoint: state.checkpoint ? { ...state.checkpoint, summary: brief(state.checkpoint.summary, 300), nextStep: brief(state.checkpoint.nextStep, 300) } : null,
+    lastProgress: state.lastProgress ?? null }
+}
 function compactTask(task) {
   return { id: task.id, title: task.title, status: task.status, attempts: task.attempts,
     reviewPolicy: task.reviewPolicy ?? null, reviewReason: task.reviewReason ?? null,
@@ -105,8 +110,10 @@ function compactTask(task) {
     checks: (task.checks ?? []).map((check, index) => ({ index, passed: check.result?.passed ?? null, ref: check.result?.ref, callId: check.result?.callId,
       ...(check.result?.truncated ? { truncated: true, outputPath: check.result.outputPath, readOutput: check.result.readOutput } : {}) })),
     issues: (task.issues ?? []).filter(issue => issue.status === 'open').map(issue => ({ id: issue.id, severity: issue.severity, finding: brief(issue.finding, 300) })),
+    ...(task.supervision ? { supervision: compactSupervision(task.supervision) } : {}),
     evidence: (task.checks ?? []).map(check => check.result).filter(result => result?.attempt === task.attempts).map(item => item.callId),
     ...(task.audit ? { audit: { status: task.audit.status, summary: brief(task.audit.execution?.summary, 300),
+      ...(task.audit.supervision ? { supervision: compactSupervision(task.audit.supervision) } : {}),
       reportPath: task.audit.execution?.reportPath, concerns: task.audit.execution?.concerns ?? [], specVerdict: task.audit.specVerdict, qualityVerdict: task.audit.qualityVerdict } } : {}) }
 }
 function compactResult(value) {
@@ -445,6 +452,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       ? '验证已有失败结果，请核对原因并用具体证据决定返工；不能验收或原样反复验证。'
       : '按给出的 criterionId 和证据 ref 逐条 delegation_review。' + (review.some(task => task.execution?.status === 'DONE_WITH_CONCERNS')
         ? '报告含疑点，先核对 execution.concerns，并填写 concernsResolution 说明处理结论。' : '') }
+    const supervision = targetsOf(plan).filter(task => LIVE.includes(task.status) && !task.execution && task.supervision?.pending)
+    if (supervision.length) return { type: 'supervise', taskIds: [...new Set(supervision.map(task => task.id))],
+      message: '核对阶段结论、工具证据与剩余要求，用 delegation_control steer 向原代理明确继续、纠偏或达标后提交报告；提醒不是验收，不停止或新开代理。' }
     if (plan.tasks.some(task => ['failed', 'blocked'].includes(task.status) || ['failed', 'blocked'].includes(task.audit?.status))) return { type: 'handle_failure', message: '核对真实失败原因，处理后再明确重试；不新开代理掩盖错误。' }
     if (targetsOf(plan).some(task => LIVE.includes(task.status)) || plan.autoDispatch && plan.tasks.some(task => task.status === 'queued' || task.pendingAcceptance || task.audit?.status === 'queued')) return {
       type: 'wait', message: '计划正在执行或自动推进，下一阶段会自动启动，无需再次 run。简短告知用户后调用 delegation_wait，或结束当前回复等待自动通知；不要轮询 status。',
@@ -557,14 +567,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (parent.status === 'running') parent.inject?.(message)
     else parent.steer?.(message)
   }
-  const pendingSupervision = plan => targetsOf(plan).filter(task => LIVE.includes(task.status) && task.supervision?.pending && !task.supervision.pending.deliveredAt)
+  const pendingSupervision = plan => targetsOf(plan).filter(task => LIVE.includes(task.status) && !task.execution && task.supervision?.pending && !task.supervision.pending.deliveredAt)
   function deliverSupervision(plan, agent) {
     const tasks = pendingSupervision(plan)
     if (!tasks.length || closed || plan.cancelled || plan.wakeSuppressed) return false
     const now = Date.now()
     for (const task of tasks) task.supervision.pending.deliveredAt = now
     const instruction = tasks.every(task => task.supervision.pending.advisory)
-      ? '执行中的任务需要核对进展，请读取 delegation_status 的提醒与证据，区分有效调查和重复操作；有进展继续，必要时纠正原代理，不因提醒停止或新开代理。\n'
+      ? '请按 delegation_status 的阶段结论与工具证据核对：原用户要求是否已满足、是否有新成果、是否重复检查。用 delegation_control steer 向原代理说明实际判断与下一步；有进展继续，达标后提交报告，有偏离则定向纠正。提醒不是验收，不因提醒停止或新开代理。\n'
       : '执行中的任务出现重复故障，请读取 delegation_status 核对证据，并向原子代理给出具体纠正，不重复派发或代做实现。\n'
     agent.inject(runtimeMessage(plan, instruction +
       tasks.map(task => `${task.id}（子会话 ${task.childId}）：${task.supervision.pending.reason}`).join('\n'), 'delegation-supervision'))
@@ -573,6 +583,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   function requestSupervision(plan, task, handle, alert) {
     const state = task.supervision
     if (!state || !handle || state.pending && (!state.pending.advisory || alert.advisory) || getConfig().enabled === false || closed || plan.cancelled || plan.wakeSuppressed || handle.settling) return
+    const reviewKey = alert.reviewKey ? 'PROGRESS_REVIEW_' + alert.reviewKey : null
+    if (reviewKey && state.notices?.[reviewKey]) return
     if (!alert.advisory && state.used >= state.limit) {
       const issue = { code: 'SUPERVISION_EXHAUSTED', retryable: false,
         message: `已用尽 ${state.limit} 次自动纠偏，任务仍需处理：${alert.reason}。已有产物和证据保留，不自动重开。` }
@@ -582,9 +594,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       return
     }
     state.pending = { id: randomUUID(), at: Date.now(), ...alert }
+    if (reviewKey) (state.notices ??= {})[reviewKey] = state.pending.at
     remember(plan, 'task.supervision_requested', alert.reason, task, { supervision: clone(state.pending) })
     void save().then(async () => {
-      if (closed || plan.cancelled || plan.wakeSuppressed || !LIVE.includes(task.status)) return
+      if (closed || plan.cancelled || plan.wakeSuppressed || task.execution || !LIVE.includes(task.status)) return
       const waiter = waitingParents.get(plan.sessionId)
       if (waiter) waiter.wake.resolve()
       else if (service('agents')?.get(plan.sessionId) === handle.parent && deliverSupervision(plan, handle.parent)) await save()
@@ -596,8 +609,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const state = task.supervision
     if (!state || task.execution || getConfig().enabled === false || closed || handle.settling || handle.controller.signal.aborted || !LIVE.includes(task.status)) return
     const idleAt = (state.lastActivityAt ?? state.startedAt) + state.idleMs
+    const progressAt = state.notices.NO_NEW_EVIDENCE || state.notices.NO_ACTIVITY || state.pending || state.activity?.kind === 'tool'
+      ? Infinity : (state.lastProgressAt ?? state.startedAt) + state.idleMs
     const nextAt = Math.min(state.notices.ELAPSED_TIME ? Infinity : state.remindAt,
-      state.notices.NO_ACTIVITY || state.pending ? Infinity : idleAt)
+      state.notices.NO_ACTIVITY || state.pending ? Infinity : idleAt, progressAt)
     if (!Number.isFinite(nextAt)) return
     handle.watchdog = setTimeout(() => {
       if (task.execution || closed || handle.settling || handle.controller.signal.aborted || !LIVE.includes(task.status)) return
@@ -611,6 +626,12 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         state.notices.NO_ACTIVITY = now
         requestSupervision(plan, task, handle, { code: 'NO_ACTIVITY', advisory: true,
           reason: '长时间没有新的活动，请核对模型或工具是否仍在执行；此提醒不会停止任务或消耗纠偏次数。', evidence: [] })
+      } else if (!state.notices.NO_NEW_EVIDENCE && !state.notices.NO_ACTIVITY && !state.pending && state.activity?.kind !== 'tool' &&
+        now >= (state.lastProgressAt ?? state.startedAt) + state.idleMs) {
+        state.notices.NO_NEW_EVIDENCE = now
+        requestSupervision(plan, task, handle, { code: 'NO_NEW_EVIDENCE', advisory: true,
+          reason: '已有十分钟没有新的工具证据或阶段结论，模型仍有活动也不能确认需求在推进。请核对当前成果与剩余问题，必要时向原代理缩小当前步骤；不因提醒停止或新开代理。',
+          evidence: state.lastProgress?.callId ? [state.lastProgress.callId] : [] })
       }
       scheduleSupervision(plan, task, handle)
     }, Math.max(1, nextAt - Date.now()))
@@ -697,6 +718,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     if (queuedInputs(plan).length) { await save(); return }
     if (deliverSupervision(plan, agent)) { await save(); return }
+    if (nextAction(plan).type === 'supervise') return
     if (finishPlan(plan)) { await save(); return }
     plan.recovery ??= { used: 0, limit: RECOVERY_LIMIT }
     const stage = completionStage(plan)
@@ -1115,15 +1137,17 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const { fixes, criteria } = taskPromptScope(task)
     return [
       '你是执行者，使用配置的执行模型，按主控确定的目标、接口和边界完成任务，不再委派。可自行决定不改变接口、范围和验收要求的局部实现细节；影响需求含义、接口、数据或权限的不确定性，以及缺资料或能力不足，通过 delegation_report 报告 NEEDS_CONTEXT/BLOCKED 交回主控，不自行换模型或扩大范围。',
+      '区分用户硬要求与主控建议。优先读取给定必读材料、使用已核实事实，参考材料按具体疑问读取，不重新全面调查。任务卡存在冲突或需要新增硬指标时把具体问题交主控裁决，不自行删减验收要求。',
       `总目标：${plan.goal}`, `任务：${task.title}`, fixes ? `本次仅修复原问题。前次执行报告：${task.reworkContext.reportPath}；先按需读取已有结论和实际交付物，不重新全面调查。修复报告须说明修改位置及针对性验证结果。` : task.instructions, `边界：${task.scope}`,
       `只允许修改：${task.writes.join('、') || '无（只读）'}`, `交付物：${task.outputs.join('、')}`,
       fixes ? '本次修复相关标准（最终验收仍覆盖全部原标准）：' : '验收标准：', ...criteria.map(item => `${item.id}：${item.text}`),
       '自测步骤（与主控验证使用同一份任务卡；自测结果不代表已验收）：',
       ...task.checks.map((check, i) => `${i + 1}. ${check.tool} ${JSON.stringify(check.arguments)}`),
+      '可计算检查尽量合并执行并复用成功结果；只在相关产物或要求变化、检查失败时重验。满足本次验收标准后立即提交报告，有顾虑列入 concerns；不为润色偏好或反推旧稿统计口径反复自审。',
       ...plan.tasks.filter(item => task.dependsOn.includes(item.id)).map(item => `已验收前置任务 ${item.id}：${item.execution ? item.execution.summary + '；完整报告：' + item.execution.reportPath : brief(item.report)}`),
       task.feedback ? `主控返工要求：${task.feedback}` : '',
       task.reworkIds?.length ? '只修复以下问题及其直接回归，不扩展任务：\n' + JSON.stringify(task.issues.filter(issue => task.reworkIds.includes(issue.id))) : '',
-      '短任务只提交最终报告。较长调查、阶段转换或阻塞时，可用 delegation_checkpoint 记录结论、下一步和成功工具 callId；记录不代表验收。读取用 read/grep/glob，read 参数使用 file_path；管理入口仅供主控。',
+      '短任务只提交最终报告。较长任务在调查转实现、自检结束或需要主控裁决时，用 delegation_checkpoint({requestReview:true,...}) 记录当前成果、剩余问题、下一步和成功工具 callId；主控核对不要求你另开代理或等待用户点击继续。记录不代表验收。读取用 read/grep/glob，read 参数使用 file_path；管理入口仅供主控。',
       '同类工具错误重复时按主控纠正继续。调用次数、运行时间和 Token 仅提醒或统计，不停止、不换代理；输出截断在原代理续接。使用已有产物和上下文完成任务，避免重复调查和重复执行。',
       '结束前必须调用 delegation_report：status 为 DONE、DONE_WITH_CONCERNS、NEEDS_CONTEXT 或 BLOCKED；summary 为短结论，report 保存完整交付路径、逐条证据、测试命令及结果。后两种状态必须提供 reason，说明缺什么或为什么阻塞；有疑点须列 concerns。报告由插件归档，不要自行创建档案目录。工具确认后自动结束，不用 send_message 交成果，不再修改交付物或另写总结。不要把自称完成当成验收。',
     ].filter(Boolean).join('\n')
@@ -1286,6 +1310,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     try { await handle.reportCommit } catch (failure) {
       error = Object.assign(new Error('报告确认保存失败：' + messageOf(failure)), { issue: { code: 'REPORT_COMMIT_FAILED', retryable: false } })
     }
+    if (task.execution?.commitState === 'committed' && task.supervision?.pending?.advisory) task.supervision.pending = null
     if (handle.failure?.issue || (!error && result?.stopReason === 'error')) error = handle.failure
     const issue = error && !error.issue && modelServiceIssue(error, modelRole(task), task.modelRoute?.actual ?? task.modelRoute?.resolved)
     if (issue) error = Object.assign(new Error(messageOf(error)), { issue })
@@ -1574,6 +1599,19 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const handle = live.get(targetKey(childPlan, task))
       const alert = observeTool(task, exec, result, Date.now())
       if (alert) requestSupervision(childPlan, task, handle, alert)
+      if (typeof exec.callId === 'string' && task.supervision?.lastProgress?.callId === exec.callId && task.supervision.lastProgress.kind === 'file_change') {
+        const target = exec.arguments?.file_path ?? exec.arguments?.path
+        const base = exec.agent.session?.header?.cwd ?? childPlan.cwd
+        const cwd = typeof base === 'string' && base.trim() ? base : null
+        const targetPath = typeof target === 'string' && (cwd || path.isAbsolute(target)) ? path.resolve(cwd ?? '', target) : null
+        const output = targetPath && task.outputs?.find(value => (cwd || path.isAbsolute(value)) &&
+          normalizedPath(path.resolve(cwd ?? '', value)) === normalizedPath(targetPath))
+        if (output) {
+          task.supervision.lastProgress.summary = '已修改声明的交付文件，内容尚待验证：' + brief(output, 300)
+          requestSupervision(childPlan, task, handle, { code: 'PROGRESS_REVIEW', advisory: true, reviewKey: 'implementation',
+            reason: task.supervision.lastProgress.summary + '。请核对当前成果与剩余要求，必要检查达标后及时提交报告；这不代表任务已完成。', evidence: [exec.callId] })
+        }
+      }
       if (handle) scheduleSupervision(childPlan, task, handle)
       backgroundSave()
     }
@@ -2057,14 +2095,16 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
     mode: { type: 'string', enum: ['direct', 'delegate'] }, reason: { type: 'string', description: '新需求或方案变化时说明已有上下文、委派收益与准备、汇报、验收开销的取舍，不能只复述角色分工；最多 500 字。继续和进度询问沿用原判断。' },
   }, [], recordDecision)
-  routeTool('delegation_checkpoint', '托管执行者或只读审查者在长调查、阶段转换或阻塞时记录结论、下一步和成功工具证据。短任务只交最终报告；阶段记录不能代替验收或其他任务的记录。', {
+  routeTool('delegation_checkpoint', '长调查、阶段转换或阻塞时记录结论、下一步和本次成功工具证据。需主控判断是否继续、纠偏或收尾时用 requestReview:true，同一阶段只通知一次。短任务直接交报告；阶段结论待核实，不能代替验收。', {
     phase: { type: 'string', enum: ['investigation', 'implementation', 'verification'] }, summary: string, nextStep: string, evidence: array(string),
+    requestReview: { type: 'boolean', description: '可选；true 请求原主控核对本阶段的成果与剩余问题，不停止子代理、不代表验收。' },
   }, ['phase', 'summary', 'nextStep', 'evidence'], async (args, exec) => {
     const expected = expectedRoutes.get(exec.agent?.id)
     if (!expected) throw new Error('只有当前托管子代理可以提交阶段记录')
     const { plan, task, handle } = expected
     if (handle.controller.signal.aborted || task.execution || !LIVE.includes(task.status)) throw new Error('任务已结束或正在提交最终报告')
     if (!['investigation', 'implementation', 'verification'].includes(args.phase)) throw new Error('阶段无效')
+    if (args.requestReview !== undefined && typeof args.requestReview !== 'boolean') throw new Error('requestReview 必须为布尔值')
     const summary = requireText(args.summary, '阶段结论', 2000), nextStep = requireText(args.nextStep, '下一步', 1000)
     const evidence = strings(args.evidence, '阶段证据')
     if (evidence.length > 8 || evidence.some(id => {
@@ -2078,6 +2118,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     task.supervision.activity = { kind: 'waiting_model', at: task.supervision.checkpoint.at }
     scheduleSupervision(plan, task, handle)
     remember(plan, 'task.checkpoint', summary, task, { checkpoint: clone(task.supervision.checkpoint) })
+    if (args.requestReview) requestSupervision(plan, task, handle, { code: 'PROGRESS_REVIEW', advisory: true, reviewKey: args.phase,
+      reason: '执行者请求核对阶段成果（尚未验收）：' + brief(summary, 300) + '；下一步：' + brief(nextStep, 200), evidence })
     await save()
     return { taskId: task.id, checkpoint: clone(task.supervision.checkpoint), deadlineAt: task.supervision.deadlineAt }
   }, true)
@@ -2194,12 +2236,15 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   routeTool('delegation_plan', '主控提交可验证的任务拆分。通常一并提供 decisionReason 和 start:true，保存决定、计划并直接按配置派发。同类工作合批，有独立价值才拆分；审查按风险用 reviewPolicy/reviewReason 单独说明，不按执行复杂度增加流程。省略审查方式仍沿用 complex 独立审查的旧约定；省略 start 或 false 仅保存。', {
     goal: string, relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
     start: { type: 'boolean', description: 'true 表示建计划后立即校验模型、权限与预算并派发；省略或 false 仅建立计划。' },
-    decisionReason: { type: 'string', description: '说明相对主控直接完成的委派收益与准备、汇报、验收开销，写清独立执行量、隔离或并行价值，不能只复述角色分工。非空，最多 500 字；可一并记录 relation，不填写时需在 run 前记录。' }, tasks: array({ ...object({ id: string, title: string, instructions: string, scope: string,
+    decisionReason: { type: 'string', description: '说明相对主控直接完成的委派收益与准备、汇报、验收开销，写清独立执行量、隔离或并行价值，不能只复述角色分工。非空，最多 500 字；可一并记录 relation，不填写时需在 run 前记录。' }, tasks: array({ ...object({ id: string, title: string,
+      instructions: { type: 'string', description: '明确目标、已定方案与已核实事实，区分必读和按需参考资料、用户硬要求和可调整建议；不把主控偏好升级为篇幅、格式或问题数量门槛。' }, scope: string,
       outputs: array(string), writes: array(string), dependsOn: array(string), complexity: { type: 'string', enum: ['routine', 'complex'], description: '只说明执行难度，不决定是否委派或执行模型。routine：方案明确，可沿既有材料执行；complex：仍有跨资料推理或设计取舍的未决难点。' },
       complexityReason: { type: 'string', description: '说明实际未决难点或普通执行依据；篇幅长、要发布或重要不足以单独判为复杂；主控已解决的判断不重复算执行难度。' },
       reviewPolicy: { type: 'string', enum: ['coordinator', 'independent'], description: '新任务显式填写，并提供 reviewReason。coordinator：主控实际验证并验收；independent：额外独立审查。按错误后果选择，权限、数据破坏、并发等高风险用 independent；复杂度或发布要求本身不代表高风险。' },
       reviewReason: { type: 'string', description: '指定 reviewPolicy 时必填，说明风险和所选审查方式的必要性；最多 1000 字。' },
-      criteria: array(string), checks: array({ ...object({ tool: { type: 'string', enum: CHECK_TOOLS }, arguments: { type: 'object', additionalProperties: true } }), required: ['tool', 'arguments'] }) }),
+      criteria: { ...array(string), description: '只包含用户要求和必要的正确性验证；主控的实施或写作建议不自动成为硬性验收标准。' },
+      checks: { ...array({ ...object({ tool: { type: 'string', enum: CHECK_TOOLS }, arguments: { type: 'object', additionalProperties: true } }), required: ['tool', 'arguments'] }),
+        description: '合并可一起执行的固定检查；相关产物与要求未变化且已成功时复用结果，不重复校准同一指标。' } }),
       required: ['id', 'title', 'instructions', 'scope', 'outputs', 'writes', 'complexity', 'criteria', 'checks'] }),
   }, ['goal', 'tasks'], async (args, exec) => {
     const parent = own(exec), previous = plans.get(parent.id)

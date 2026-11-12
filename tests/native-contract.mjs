@@ -78,7 +78,7 @@ try {
   let response
   await routes.get('/dsh-delegation-first/api/state')({ method: 'GET' }, { writeHead() {}, end(body) { response = JSON.parse(body) } })
   assert.equal(response.ok, true)
-  assert.equal(response.runtimePolicyVersion, 3)
+  assert.equal(response.runtimePolicyVersion, 4)
   assert.equal(response.supervisionPolicy.requests, null)
   assert.equal(response.supervisionPolicy.timeMode, 'notice')
   for (const [key, value] of Object.entries({ maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120 })) {

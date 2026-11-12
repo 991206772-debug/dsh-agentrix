@@ -36,7 +36,7 @@ const MAX_BODY_BYTES = 64 * 1024
 const DISCIPLINE = [
   "## Agentrix",
   "auto比较委派收益与准备、汇报、验收开销；小改/共享上下文优先direct，有独立执行量、隔离或并行价值才delegate；普通也可委派。",
-  "先读；direct用delegation_decide，委派用delegation_plan({start:true,...})；理由写取舍，同类合批。",
+  "先读；direct用delegation_decide，委派用delegation_plan({start:true,...})；要求分必需/建议，说明取舍，合批。",
   "委派后主控规划验收、worker执行。complexity看未决难点；显式填reviewPolicy/reviewReason按风险审查。审查用分发者模型，delegation_models查模型。",
   "delegation_verify后delegation_review按criterionId/ref验收。标准限用户要求及必要验证；重要问题返工，minor记录，复查不扩围。",
   "relation:new/continue/update/question。补充先答复；变更用inputIds/additionalCriteria steer原代理，答复acknowledge。报进度，修改失败须修复并核对原产物。",

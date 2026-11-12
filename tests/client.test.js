@@ -2264,6 +2264,7 @@ test('running supervision is visible in chat and task details with evidence, ela
       activity: { kind: 'model' }, metrics: { requests: 12, outputTokens: 1200, contextTokens: 24000 },
       limits: { requests: 80, outputTokens: 40000 },
       checkpoint: { phase: 'investigation', summary: '已确认真实参数 schema。', nextStep: '按已确认接口实现。', verified: false },
+      lastProgress: { summary: '已修改声明的交付文件，内容尚待验证：article.md' },
       lastCorrection: { message: '先使用正确的对象参数。' } } }
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true, sessions: [],
     plans: [{ protocolVersion: 2, sessionId: 'session-current', goal: '验证过程监督', status: 'running', tasks: [task] }] }) }) })
@@ -2276,6 +2277,7 @@ test('running supervision is visible in chat and task details with evidence, ela
     assert.match(view.text(), /1200\/40000/)
     assert.match(view.text(), /执行者提交，待核实/)
     assert.match(view.text(), /按已确认接口实现/)
+    assert.match(view.text(), /最近工具证据.*article\.md/)
     assert.match(view.text(), /先使用正确的对象参数/)
     assert.match(action.text(), /待主控纠偏.*1/)
     assert.match(notice.text(), /input 必须传对象/)

@@ -6,7 +6,7 @@ export const REPEATED_ERROR_LIMIT = 3
 export const EXECUTION_BUDGET = Object.freeze({ requests: null, requestNotice: 80, outputTokens: null, contextTokens: null, maxOutputTokens: null })
 const OBSERVATION_WINDOW = 8
 const REPEATED_OBSERVATION_NOTICE = 3
-export const SUPERVISION_POLICY = Object.freeze({ correctionLimit: SUPERVISION_LIMIT, repeatedErrorLimit: REPEATED_ERROR_LIMIT, version: 3, timeMode: 'notice', ...EXECUTION_BUDGET })
+export const SUPERVISION_POLICY = Object.freeze({ correctionLimit: SUPERVISION_LIMIT, repeatedErrorLimit: REPEATED_ERROR_LIMIT, version: 4, timeMode: 'notice', progressMode: 'evidence', ...EXECUTION_BUDGET })
 
 export function startSupervision(task, now, timeoutMs) {
   const previous = task.supervision

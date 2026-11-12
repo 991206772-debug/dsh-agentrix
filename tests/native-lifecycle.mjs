@@ -48,6 +48,8 @@ const roleTools = process.argv.includes('--role-tools') || ergonomics
 const dependentStages = process.argv.includes('--dependent-stages') || ergonomics
 const activeNewRequest = process.argv.includes('--active-new-request')
 const earlyEvidence = process.argv.includes('--early-evidence')
+const progressReview = process.argv.includes('--progress-review')
+const progressCorrection = '已有自检证据，核对剩余要求后及时提交报告，不重复校准同一指标。'
 let followingRequest = false
 let inboxPhase = 0
 const workerGate = Promise.withResolvers()
@@ -268,6 +270,14 @@ class ScriptedAdapter extends LlmAdapter {
         additionalCriteria: ['提供面向交付操作员的页面引导'],
       })
       else if (explicitWait && phase === 2) block = tool('delegation_wait', {})
+      else if (progressReview && task.status === 'running' && task.supervision.pending) block = tool('delegation_control', {
+        taskId: 'a', action: 'steer', message: progressCorrection,
+      })
+      else if (progressReview && task.status === 'running') block = tool('delegation_wait', {})
+      else if (task.status === 'running' && task.supervision?.pending) block = tool('delegation_control', {
+        taskId: task.id, action: 'steer', message: '核对现有证据；隔离样例的重复读取用于持续执行回放，原代理按原要求继续并提交报告。',
+      })
+      else if (continuous && task.status === 'running') block = tool('delegation_wait', {})
       else if (phase === 2 || truncateOutput && phase < 5) block = { type: reasoningOnly ? 'reasoning' : 'text', text: '保留当前输出，继续原计划。' }
       else if (coordinatorQuota) {
         await until(async () => (await state()).plans[0].tasks[0].audit?.status === 'completed', 'review report returned before scripted coordinator quota error')
@@ -286,6 +296,17 @@ class ScriptedAdapter extends LlmAdapter {
         throw new LlmError(refusalMessage, 'AUTH')
       }
       block = phase === 0 ? tool('read', { path: fixturePath }) : tool('delegation_report', { status: 'DONE', summary: '同模型的正常请求已交报告', report: workerReport })
+    } else if (progressReview && request.model === 'low-worker') {
+      if (phase === 0) block = tool('read', { path: fixturePath })
+      else if (phase === 1) block = tool('delegation_checkpoint', { phase: 'verification', summary: '实际文件已读，自检证据具备。',
+        nextStep: '核对剩余要求后提交报告。', evidence: [firstReads.get(request.sessionId)], requestReview: true })
+      else if (phase === 2) {
+        await until(async () => (await state()).plans[0].tasks[0].supervision.lastCorrection?.message === progressCorrection, 'original coordinator steers the original child')
+        block = tool('read', { path: fixturePath })
+      } else {
+        assert.ok(JSON.stringify(request.messages).includes(progressCorrection), 'same native child receives the correction before reporting')
+        block = tool('delegation_report', { status: 'DONE', summary: '原代理按纠偏提交实际成果', report: workerReport })
+      }
     } else if (dependentStages && request.model === 'low-worker') block = phase === 0
       ? tool('read', { path: fixturePath }) : tool('delegation_report', { status: 'DONE', summary: '当前阶段已检查', report: workerReport })
     else if (earlyEvidence && request.model === 'low-worker') {
@@ -333,7 +354,7 @@ try {
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: value.text }] },
     async execute(args, exec) {
       assert.ok([fixturePath, deliverablePath, ...(activeNewRequest ? [notePath] : [])].includes(args.path))
-      if (earlyEvidence && exec.agent.id !== 'root' && !firstReads.has(exec.agent.id)) firstReads.set(exec.agent.id, exec.callId)
+      if ((earlyEvidence || progressReview) && exec.agent.id !== 'root' && !firstReads.has(exec.agent.id)) firstReads.set(exec.agent.id, exec.callId)
       if (longVerification && exec.agent.id === 'root') {
         const started = Date.now()
         await new Promise((resolve, reject) => {
@@ -365,7 +386,7 @@ try {
         await writeFile(args.file_path, args.content); return { ok: true }
       } }))
   }
-  if (coordinationConflict || dependentStages || activeNewRequest || requestRefusal) {
+  if (coordinationConflict || dependentStages || activeNewRequest || requestRefusal || progressReview) {
     const start = ctx.subagents.startActivation.bind(ctx.subagents)
     ctx.subagents.startActivation = async (...args) => {
       const activation = await start(...args), dispose = activation.dispose.bind(activation)
@@ -436,7 +457,7 @@ try {
     await until(() => parentWaiting || events.some(event => event.id === 'root' && event.type === 'turn/end'), 'coordinator claimed delivery while the worker is still running')
     assert.ok(parentWaiting, JSON.stringify({ requests, events }))
     const running = (await state()).plans[0]
-    assert.equal((await state()).coordinationPolicyVersion, 5)
+    assert.equal((await state()).coordinationPolicyVersion, 6)
     assert.equal(running.status, 'running')
     assert.equal(running.completion, null)
     assert.equal(running.tasks[0].execution, null)
@@ -592,7 +613,7 @@ try {
   } else {
   assert.equal(plan.completion?.outcome, 'completed', JSON.stringify(plan))
   assert.equal(plan.tasks[0].execution.commitState, 'committed')
-  assert.equal(plan.tasks[0].recovery?.used ?? 0, truncateOutput || continuous || supplement || switchCoordinator || coordinationConflict || earlyEvidence ? 0 : 1)
+  assert.equal(plan.tasks[0].recovery?.used ?? 0, truncateOutput || continuous || supplement || switchCoordinator || coordinationConflict || earlyEvidence || progressReview ? 0 : 1)
   assert.equal(plan.tasks[0].release.status, 'released')
   assert.equal(plan.tasks[0].modelRoute.role, 'worker')
   assert.equal(plan.tasks[0].modelRoute.actual.model, 'low-worker')
@@ -608,7 +629,7 @@ try {
   assert.equal(plan.tasks[0].audit.release.status, 'released')
   assert.equal(new Set(requests.filter(request => request.sessionId !== 'root').map(request => request.sessionId)).size, 2)
    }
-  assert.equal(requests.filter(request => request.model === 'low-worker').length, earlyEvidence ? 22 : coordinationConflict ? 3 : continuous ? 86 : truncateOutput ? 4 : 2)
+  assert.equal(requests.filter(request => request.model === 'low-worker').length, earlyEvidence ? 22 : coordinationConflict ? 3 : continuous ? 86 : truncateOutput || progressReview ? 4 : 2)
    assert.equal(requests.filter(request => request.role === 'reviewer').length, coordinatorReview ? 0 : truncateOutput ? 4 : 1)
   if (!switchCoordinator) assert.ok(requests.filter(request => request.sessionId === 'root').every(request => request.model === 'coordinator'))
   else {
@@ -617,7 +638,7 @@ try {
     console.log('PASS: native chat model changed during execution; review keeps the dispatcher model and high effort while coordinator continues on the new selection')
   }
   if (!baseline) {
-     assert.equal((await state()).runtimePolicyVersion, 3)
+     assert.equal((await state()).runtimePolicyVersion, 4)
     assert.equal(plan.usage.roles.reduce((sum, row) => sum + row.requests, 0), requests.length)
     for (const row of plan.usage.roles) {
       assert.equal(row.inputTokens, row.responses * 100)
@@ -652,7 +673,19 @@ try {
   }
   const coordinatorCalls = requests.filter(request => request.sessionId === 'root').length
   if (truncateOutput) assert.ok(coordinatorCalls >= 7 && coordinatorCalls <= 8, 'the original coordinator resumes each truncated output and may wait once for the child')
+  else if (progressReview) assert.ok(coordinatorCalls >= 6 && coordinatorCalls <= 8, 'only bounded progress supervision adds coordinator calls')
+  else if (continuous) assert.ok(coordinatorCalls >= 5 && coordinatorCalls <= 8, 'one repeated-observation inquiry adds bounded supervision rather than completion recovery')
   else assert.equal(coordinatorCalls, coordinationConflict ? 12 : supplement ? 8 : 5, 'only the scripted operations and existing recovery use the original coordinator')
+  if (progressReview) {
+    assert.equal(plan.tasks[0].attempts, 1)
+    assert.equal(plan.tasks[0].supervision.used, 0)
+    assert.equal(plan.tasks[0].supervision.pending, null)
+    assert.equal(plan.tasks[0].supervision.lastCorrection.message, progressCorrection)
+    assert.equal(plan.activationBudget.used, coordinatorReview ? 1 : 2)
+    assert.equal(releases.get(plan.tasks[0].childId), 1)
+    assert.equal(new Set(requests.filter(request => request.role === 'worker').map(request => request.sessionId)).size, 1)
+    console.log('PASS: native checkpoint wakes the original coordinator, sends an evidence-based correction to the same child, then verifies and accepts with no replacement or spent failure correction')
+  }
   if (coordinationConflict) {
     assert.deepEqual([...conflictExecutions], [['team_task_list', 1]])
     assert.ok(plan.coordinationIssue.resolvedAt)

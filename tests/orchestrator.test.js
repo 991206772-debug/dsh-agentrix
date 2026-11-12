@@ -313,6 +313,113 @@ test('repeated successful observations notify the original coordinator once with
   assert.equal(f.pending[0].receipt.disposed, undefined)
 })
 
+test('a requested progress checkpoint wakes the coordinator once with evidence and keeps the same child running', async () => {
+  const f = await fixture(); await f.plan([card('draft')]); await f.execute('delegation_run')
+  const child = f.children[0]
+  f.engine.observe({ agent: child, name: 'read', callId: 'draft-read', arguments: { file_path: 'result.txt' } },
+    { isError: false, content: [{ type: 'text', text: '现稿内容' }] })
+  f.engine.observe({ agent: child, name: 'pwsh', callId: 'draft-check', arguments: { command: 'check draft' } },
+    { isError: false, value: { exitCode: 0 }, content: [{ type: 'text', text: '正文1567字，检查通过' }] })
+  const args = { phase: 'verification', summary: '现稿和自检结果已具备，请主控核对是否还需调整。',
+    nextStep: '没有新的必要修改则提交正式报告。', evidence: ['draft-read', 'draft-check'], requestReview: true }
+  await f.checkpoint(0, args)
+  await waitFor(() => f.parent.injected.some(message => message.source.kind === 'delegation-supervision'))
+  let task = f.snapshot().tasks[0]
+  assert.equal(task.supervision.pending.code, 'PROGRESS_REVIEW')
+  assert.equal(task.supervision.pending.advisory, true)
+  const status = await f.execute('delegation_status')
+  assert.equal(status.nextAction.type, 'supervise')
+  const summary = JSON.parse(f.render('delegation_status', {}, status)).plan.tasks[0]
+  assert.equal(summary.supervision.checkpoint.summary, args.summary)
+  assert.deepEqual(summary.supervision.pending.evidence, args.evidence)
+  await f.endTurn()
+  assert.equal(f.snapshot().recovery.used, 0, 'an advisory must not spend completion recovery when the coordinator has not acted yet')
+  await f.execute('delegation_control', { taskId: 'draft', action: 'steer', message: '已有检查结果，核对剩余要求后提交报告，不再反复校准字数。' })
+  assert.equal(f.calls.at(-1)[1], child.id)
+  await f.checkpoint(0, args)
+  await tick()
+  assert.equal(f.parent.injected.filter(message => message.source.kind === 'delegation-supervision').length, 1)
+  task = f.snapshot().tasks[0]
+  assert.equal(task.supervision.used, 0)
+  assert.equal(task.status, 'running')
+  assert.equal(f.snapshot().completion, null)
+  assert.equal(f.pending.length, 1)
+  assert.equal(f.pending[0].receipt.disposeCount, undefined)
+  const savedNotice = JSON.parse(await readFile(f.file, 'utf8')).plans[0].tasks[0].supervision.notices.PROGRESS_REVIEW_verification
+  assert.ok(savedNotice)
+  await f.reload()
+  assert.equal(f.snapshot().tasks[0].supervision.notices.PROGRESS_REVIEW_verification, savedNotice)
+})
+
+test('the first successful declared deliverable wakes its coordinator once while scratch writes and failed writes do not', async () => {
+  const f = await fixture(); f.parent.session.header.cwd = f.directory
+  await f.plan([card('draft', { outputs: ['article.md'], writes: ['article.md', 'scratch.md'] })]); await f.execute('delegation_run')
+  const child = f.children[0]
+  const observed = (file, id, failed = false) => f.engine.observe({ agent: child, name: 'write', callId: id,
+    arguments: { file_path: path.join(f.directory, file) } }, { isError: failed, content: [{ type: 'text', text: failed ? 'write failed' : 'written' }] })
+  observed('scratch.md', 'scratch-write')
+  observed('article.md', 'failed-draft', true)
+  await f.engine.history()
+  assert.equal(f.parent.injected.length, 0)
+  observed('article.md', 'first-draft')
+  await waitFor(() => f.parent.injected.some(message => message.source.kind === 'delegation-supervision'))
+  let task = f.snapshot().tasks[0]
+  assert.equal(task.supervision.pending.code, 'PROGRESS_REVIEW')
+  assert.deepEqual(task.supervision.pending.evidence, ['first-draft'])
+  assert.match(task.supervision.pending.reason, /article\.md/)
+  assert.match(await readFile(f.snapshot().archive.summaryPath, 'utf8'), /最近工具证据.*article\.md/)
+  await f.execute('delegation_control', { taskId: 'draft', action: 'steer', message: '已有初稿，合并执行必要检查，满足原要求后提交报告。' })
+  observed('article.md', 'revised-draft')
+  await tick()
+  task = f.snapshot().tasks[0]
+  assert.equal(f.parent.injected.filter(message => message.source.kind === 'delegation-supervision').length, 1)
+  assert.equal(task.supervision.used, 0)
+  assert.equal(task.status, 'running')
+  assert.equal(f.snapshot().completion, null)
+  assert.equal(f.pending[0].receipt.disposeCount, undefined)
+})
+
+test('a committed final report supersedes a pending progress inquiry without accepting the task', async () => {
+  const f = await fixture(); await f.plan([card('draft')]); await f.execute('delegation_run')
+  f.engine.observe({ agent: f.children[0], name: 'read', callId: 'draft-proof' }, { isError: false, content: [] })
+  await f.checkpoint(0, { phase: 'verification', summary: '已自检，等主控核对。', nextStep: '提交正式报告。', evidence: ['draft-proof'], requestReview: true })
+  assert.equal(f.snapshot().tasks[0].supervision.pending.code, 'PROGRESS_REVIEW')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const task = f.snapshot().tasks[0]
+  assert.equal(task.supervision.pending, null)
+  assert.equal(task.status, 'review')
+  assert.equal(f.snapshot().completion, null)
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+})
+
+test('dispatch distinguishes required criteria from suggestions and reuses successful checks without dropping the task contract', async () => {
+  const f = await fixture()
+  const instructions = '用户已确认正文1500到1900汉字；现稿必读，旧评审只在事实有疑问时参考。'
+  const criterion = '保留用户指定的全部事实和链接'
+  await f.plan([card('draft', { instructions, criteria: [criterion] })]); await f.execute('delegation_run')
+  const prompt = f.calls[0].request.prompt[0].text
+  assert.match(prompt, /用户硬要求与主控建议/)
+  assert.match(prompt, /只在相关产物.*重验/)
+  assert.match(prompt, /requestReview:true/)
+  assert.ok(prompt.includes(instructions), 'the program must preserve rather than rewrite the original brief')
+  assert.ok(prompt.includes('C1：' + criterion), 'required criteria must remain binding')
+  const properties = f.definition('delegation_plan').parameters.properties.tasks.items.properties
+  assert.match(properties.instructions.description, /必读.*按需/)
+  assert.match(properties.criteria.description, /用户要求/)
+})
+
+test('independent reviewers can request evidence-based progress supervision in the compact status', async () => {
+  const f = await fixture(); await f.plan([card('a', { reviewPolicy: 'independent', reviewReason: '核对权限相关事实' })]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  f.engine.observe({ agent: f.children[1], name: 'read', callId: 'audit-proof' }, { isError: false, content: [] })
+  await f.checkpoint(1, { phase: 'investigation', summary: '事实存在冲突，需主控裁决。', nextStep: '核对原始要求。', evidence: ['audit-proof'], requestReview: true })
+  const status = await f.execute('delegation_status')
+  const task = JSON.parse(f.render('delegation_status', {}, status)).plan.tasks[0]
+  assert.equal(task.audit.supervision.pending.code, 'PROGRESS_REVIEW')
+  assert.equal(task.audit.supervision.checkpoint.summary, '事实存在冲突，需主控裁决。')
+  assert.equal(f.snapshot().tasks[0].audit.status, 'running')
+})
+
 test('one plan call records delegation and starts its configured worker without a separate run', async () => {
   const f = await fixture()
   const result = await f.execute('delegation_plan', { goal: '一次派发隔离任务', decisionReason: '执行者核对文件，主控验证验收。', start: true, tasks: [card('a')] })
@@ -2937,6 +3044,54 @@ test('stage checkpoints keep current-task evidence and unfinished work without c
   await assert.rejects(f.execute('delegation_checkpoint', args), /托管子/)
   await f.reload()
   assert.equal(f.snapshot().tasks[0].supervision.checkpoint.nextStep, args.nextStep)
+})
+
+test('continuous model output without new evidence requests one progress review without stopping the worker', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+  const f = await fixture(); await f.plan([card('draft')]); await f.execute('delegation_run')
+  const child = f.children[0]
+  const stream = await f.emit('llm/stream', { sessionId: child.id, provider: 'local', model: 'cheap', messages: [],
+    signal: new AbortController().signal }, async function* () {
+    for (let i = 0; i < 12; i++) {
+      t.mock.timers.tick(60_000)
+      yield { type: 'block-delta', delta: { type: 'reasoning-delta', text: 'ongoing output' } }
+      await new Promise(resolve => setImmediate(resolve))
+    }
+  })
+  for await (const _chunk of stream) {}
+  await f.engine.history()
+  await new Promise(resolve => setImmediate(resolve))
+  const task = f.snapshot().tasks[0]
+  assert.equal(task.supervision.pending?.code, 'NO_NEW_EVIDENCE')
+  assert.equal(task.supervision.pending.advisory, true)
+  assert.equal(task.supervision.activity.kind, 'model')
+  assert.equal(task.supervision.used, 0)
+  assert.equal(task.status, 'running')
+  assert.equal(f.pending.length, 1)
+  assert.equal(f.pending[0].receipt.disposeCount, undefined)
+  assert.equal(f.parent.injected.filter(message => message.source.kind === 'delegation-supervision').length, 1)
+})
+
+test('an active tool and new read evidence do not trigger a no-new-evidence inquiry', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() })
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const child = f.children[0]
+  t.mock.timers.tick(9 * 60_000)
+  assert.equal(f.engine.guardChild({ agent: child, name: 'pwsh', callId: 'long-tool' }), undefined)
+  t.mock.timers.tick(2 * 60_000)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(f.snapshot().tasks[0].supervision.pending, null)
+  f.engine.observe({ agent: child, name: 'pwsh', callId: 'long-tool', arguments: { command: 'long check' } },
+    { isError: false, value: { exitCode: 0 }, content: [{ type: 'text', text: 'completed check' }] })
+  for (let i = 0; i < 14; i++) {
+    t.mock.timers.tick(60_000)
+    f.engine.observe({ agent: child, name: 'read', callId: 'new-read-' + i,
+      arguments: { file_path: 'reference.md', offset: i * 100 } }, { isError: false, content: [{ type: 'text', text: 'new slice ' + i }] })
+  }
+  await f.engine.history()
+  assert.equal(f.snapshot().tasks[0].supervision.notices.NO_NEW_EVIDENCE, undefined)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.parent.injected.length, 0)
 })
 
 test('no activity is an advisory once, does not consume correction allowance and never becomes a timeout', async t => {
