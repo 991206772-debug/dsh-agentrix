@@ -540,6 +540,49 @@ test('auto routing is advice and never forces a handoff from keywords or operati
   } finally { await h.close() }
 })
 
+test('auto coordinator guidance weighs delegation overhead before assigning execution roles', async () => {
+  const h = await host(); await h.state()
+  const sections = []
+  h.agent.ctx = { systemPrompt: { section(value) { sections.push(value); return () => {} } } }
+  try {
+    h.emit('agent/created', { agent: h.agent })
+    h.turn('把刚才的文章开头改得更容易理解')
+    const prompt = sections.map(section => section.text()).join('\n\n')
+    const discipline = prompt.split('\n\n')[0]
+    assert.ok(discipline.length <= 600, 'routing guidance must fit the existing recurring-context budget')
+    assert.match(discipline, /委派收益.*准备.*汇报.*验收.*开销/)
+    assert.match(discipline, /共享上下文.*direct/)
+    assert.match(discipline, /独立执行量.*delegate/)
+    assert.match(discipline, /普通也可委派/)
+    assert.match(discipline, /委派后主控/)
+    assert.match(discipline, /显式填reviewPolicy\/reviewReason/)
+    assert.match(discipline, /修改失败须修复并核对原产物/)
+    assert.doesNotMatch(discipline, /(?:^|\n)主控规划验收，worker执行/)
+    await h.decide('主控已掌握原文，只改开头即可完成，另行准备、汇报和验收的开销更大。')
+    assert.equal(h.call('edit', 'warm-context-edit', h.agent, { file_path: 'article.md' }), undefined)
+    assert.equal((await h.state()).decision.mode, 'direct')
+    assert.equal((await h.definitions.get('delegation_status').execute({}, { agent: h.agent })).plan, null)
+    assert.equal((await h.state()).turnStats.delegated, 0)
+  } finally { await h.close() }
+})
+
+test('routing tool schemas distinguish delegation payoff, execution difficulty and review risk', async () => {
+  const h = await host(); await h.state()
+  try {
+    const decide = h.definitions.get('delegation_decide').parameters.properties
+    const plan = h.definitions.get('delegation_plan').parameters.properties
+    const task = plan.tasks.items.properties
+    assert.match(decide.reason.description, /准备.*汇报.*验收/)
+    assert.match(plan.decisionReason.description, /收益.*开销/)
+    assert.match(task.complexity.description, /未决.*难点/)
+    assert.match(task.complexityReason.description, /发布/)
+    assert.match(task.reviewPolicy.description, /新任务.*显式/)
+    assert.match(h.definitions.get('delegation_audit').description, /reviewPolicy.*independent.*coordinator/)
+    assert.deepEqual(task.complexity.enum, ['routine', 'complex'])
+    assert.deepEqual(task.reviewPolicy.enum, ['coordinator', 'independent'])
+  } finally { await h.close() }
+})
+
 test('expanded execution limits are authoritative, persist, and reject values above their ranges', async () => {
   delete process.env.DSH_DELEGATION_FIRST
   process.env.DSH_HOME = path.join(home, 'expanded-limits')

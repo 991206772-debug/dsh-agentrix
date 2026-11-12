@@ -2038,7 +2038,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   })
   routeTool('delegation_decide', '主控确认消息关联：new 新需求、continue 继续、update 调整、question 提问。新需求/方案变化给出 direct/delegate 和理由；继续沿用原决定。恢复原托管计划时如旧判断为 direct，可在 continue 中提供 mode:delegate 和具体 reason 修正，无需 update 或重建任务卡。多条真实消息须逐条用 messageId 关联，全部处理后才自动接续。', {
     relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
-    mode: { type: 'string', enum: ['direct', 'delegate'] }, reason: { type: 'string', description: '新需求或方案变化时给出具体理由，最多 500 字；继续和进度询问沿用原判断。' },
+    mode: { type: 'string', enum: ['direct', 'delegate'] }, reason: { type: 'string', description: '新需求或方案变化时说明已有上下文、委派收益与准备、汇报、验收开销的取舍，不能只复述角色分工；最多 500 字。继续和进度询问沿用原判断。' },
   }, [], recordDecision)
   routeTool('delegation_checkpoint', '托管执行者或只读审查者在长调查、阶段转换或阻塞时记录结论、下一步和成功工具证据。短任务只交最终报告；阶段记录不能代替验收或其他任务的记录。', {
     phase: { type: 'string', enum: ['investigation', 'implementation', 'verification'] }, summary: string, nextStep: string, evidence: array(string),
@@ -2177,9 +2177,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   routeTool('delegation_plan', '主控提交可验证的任务拆分。通常一并提供 decisionReason 和 start:true，保存决定、计划并直接按配置派发。同类工作合批，有独立价值才拆分；审查按风险用 reviewPolicy/reviewReason 单独说明，不按执行复杂度增加流程。省略审查方式仍沿用 complex 独立审查的旧约定；省略 start 或 false 仅保存。', {
     goal: string, relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
     start: { type: 'boolean', description: 'true 表示建计划后立即校验模型、权限与预算并派发；省略或 false 仅建立计划。' },
-    decisionReason: { type: 'string', description: '非空，最多 500 字；可在建计划时一并记录委派理由及 relation；不填写时需在 run 前记录。' }, tasks: array({ ...object({ id: string, title: string, instructions: string, scope: string,
-      outputs: array(string), writes: array(string), dependsOn: array(string), complexity: { type: 'string', enum: ['routine', 'complex'] }, complexityReason: string,
-      reviewPolicy: { type: 'string', enum: ['coordinator', 'independent'], description: 'coordinator：主控实际验证并验收；independent：须额外独立审查。主控按错误风险选择；权限、数据破坏、并发等高风险工作用 independent。' },
+    decisionReason: { type: 'string', description: '说明相对主控直接完成的委派收益与准备、汇报、验收开销，写清独立执行量、隔离或并行价值，不能只复述角色分工。非空，最多 500 字；可一并记录 relation，不填写时需在 run 前记录。' }, tasks: array({ ...object({ id: string, title: string, instructions: string, scope: string,
+      outputs: array(string), writes: array(string), dependsOn: array(string), complexity: { type: 'string', enum: ['routine', 'complex'], description: '只说明执行难度，不决定是否委派或执行模型。routine：方案明确，可沿既有材料执行；complex：仍有跨资料推理或设计取舍的未决难点。' },
+      complexityReason: { type: 'string', description: '说明实际未决难点或普通执行依据；篇幅长、要发布或重要不足以单独判为复杂；主控已解决的判断不重复算执行难度。' },
+      reviewPolicy: { type: 'string', enum: ['coordinator', 'independent'], description: '新任务显式填写，并提供 reviewReason。coordinator：主控实际验证并验收；independent：额外独立审查。按错误后果选择，权限、数据破坏、并发等高风险用 independent；复杂度或发布要求本身不代表高风险。' },
       reviewReason: { type: 'string', description: '指定 reviewPolicy 时必填，说明风险和所选审查方式的必要性；最多 1000 字。' },
       criteria: array(string), checks: array({ ...object({ tool: { type: 'string', enum: CHECK_TOOLS }, arguments: { type: 'object', additionalProperties: true } }), required: ['tool', 'arguments'] }) }),
       required: ['id', 'title', 'instructions', 'scope', 'outputs', 'writes', 'complexity', 'criteria', 'checks'] }),
@@ -2292,7 +2293,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return { plan: snapshotPlan(plan), notifications }
   })
   routeTool('delegation_verify', '主控验证已返回任务。默认顺序执行该任务全部检查，一次返回逐项结果、证据 ref 和标准 C1、C2；指定 checkIndex（从 0 开始）只重验该项。验证后仍须由主控判断内容并逐条验收，不消耗动手预算。', { taskId: string, checkIndex: { type: 'integer', description: '省略时执行全部检查；指定时仅执行该步骤，从 0 开始。' } }, ['taskId'], verify)
-  routeTool('delegation_audit', '对已返回任务安排一个独立只读审查，复杂任务会自动安排。重复请求不会重复开启；失败后的重试必须说明已处理的原因，同样受启动预算与次数限制。', {
+  routeTool('delegation_audit', '对已返回任务安排一个独立只读审查。reviewPolicy 为 independent 时自动安排，coordinator 由主控验证验收；未填写时兼容 complex 自动审查。重复请求不重复开启；失败重试须说明已处理的原因，受启动预算与次数限制。', {
     taskId: string, message: string,
   }, ['taskId'], async (args, exec) => {
     const { plan, parent } = ownPlan(exec), task = taskOf(plan, args.taskId)

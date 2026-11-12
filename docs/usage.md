@@ -2,6 +2,8 @@
 
 本页说明主控与子代理使用的工具、验收规则、记录和接口。安装与模型配置见 [README](../README.md)。
 
+auto 模式先由主控比较委派收益与准备、汇报、验收的开销：已掌握上下文的小改或连续调整优先 direct，有独立执行量、隔离或并行价值时 delegate。选择理由要说明具体取舍；普通任务也可委派，不按字数、文件数或操作次数强制分流。执行复杂度看实际未决难点，新任务显式填写审查方式与理由，按错误后果选择是否增加独立审查；“要发布”本身不是复杂或高风险的充分依据。现有字段、兼容默认与 strict/fixed/off 规则保持不变。
+
 工具结果的 `nextAction` 指明下一步。等待时简短告知用户，再调用 `delegation_wait` 或结束回复等待通知；验收后的依赖任务自动启动，无需重复 `run`。主控验证返回 C1、C2 等标准对照与短证据 `ref`；验收时逐条提交 `criterionId`、`finding`、`evidence:[ref]`，程序校验其归属和有效性，不代写通过结论。旧数字 `criterion` 和原始 `callId` 继续兼容。执行者报告参数不包含独立审查字段。
 
 ## 主 Agent 的工具
@@ -22,7 +24,7 @@
 | `delegation_control` | `steer` 纠偏、`stop` 取消且必须提供原因、`retry` 有依据地重试；正常返回无需 stop |
 | `delegation_verify` | 默认一次顺序执行任务全部检查，返回逐项证据；可用 checkIndex 单项重验，保留正式验收 |
 | `delegation_report` | 当前执行者或审查者提交身份绑定的完整报告，工具确认后自动结束，主控不能代报 |
-| `delegation_audit` | 请求独立审查；复杂任务自动安排，失败后须给出原因处理说明才重试 |
+| `delegation_audit` | 请求独立审查；reviewPolicy 为 independent 时必须审查，未指定时兼容 complex 自动审查；失败后须给出原因处理说明才重试 |
 | `delegation_review` | 逐条验收，或按问题编号、标准与实际证据返工 |
 | `delegation_cancel` | 用户明确取消整个计划时提供 reason 和真实用户消息 messageId；无原因调用不取消、不自动重试 |
 
@@ -49,7 +51,7 @@
   "goal": "补充登录失败路径测试并核对结果",
   "relation": "new",
   "start": true,
-  "decisionReason": "测试补充交给执行模型，主控读取结果、运行测试并最终验收。",
+  "decisionReason": "已有测试结构与预期结果明确，两条失败场景可由执行模型独立补齐；交接只需引用示例与接口，主控保留测试运行和验收。",
   "tasks": [{
     "id": "login-tests",
     "title": "补充登录失败测试",
@@ -91,13 +93,13 @@ delegation_verify({taskId: 'login-tests', checkIndex: 1})
 
 执行者结束前调用 `delegation_report({status,summary,report,reason?,concerns?})`。`status` 为 `DONE`、`DONE_WITH_CONCERNS`、`NEEDS_CONTEXT` 或 `BLOCKED`；后两项必须说明 `reason`，有疑点必须列 `concerns`。完整 `report` 最多 24000 字符，超限明确报错，不能静默截断。报告保存在任务档案的 `reports/<taskId>/`，实现与审查、不同执行次数分别存放。辅助档案暂时不可写时，必需的任务快照仍保留全文并提示记录问题。
 
-新任务建议同时填写 `reviewPolicy` 和 `reviewReason`（非空，最多 1000 字）。`coordinator` 由主控实际验证并逐条验收；`independent` 在此基础上增加独立审查。主控按错误风险和独立核查价值决定，不把执行复杂度当成风险：权限、破坏性数据操作、并发等高风险工作使用独立审查。只填一项或填写未知方式会在派发前报错；两者均省略时兼容旧流程，`complex` 自动审查，`routine` 按需审查。历史任务不改写审查合同，新字段保存在任务快照、状态摘要、页面与 Markdown 中。
+新任务应显式填写 `reviewPolicy` 和 `reviewReason`（非空，最多 1000 字）。`coordinator` 由主控实际验证并逐条验收；`independent` 在此基础上增加独立审查。主控按错误风险和独立核查价值决定，不把执行复杂度当成风险：权限、破坏性数据操作、并发等高风险工作使用独立审查。只填一项或填写未知方式会在派发前报错；两者均省略时兼容旧流程，`complex` 自动审查，`routine` 按需审查。历史任务不改写审查合同，新字段保存在任务快照、状态摘要、页面与 Markdown 中。
 
 需要独立审查的任务返回后自动排队；审查者只允许 `read/grep/glob` 和提交报告，禁止修改、命令执行或继续派代理。审查报告必须同时提供 `specVerdict` 与 `qualityVerdict`（`pass/fail`），以及具体 `issues`。审查未结束或有未解决重要问题时不能验收。审查结果是额外检查，主控仍须实际运行验证。测试通过不能代替视觉还原或真实场景验证。
 
 普通任务可用 `delegation_audit({taskId})` 请求审查，重复请求不会重复启动。审查服务失败不会重跑实现；处理原因后用 `delegation_audit({taskId,message:'已处理的具体原因'})` 明确重试。每次执行对应的审查启动次数单独受现有 `maxAttempts` 限制，所有启动同时计入计划 `maxActivations`。模型不自动升级或切换。
 
-只需配置执行模型。每次实际派发实现任务时，`task.dispatcherModel` 保存分发者的模型、思考强度、时间及对应执行次数。普通任务手动审查、复杂任务自动审查和审查重试都使用这份记录与独立上下文；切换聊天模型不改变已有执行的审查选择。返工派发新执行时记录新的分发者。旧任务没有记录时，在首次审查时记录当时的主控并注明 `legacy-review`，不补造过去的模型。已经启动的审查与历史路由保持原记录。
+只需配置执行模型。每次实际派发实现任务时，`task.dispatcherModel` 保存分发者的模型、思考强度、时间及对应执行次数。按 reviewPolicy 安排的独立审查、兼容任务按需或自动安排的审查及审查重试，都使用这份记录与独立上下文；切换聊天模型不改变已有执行的审查选择。返工派发新执行时记录新的分发者。旧任务没有记录时，在首次审查时记录当时的主控并注明 `legacy-review`，不补造过去的模型。已经启动的审查与历史路由保持原记录。
 
 配置和状态接口通过 `reviewerModelPolicy: dispatcher-snapshot` 标识当前策略。旧 `models.reviewer/complex` 配置不再生效，读取时不改原文件；下次保存仅保留执行配置及兼容的 `reviewer:null`。新版配置页连接旧进程时提示等待自然重载，避免页面显示新规则而后台仍使用旧审查配置。
 
