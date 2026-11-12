@@ -114,6 +114,12 @@ try {
     return checked('delegation_cancel', { reason, messageId })
   }
   ctx.emit('session/event', { id: 'root' }, { type: 'agent/inbox/spliced', data: { inserted: [{ id: 'native-request', source: { kind: 'user' }, content: [{ type: 'text', text: '验证隔离环境中的原生工具与委派流程' }] }] } })
+  const unplanned = await call('delegation_status')
+  assert.equal(unplanned.isError, false)
+  const unplannedOutput = JSON.parse(unplanned.content.find(block => block.type === 'text').text)
+  assert.equal(unplannedOutput.plan, null)
+  assert.equal(unplannedOutput.context.pendingMessages[0].messageId, 'native-request')
+  assert.equal(unplannedOutput.nextAction.type, 'resolve_message')
   ctx.emit('session/event', { id: 'root' }, { type: 'turn/start', data: { turn: 1 } })
   await checked('delegation_decide', { mode: 'delegate', reason: '由隔离子任务执行，主控通过原生工具管线核对结果和验收证据。' })
   assert.equal((await call('pwsh')).isError, true)

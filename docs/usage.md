@@ -17,7 +17,7 @@
 | `delegation_plan` | 新委派推荐携带 `relation/messageId/decisionReason/start:true`，一次记录、建计划并派发；省略 start 或填 false 仍仅保存 |
 | `delegation_run` | 启动已有未启动计划，或明确处理问题后继续；合并派发后无需重复调用 |
 | `delegation_wait` | 等待现有任务的报告、故障或用户新消息；原代理继续运行，不轮询模型、不消耗纠偏次数 |
-| `delegation_status` | 默认摘要；可选 taskId，detail: summary/full；full 必须指定任务，只返回该任务完整报告和证据 |
+| `delegation_status` | 无计划也可查询当前消息；默认计划摘要，可选 taskId，detail: summary/full；full 必须指定任务，只返回该任务完整报告和证据 |
 | `delegation_checkpoint` | 执行者或只读审查者在长调查、阶段转换或阻塞时记录结论及成功工具证据；短任务只交最终报告 |
 | `delegation_control` | `steer` 纠偏、`stop` 取消且必须提供原因、`retry` 有依据地重试；正常返回无需 stop |
 | `delegation_verify` | 默认一次顺序执行任务全部检查，返回逐项证据；可用 checkIndex 单项重验，保留正式验收 |
@@ -189,6 +189,10 @@ delegation_verify({taskId: 'login-tests', checkIndex: 1})
 `/api/state` 的 `coordinatorProgressVersion: 1` 表示当前进程提供主控直接执行进度。每个会话的 `execution` 保存当前回合的模型、工具活动、目标、最近结果和未解决的文件修改失败；`delegationAvailability` 按实际请求头检查委派工具是否可见。输入框进度区直接读取这些字段，不新增模型请求。插件服务返回 404 时前端显示服务不可用，不继续把旧记录当成当前进度。
 
 `decisionProtocolVersion: 2` 和 `requestBindingVersion: 2` 表示当前进程由主控确认消息关联。`pendingMessages` 是尚未判定的真实消息，不能当成新增需求或补充；`messageResolution` 保存主控确认的 `relation/messageId/requestId/model/at`。`new` 从真实消息建立新需求；`continue` 和 `question` 不改变范围或执行决定；`update` 更新原需求范围或方案，托管补充仍须通过原有 steer/rework 流程落实。新需求不取消旧代理、覆盖旧计划或改变历史验收；同一会话仍只保留一个当前托管计划，新计划须等旧计划结束。
+
+主控管理工具的 `context` 提供本会话当前需求、执行决定、消息关联结果和 `pendingMessages`（正文及真实 `messageId`），默认摘要也保留这些信息。`delegation_status({})` 在尚无计划时返回 `plan:null`，仍可查询和处理消息。多条消息未指定编号或编号无效时，错误直接附本会话候选；逐条用 `delegation_decide` 判断关系，不盲选最后一条，不扫描全局任务文件或其他项目会话寻找编号。
+
+按返回结果最外层的 `nextAction` 行动：未关联消息优先为 `resolve_message`；消息已关联、当前需求尚无对应计划时为 `handle_request`（沿用已确认的 direct/delegate）或 `decide`（尚须主控判断）。同一会话还有未验收的旧计划时，新委派须先按返回步骤处理旧计划，不能同时建立第二套计划。`context.planMatchesRequest:false` 表示附带的是另一需求的计划；其完成回执只作历史背景，不表示当前需求完成。消息关联保存在会话记录中，历史计划与导出档案不附加后来收到的待处理消息，也不改写原验收结果。
 
 已有计划运行时，新需求经主控确认为 `new/direct` 后，可处理不重叠的文件；显式文件目标与旧任务尚未验收的写入范围重叠时仍会拦截。新需求结束不会触发旧计划的补流程，旧任务按原通知机制返回并验收。任意 Shell 脚本不作路径解析，`writes` 是协作范围与并发排队依据，不是操作系统文件沙箱。
 

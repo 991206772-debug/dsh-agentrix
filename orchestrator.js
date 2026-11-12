@@ -112,7 +112,7 @@ function compactTask(task) {
 function compactResult(value) {
   const result = { ...value }
   if (value.plan) result.plan = { sessionId: value.plan.sessionId, goal: brief(value.plan.goal, 300), status: value.plan.status,
-    decision: value.plan.decision, nextAction: value.plan.nextAction,
+    decision: value.plan.decision, nextAction: value.plan.nextAction, pendingMessages: value.plan.pendingMessages,
     activationBudget: value.plan.activationBudget, dispatchWait: value.plan.dispatchWait,
     interruption: value.plan.interruption,
     coordinatorIssue: value.plan.coordinatorIssue, coordinationIssue: value.plan.coordinationIssue, messageResolution: value.plan.messageResolution,
@@ -393,12 +393,27 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const queuedInputs = plan => [...(plan.inputs ?? []).filter(input => input.status === 'queued'), ...pendingMessages(plan.sessionId)]
   const unresolvedInputs = plan => [...(plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)), ...pendingMessages(plan.sessionId).map(message => ({ id: message.messageId, text: message.text, status: 'unclassified' }))]
   const interruptedPlan = plan => Boolean(plan && (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt || plan.cancelled && plan.cancelledBy === 'host' && !plan.cancellation))
-  function nextAction(plan) {
-    if (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt && pendingMessages(plan.sessionId).length) return { type: 'resolve_message', message: '先用 delegation_decide 确认真实新消息；继续原需求时自动接续中断计划，不新建任务卡。' }
+  function messageContext(sessionId) {
+    const entry = decisions.get(sessionId), plan = plans.get(sessionId)
+    return { sessionId, source: clone(sourceOf(sessionId)), revision: clone(revisionOf(sessionId)),
+      decision: decisionFor(sessionId), decisionCurrent: decisionCurrent(sessionId),
+      messageResolution: clone(entry?.messageResolution ?? null), pendingMessages: clone(pendingMessages(sessionId)),
+      planMatchesRequest: Boolean(plan && isCurrentPlan(plan)) }
+  }
+  function nextAction(plan, sessionId = plan?.sessionId, completion = plan?.completion) {
+    const pending = pendingMessages(sessionId)
+    if (pending.length) return { type: 'resolve_message', messageIds: pending.map(message => message.messageId),
+      message: '用 context.pendingMessages 中的真实 messageId 逐条调用 delegation_decide，确认新消息与需求的关系；继续原需求时沿用原计划。无需扫描历史会话文件寻找编号。' }
+    if (!plan || !isCurrentPlan(plan) && (completion?.outcome === 'completed' || ['accepted', 'cancelled'].includes(planStatus(plan)) || decisionFor(sessionId)?.mode !== 'delegate')) {
+      const decision = decisionFor(sessionId), current = decisionCurrent(sessionId)
+      return { type: current ? 'handle_request' : 'decide', requestId: sourceOf(sessionId)?.messageId ?? null, mode: decision?.mode ?? null,
+        message: !current ? '用 delegation_decide 确认当前需求的执行方式和理由。旧计划与回执仅作历史背景。'
+          : decision.mode === 'delegate' ? '为当前需求调用 delegation_plan({decisionReason,start:true,...}) 建立并启动计划；旧计划回执不代表当前需求已完成。'
+            : '按已确认的当前需求直接处理并验证；旧计划回执不代表当前需求已完成。' }
+    }
     if (interruptedPlan(plan) && !pendingMessages(plan.sessionId).length && (!decisionCurrent(plan.sessionId) || decisionFor(plan.sessionId)?.mode !== 'delegate')) return { type: 'decide', message: '继续消息已关联，但旧判断不是委派。请用 delegation_decide(relation:continue,mode:delegate,reason:监督原托管任务的具体理由) 确认继续原计划，无需改成 update 或重建任务卡。' }
     if (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt) return { type: 'run', message: '执行已中断，进度保留。用户明确继续后调用 delegation_run，沿用原计划恢复未完成任务；已返回报告继续验证验收，不必新建计划。' }
-    if (plan.completion || plan.cancelled) return { type: 'finished', message: '以程序交付回执为准；不要重复启动或清理。' }
-    if (pendingMessages(plan.sessionId).length) return { type: 'resolve_message', message: '先用 delegation_decide 确认新消息与需求的关联。' }
+    if (completion || plan.cancelled) return { type: 'finished', message: '以程序交付回执为准；不要重复启动或清理。' }
     if (unresolvedInputs(plan).length) return { type: 'handle_input', message: '先处理用户补充，沿用原代理同步要求。' }
     const returned = plan.tasks.filter(task => task.status === 'review' && !task.pendingAcceptance)
     const verify = returned.filter(task => task.checks.some(check => !check.result || check.result.attempt !== task.attempts))
@@ -716,7 +731,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     copy.activationBudget = budget
     delete copy.pendingMessages
-    if (plan.source?.messageId === sourceOf(plan.sessionId)?.messageId && pendingMessages(plan.sessionId).length) copy.pendingMessages = clone(pendingMessages(plan.sessionId))
+    if (!persist && pendingMessages(plan.sessionId).length) copy.pendingMessages = clone(pendingMessages(plan.sessionId))
     if (copy.decision) copy.decisionCurrent = ['accepted', 'cancelled'].includes(planStatus(plan)) || decisionCurrent(plan.sessionId)
     if (['accepted', 'cancelled'].includes(planStatus(plan))) copy.dispatchWait = null
     return { ...copy, status: planStatus(plan), ...(!persist ? { nextAction: nextAction(plan) } : {}) }
@@ -990,11 +1005,13 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (decisionWrites.has(parent.id)) throw new Error('判断正在保存，请等待本次工具返回')
     const entry = decisions.get(parent.id) ?? { sessionId: parent.id, source: clone(getSource(parent.id)), revision: clone(getRevision(parent.id)) }
     const pending = pendingMessages(parent.id)
-    if (!args.messageId && pending.length > 1) throw new Error('存在多条待关联消息，请提供真实 messageId 分别确认，不能自动选最后一条')
+    const messageHelp = () => '。本会话待关联消息：' + JSON.stringify(pending.map(message => ({ messageId: message.messageId, text: brief(message.text, 400) }))) +
+      '。请用 delegation_decide({messageId,relation,...}) 逐条确认；delegation_status 的 context.pendingMessages 提供消息内容，无需搜索其他会话文件。'
+    if (!args.messageId && pending.length > 1) throw new Error('存在多条待关联消息，请提供真实 messageId 分别确认，不能自动选最后一条' + messageHelp())
     const binding = coordinatorUsage.get(parent.id)
     const message = args.messageId ? entry.messages?.find(item => item.messageId === args.messageId && !item.withdrawn)
       : binding ? entry.messages?.find(item => item.messageId === binding.messageId && !item.resolution && !item.withdrawn) : pending[0]
-    if (args.messageId && !message) throw new Error('消息编号不存在于本会话的真实用户消息，不能伪造关联')
+    if (args.messageId && !message) throw new Error('消息编号不存在于本会话的真实用户消息，不能伪造关联' + messageHelp())
     const relation = args.relation ?? (!entry.source ? 'new' : !message ? 'update' : null)
     if (!['new', 'continue', 'update', 'question'].includes(relation)) throw new Error('请用 relation 明确 new/continue/update/question；程序不根据措辞猜需求归属')
     if (['continue', 'update'].includes(relation) && !entry.source) throw new Error('尚无已确认需求，请先用 new 记录')
@@ -1940,12 +1957,17 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const object = properties => ({ type: 'object', properties, additionalProperties: false })
   const routeTool = (name, description, properties, required, execute, child = false) => {
     const definition = { name, description, parameters: { ...object(properties), required },
-      output: { schema: { type: 'object', additionalProperties: true }, render: (args, value) => [{ type: 'text', text: value.completion ? [completionText(value.completion), value.continuation].filter(Boolean).join('\n') : JSON.stringify(args.detail === 'full' ? value : compactResult(value)) }] },
+      output: { schema: { type: 'object', additionalProperties: true }, render: (args, value) => [{ type: 'text', text: value.completion
+        ? [completionText(value.completion), value.continuation, ...(value.nextAction?.type !== 'finished' ? [JSON.stringify({ context: value.context, nextAction: value.nextAction })] : [])].filter(Boolean).join('\n')
+        : JSON.stringify(args.detail === 'full' ? value : compactResult(value)) }] },
       async execute(args, exec) {
         try {
           await ready; if (committing.size) await Promise.all(committing); if (!child) own(exec)
           const value = await execute(args, exec), plan = plans.get(exec.agent?.id)
-          return !child && plan && value && typeof value === 'object' ? { ...value, nextAction: value.completion ? { type: 'finished', message: completionText(value.completion) } : nextAction(plan) } : value
+          if (child || !value || typeof value !== 'object') return value
+          const action = nextAction(plan, exec.agent.id, value.completion ?? plan?.completion)
+          if (value.completion && action.type === 'finished') action.message = completionText(value.completion)
+          return { ...value, context: messageContext(exec.agent.id), nextAction: action }
         }
         catch (error) { recordCoordinationFailure(exec, messageOf(error)); throw error }
         finally { refreshCoordinationTools(exec.agent) }
@@ -2190,12 +2212,17 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return { plan: snapshot().find(item => item.sessionId === plan.sessionId) }
   }
   routeTool('delegation_run', '启动已经建立但未启动的计划，或在明确处理问题后继续原计划。新委派优先用 delegation_plan 的 start:true 一次完成。按依赖和全局并发限制派单；dispatchWait 时等通知，不反复调用。失败不自动重试，仍执行原模型、预算和恢复校验。', {}, [], runPlan)
-  routeTool('delegation_status', '默认返回计划摘要；detail=full 必须指定 taskId。额外指定 checkIndex 可分段读取该检查的完整验证输出：offset 为从 0 开始的字符位置，limit 默认 4000、最多 8000；按 nextOffset 继续，不反复读取全量详情。', {
+  routeTool('delegation_status', '查询当前会话消息与计划摘要，无计划也可调用。context 提供当前需求、待关联消息正文和真实 messageId；旧计划回执仅作历史背景，按顶层 nextAction 继续，无需扫描历史会话文件。detail=full 必须指定 taskId；checkIndex 可分段读取验证原文，offset 从 0 开始，limit 默认 4000、最多 8000，按 nextOffset 继续。', {
     taskId: string, detail: { type: 'string', enum: ['summary', 'full'] }, checkIndex: { type: 'integer' }, offset: { type: 'integer' }, limit: { type: 'integer' },
   }, [], async (args, exec) => {
-    const { plan } = ownPlan(exec)
+    const parent = own(exec), plan = plans.get(parent.id)
     if (args.detail !== undefined && !['summary', 'full'].includes(args.detail)) throw new Error('detail 只能是 summary 或 full')
     if (args.detail === 'full' && !args.taskId) throw new Error('完整详情必须指定 taskId，只读取一个任务')
+    if (!plan) {
+      if (args.taskId || args.checkIndex !== undefined) throw new Error('请先调用 delegation_plan 创建任务计划，消息关联可直接查看 delegation_status({})')
+      if (args.offset !== undefined || args.limit !== undefined) throw new Error('offset 和 limit 必须与 checkIndex 一起使用')
+      return { plan: null, storageError }
+    }
     if (args.checkIndex !== undefined) {
       if (!args.taskId || args.detail !== 'full') throw new Error('读取验证输出必须指定 taskId 和 detail:full')
       const task = taskOf(plan, args.taskId), check = task.checks[args.checkIndex]

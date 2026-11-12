@@ -39,7 +39,7 @@ test('malformed delegation arguments retry in the same coordinator with durable 
   assert.match(JSON.stringify(f.parent.session.appended[0].data), /JSON.*未执行|未执行.*JSON/)
   await f.reload()
   assert.deepEqual(await recover(), { kind: 'retry' })
-  await assert.rejects(f.execute('delegation_status'), /创建任务计划/)
+  assert.equal((await f.execute('delegation_status')).plan, null)
   assert.equal(await recover(), undefined)
   recovery = f.engine.requestContext('parent').argumentRecovery
   assert.equal(recovery.used, 2)
@@ -862,12 +862,129 @@ test('a completed plan remains archived but is not injected as the current plan 
   assert.match(f.engine.summary('parent'), /old-delivery/)
   options.source = { messageId: 'request-new', text: '检查另一项代码调用' }
   assert.equal(f.engine.summary('parent'), '')
-  assert.deepEqual(f.snapshot(), old, 'request selection must not rewrite the old result')
+  const { nextAction: previousAction, ...previousResult } = old
+  const { nextAction: currentAction, ...currentResult } = f.snapshot()
+  assert.equal(previousAction.type, 'finished')
+  assert.notEqual(currentAction.type, 'finished', 'the old receipt must not finish a different current request')
+  assert.deepEqual(currentResult, previousResult, 'request selection must not rewrite the old result')
   assert.equal(f.engine.hasPending('parent'), false)
   const archive = await f.engine.readArchive(old.archive.id)
   assert.equal(archive.plan.completion.id, old.completion.id)
   assert.equal(archive.plan.source.messageId, 'request-old')
   assert.equal(f.pending.length, 1)
+})
+
+test('the coordinator can recover its own pending messages without creating a plan', async () => {
+  const f = await fixture()
+  for (const [id, text] of [['writing-request', '按评审写出完整文章'], ['writing-continue', '继续']]) {
+    f.emit('session/event', f.parent, { type: 'user/message', data: { id, source: { kind: 'user' }, content: text } })
+  }
+  const result = await f.execute('delegation_status')
+  const rendered = JSON.parse(f.render('delegation_status', {}, result))
+  assert.equal(rendered.plan, null)
+  assert.equal(rendered.context.sessionId, f.parent.id)
+  assert.deepEqual(rendered.context.pendingMessages.map(message => [message.messageId, message.text]),
+    [['writing-request', '按评审写出完整文章'], ['writing-continue', '继续']])
+  assert.equal(rendered.nextAction.type, 'resolve_message')
+  assert.equal(f.snapshot(), undefined)
+  assert.equal(f.calls.length, 0)
+  await assert.rejects(f.execute('delegation_status', { taskId: 'missing', detail: 'full' }), /创建任务计划/)
+  await assert.rejects(f.execute('delegation_status', { detail: 'full' }), /taskId|任务/)
+  await f.reload()
+  assert.deepEqual((await f.execute('delegation_status')).context.pendingMessages, result.context.pendingMessages)
+})
+
+test('ambiguous message errors expose real candidates and a recovery action without selecting the latest message', async () => {
+  const f = await fixture()
+  for (const [id, text] of [['writing-request', '按评审写出完整文章'], ['writing-continue', '继续']]) {
+    f.emit('session/event', f.parent, { type: 'user/message', data: { id, source: { kind: 'user' }, content: text } })
+  }
+  for (const args of [{}, { messageId: 'invented-other-session' }]) {
+    await assert.rejects(f.execute('delegation_decide', { relation: 'new', mode: 'delegate', reason: '执行者撰写，主控验收。', ...args }), error => {
+      for (const text of ['writing-request', '按评审写出完整文章', 'writing-continue', 'delegation_decide', 'messageId']) assert.ok(error.message.includes(text), text)
+      return true
+    })
+  }
+  assert.equal(f.engine.pendingMessages(f.parent.id).length, 2)
+  assert.equal(f.engine.decisionFor(f.parent.id), null)
+  assert.equal(f.calls.length, 0)
+})
+
+test('an accepted historical plan keeps pending message identities through summary rendering and reload', async () => {
+  const f = await fixture()
+  await f.plan([card('old-review')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'old-review' })
+  await f.execute('delegation_review', { taskId: 'old-review', verdict: 'accept', findings: [
+    { criterionId: 'C1', finding: '旧评审已核对', evidence: [proof.results[0].ref] }] })
+  const completion = f.snapshot().completion, archiveId = f.snapshot().archive.id
+  for (const [id, text] of [['new-writing', '按三份评审写发布稿'], ['continue-first', '继续'], ['continue-second', '继续执行']]) {
+    f.emit('session/event', f.parent, { type: 'user/message', data: { id, source: { kind: 'user' }, content: text } })
+  }
+  const status = async () => JSON.parse(f.render('delegation_status', {}, await f.execute('delegation_status')))
+  let rendered = await status()
+  assert.equal(rendered.plan.status, 'accepted')
+  assert.equal(rendered.nextAction.type, 'resolve_message')
+  assert.equal(rendered.plan.nextAction.type, 'resolve_message')
+  assert.equal(rendered.plan.pendingMessages.length, 3)
+  const first = await f.execute('delegation_decide', { relation: 'new', messageId: 'new-writing', mode: 'delegate', reason: '执行者按评审写稿，主控验证验收。' })
+  assert.equal(first.nextAction.type, 'resolve_message')
+  await f.reload()
+  rendered = await status()
+  assert.equal(rendered.context.source.messageId, 'new-writing')
+  assert.equal(rendered.context.planMatchesRequest, false)
+  assert.deepEqual(rendered.context.pendingMessages.map(message => message.messageId), ['continue-first', 'continue-second'])
+  assert.deepEqual(rendered.plan.pendingMessages, rendered.context.pendingMessages)
+  for (const message of rendered.context.pendingMessages) await f.execute('delegation_decide', { relation: 'continue', messageId: message.messageId })
+  rendered = await status()
+  assert.equal(rendered.nextAction.type, 'handle_request')
+  assert.equal(rendered.nextAction.mode, 'delegate')
+  assert.match(rendered.nextAction.message, /delegation_plan/)
+  assert.equal(rendered.context.pendingMessages.length, 0)
+  assert.deepEqual(f.snapshot().completion, completion)
+  assert.equal((await f.engine.readArchive(archiveId)).plan.completion.id, completion.id)
+  assert.equal(f.calls.length, 1, 'message recovery must not reopen an agent')
+  const next = await f.execute('delegation_plan', { goal: '按评审写发布稿', decisionReason: '执行者写稿，主控验收。', tasks: [card('write-article')] })
+  assert.equal(next.context.planMatchesRequest, true)
+  assert.equal(next.plan.source.messageId, 'new-writing')
+  assert.notEqual(next.plan.archive.id, archiveId)
+})
+
+test('pending message recovery does not expose another coordinator session', async () => {
+  const f = await fixture(), other = { id: 'other-coordinator', session: { header: {} } }
+  const get = f.ctx.get
+  f.ctx.get = name => name === 'agents' ? { get: id => id === other.id ? other : get(name).get(id), list: () => [...get(name).list(), other] } : get(name)
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'own-message', source: { kind: 'user' }, content: '当前工程写稿' } })
+  f.emit('session/event', other, { type: 'user/message', data: { id: 'foreign-message', source: { kind: 'user' }, content: '另一工程的内容' } })
+  for (const [agent, expected, excluded] of [[f.parent, 'own-message', 'foreign-message'], [other, 'foreign-message', 'own-message']]) {
+    const result = await f.execute('delegation_status', {}, agent)
+    assert.deepEqual(result.context.pendingMessages.map(message => message.messageId), [expected])
+    assert.ok(!f.render('delegation_status', {}, result).includes(excluded))
+    await assert.rejects(f.execute('delegation_decide', { relation: 'new', mode: 'direct', reason: '核对当前工程。', messageId: excluded }, agent), error => {
+      assert.ok(error.message.includes(expected))
+      assert.ok(!error.message.includes(excluded))
+      return true
+    })
+  }
+})
+
+test('a new delegated request waits for the original plan before creating its own and remains visible in the old receipt output', async () => {
+  const f = await fixture()
+  await f.plan([card('old')]); await f.execute('delegation_run')
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'next-delegation', source: { kind: 'user' }, content: '接着委派另一项任务' } })
+  const decision = await f.execute('delegation_decide', { relation: 'new', messageId: 'next-delegation', mode: 'delegate', reason: '另一项任务仍需执行者核对。' })
+  assert.equal(decision.nextAction.type, 'wait', 'the existing plan must settle before starting a second delegated request')
+  assert.equal(decision.context.planMatchesRequest, false)
+  assert.equal(f.calls.length, 1)
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'old' })
+  const accepted = await f.execute('delegation_review', { taskId: 'old', verdict: 'accept', findings: [
+    { criterionId: 'C1', finding: '旧任务已核对', evidence: [proof.results[0].ref] }] })
+  assert.equal(accepted.nextAction.type, 'handle_request')
+  const rendered = f.render('delegation_review', {}, accepted)
+  assert.match(rendered, /next-delegation/)
+  assert.match(rendered, /handle_request/)
+  assert.equal(f.conclusions.includes('parent'), false)
 })
 
 test('request and elapsed reminders keep the same worker running without waking the coordinator', async t => {

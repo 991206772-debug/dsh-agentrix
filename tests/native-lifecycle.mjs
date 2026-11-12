@@ -33,7 +33,8 @@ const nativeDefault = process.argv.includes('--native-default')
 const switchCoordinator = process.argv.includes('--switch-coordinator')
 const coordinatorQuota = process.argv.includes('--coordinator-quota')
 const requestRefusal = process.argv.includes('--request-refusal')
-const nextRequest = process.argv.includes('--next-request')
+const messageInbox = process.argv.includes('--message-inbox')
+const nextRequest = process.argv.includes('--next-request') || messageInbox
 const directUnresolved = process.argv.includes('--direct-unresolved')
 const directRecovery = process.argv.includes('--direct-recovery') || directUnresolved
 const decisionRecovery = process.argv.includes('--decision-recovery')
@@ -45,6 +46,7 @@ const dependentStages = process.argv.includes('--dependent-stages') || ergonomic
 const activeNewRequest = process.argv.includes('--active-new-request')
 const earlyEvidence = process.argv.includes('--early-evidence')
 let followingRequest = false
+let inboxPhase = 0
 const workerGate = Promise.withResolvers()
 const conflictExecutions = new Map(), releases = new Map()
 const firstReads = new Map()
@@ -140,7 +142,46 @@ class ScriptedAdapter extends LlmAdapter {
       }
       if (followingRequest) {
         const system = JSON.stringify(request.messages.filter(message => message.role === 'system'))
-        assert.ok(system.includes('DSH Agentrix'), 'the native coordinator discipline is present')
+        assert.ok(system.includes('## Agentrix') && system.includes('delegation_decide') && system.includes('stop仅取消且须原因'), 'the native coordinator discipline is present')
+        if (messageInbox) {
+          let answer
+          if (inboxPhase === 0) answer = tool('delegation_decide', { relation: 'new', mode: 'direct', reason: '第二项需求直接核对答复。' })
+          else if (inboxPhase === 1) {
+            assert.match(JSON.stringify(request.messages), /存在多条待关联消息/)
+            assert.match(JSON.stringify(request.messages), /本会话待关联消息/)
+            answer = tool('delegation_status', {})
+          } else {
+            const outputs = []
+            const collect = value => {
+              if (typeof value === 'string') {
+                try { const parsed = JSON.parse(value); if (parsed.context?.sessionId === parent.id && parsed.nextAction) outputs.push(parsed) } catch {}
+              } else if (value && typeof value === 'object') Object.values(value).forEach(collect)
+            }
+            collect(request.messages)
+            const current = outputs.at(-1)
+            assert.ok(current, 'recovery must use rendered model tool output, not the internal state API')
+            assert.equal(current.plan?.status ?? 'accepted', 'accepted')
+            const pending = current.context.pendingMessages
+            if (inboxPhase === 2) assert.deepEqual(pending.map(message => message.text).sort(), ['核对另一份代码用了哪些接口', '继续', '继续执行'].sort())
+            if (pending.length) {
+              assert.equal(current.nextAction.type, 'resolve_message')
+              const message = pending[0], relation = message.text.startsWith('核对另一份代码') ? 'new' : 'continue'
+              answer = tool('delegation_decide', { messageId: message.messageId, relation,
+                ...(relation === 'new' ? { mode: 'direct', reason: '第二项需求直接核对答复。' } : {}) })
+            } else {
+              assert.equal(current.context.planMatchesRequest, false)
+              assert.equal(current.nextAction.type, 'handle_request')
+              assert.equal(current.context.source.text, '核对另一份代码用了哪些接口')
+              answer = { type: 'text', text: '已按补充继续核对第二项需求。' }
+            }
+          }
+          inboxPhase++
+          yield { type: 'block-start', index: 0, blockType: answer.type }
+          yield { type: 'block-end', index: 0, block: answer }
+          yield { type: 'usage', usage: { inputTokens: 30, outputTokens: 5 } }
+          yield { type: 'finish', reason: { kind: answer.type === 'tool-call' ? 'tool-calls' : 'stop' } }
+          return
+        }
         const message = (await state()).sessions[0]?.pendingMessages?.[0]
         if (!message) assert.ok(!system.includes('当前计划：高模型规划、低模型执行、高模型审查与验收'), 'after confirmation the previous plan must not be injected as the current request')
         const answer = message ? tool('delegation_decide', { relation: 'new', messageId: message.messageId, mode: 'direct', reason: '第二项需求只需主控核对已有上下文并答复。' }) : { type: 'text', text: '已核对第二项需求，无需委派。' }
@@ -613,18 +654,31 @@ try {
     await until(() => parent.status === 'idle', 'first request settled')
     followingRequest = true
     const firstRequest = plan.source.messageId, receipt = plan.completion.id, calls = requests.length
+    const completedTurns = events.filter(event => event.id === 'root' && event.type === 'turn/end').length
     const newMessage = createUserMessage({ content: [{ type: 'text', text: '核对另一份代码用了哪些接口' }], source: { kind: 'user' } })
-    parent.followup(newMessage)
-    await until(() => events.filter(event => event.id === 'root' && event.type === 'turn/end').length === 2, 'second request completed')
+    if (messageInbox) {
+      parent.session.append('user/message', newMessage, { surfaceOp: 'append' })
+      parent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: '继续' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+      parent.followup(createUserMessage({ content: [{ type: 'text', text: '继续执行' }], source: { kind: 'user' } }))
+    } else parent.followup(newMessage)
+    await until(() => parent.status === 'idle' && events.filter(event => event.id === 'root' && event.type === 'turn/end').length > completedTurns, 'second request completed')
     const following = await state()
-    assert.equal(following.sessions[0].source.messageId, newMessage.id)
+    assert.equal(following.sessions[0].source.messageId, newMessage.id, JSON.stringify({ source: following.sessions[0].source, firstRequest,
+      resolution: following.sessions[0].messageResolution, pending: following.sessions[0].pendingMessages, inboxPhase,
+      turns: events.filter(event => event.id === 'root' && event.type === 'turn/end').map(event => event.reason) }))
     assert.notEqual(following.sessions[0].source.messageId, firstRequest)
     assert.equal(following.plans[0].source.messageId, firstRequest)
     assert.equal(following.plans[0].completion.id, receipt)
     assert.equal(following.requestUsage[0].requestId, newMessage.id)
-    assert.equal(requests.length, calls + 2, 'new request confirmation and answer use the same coordinator without old-task recovery or replacement child')
+    assert.equal(requests.length, calls + (messageInbox ? 6 : 2), 'new request confirmation and answer use the same coordinator without old-task recovery or replacement child')
     assert.ok(events.filter(event => event.id === 'root' && event.type === 'turn/end').every(event => event.reason.kind === 'completed'))
     console.log('PASS: native second request gets its own source and usage, excludes the previous plan from system context, and preserves the original accepted receipt')
+    if (messageInbox) {
+      assert.equal(following.sessions[0].pendingMessages.length, 0)
+      assert.equal(inboxPhase, 6)
+      assert.equal(following.plans[0].activationBudget.used, 2)
+      console.log('PASS: native ambiguous decision returns candidates; rendered status and decision outputs recover a new request plus two continuations without scanning histories or reopening children')
+    }
   }
   }
 } finally {
