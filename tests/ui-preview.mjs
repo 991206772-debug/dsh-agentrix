@@ -12,7 +12,8 @@ const nextRequest = process.argv.includes('--next-request')
 const directProgress = process.argv.includes('--direct-progress')
 const coordinationConflict = process.argv.includes('--coordination-conflict')
 const mixedRefusal = process.argv.includes('--mixed-refusal')
-const liveProgress = process.argv.includes('--live-progress') || directProgress || coordinationConflict || mixedRefusal
+const accordion = process.argv.includes('--accordion')
+const liveProgress = process.argv.includes('--live-progress') || directProgress || coordinationConflict || mixedRefusal || accordion
 let config = { ok: true, modelRouting: 'roles', reviewerModelPolicy: 'dispatcher-snapshot', mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS, locked: false,
   models: { worker: { provider: invalid ? 'retired-demo' : 'demo', model: 'routine-model' }, reviewer: null }, file: 'C:/isolated-test/delegation-first/default.json',
   defaults: { mode: 'auto', threshold: 2, ...DEFAULT_OPTIONS }, ranges: { threshold: { min: 0, max: 20 }, ...OPTION_RANGES },
@@ -75,6 +76,26 @@ if (mixedRefusal) {
     { ...baseTask, id: 'refused', title: '检查文章结构', status: 'blocked', report: '', checks: [], error: raw,
       issue: { code: 'MODEL_SERVICE_REQUEST_REFUSED', message: '执行者模型的本次请求被服务商拒绝', details: raw,
         action: '核对服务商支持的调用方式与限制，处理后明确重试该任务。' } }],
+  })
+}
+if (accordion) {
+  const now = Date.now(), raw = 'WorkBuddy: Illegal API invocation from an unapproved channel (isolated preview)'
+  const running = { startedAt: now - 180000, lastActivityAt: now - 1000, activity: { kind: 'tool', tool: 'grep', at: now - 1000 } }
+  Object.assign(plans[0], { sessionTitle: '文章评审手风琴演示', goal: '核对文章事实、改写建议与发布意见',
+    source: { messageId: 'accordion-request', text: '核对示例文章的事实、结构、改写建议和发布意见' },
+    decision: { mode: 'delegate', reason: '按评审范围分工，执行与审查分别进行，主控负责实际验证和最终验收。', model: { model: 'demo/coordinator' }, at: now },
+    tasks: [{ ...baseTask, id: 'facts', title: '核对文章事实', status: 'running', report: '', checks: [],
+      scope: '对照公开功能说明核查文章事实与遗漏。', progress: { tool: 'read', at: now - 4000 }, supervision: running },
+    { ...baseTask, id: 'rewrite', title: '复核改写建议', status: 'review', report: '', checks: [], complexity: 'complex',
+      execution: { status: 'DONE', summary: '执行者已提交改写建议，等待独立审查和主控验收。' },
+      dispatcherModel: { provider: 'demo', model: 'design-model', reasoningEffort: 'high', source: 'dispatch', attempt: 1 },
+      audit: { status: 'running', modelRoute: { role: 'reviewer', source: 'dispatcher', requested: { provider: 'demo', model: 'design-model' }, actual: { provider: 'demo', model: 'design-model' } },
+        progress: { tool: 'read', at: now - 3000 }, supervision: { ...running, activity: { kind: 'model', at: now - 1000 } } } },
+    { ...baseTask, id: 'structure', title: '核查章节结构', status: 'blocked', report: '', checks: [], error: raw,
+      issue: { code: 'MODEL_SERVICE_REQUEST_REFUSED', message: '执行者模型的本次请求被服务商拒绝', details: raw,
+        action: '核对服务商支持的调用方式与限制，处理后明确重试该任务。' } },
+    { ...baseTask, id: 'publication', title: '确认发布意见', status: 'review',
+      execution: { status: 'DONE', summary: '发布意见已返回，读取检查已有结果，尚未由主控逐条验收。' } }],
   })
 }
 if (coordinationConflict) {
@@ -171,7 +192,7 @@ window.__ModuleLoader__ = {load({factory}) {
   const openView = id => { activeView=id; renderView(); };
   function LiveChat() {
     return React.createElement('div',{className:'preview-other-view','data-fixture-view':'chat'},
-      React.createElement('p',null,${JSON.stringify(mixedRefusal ? plans[0].source.text : '工作台保留两个接口，参数自动生成，固定参数改为配置项')}),
+      React.createElement('p',null,${JSON.stringify(mixedRefusal || accordion ? plans[0].source.text : '工作台保留两个接口，参数自动生成，固定参数改为配置项')}),
       React.createElement('p',null,${JSON.stringify(coordinationConflict ? '主控曾输出“已交付”，下方程序状态显示真实进度。' : '主控正在核对当前方案与执行结果。')}));
   }
   function Composer() {

@@ -677,6 +677,9 @@ window.__ModuleLoader__.load({
       'service.requestRefused': '模型服务拒绝本次请求。', 'service.refusalScope': '这是本次请求的拒绝结果，不代表模型整体不可用。',
       'service.refusalNext': '核对服务商支持的调用方式与限制，处理后由主控明确重试该任务。', 'service.rawDetails': '原始错误详情',
       'chat.othersContinue': '其他正在运行的任务继续执行。',
+      'accordion.worker': '执行者', 'accordion.reviewing': '独立审查中', 'accordion.scope': '任务范围',
+      'accordion.report': '执行者报告', 'accordion.auditReport': '审查报告', 'accordion.acceptance': '主控验收',
+      'accordion.verified': '实际验证通过 {passed}/{total}', 'accordion.noChecks': '尚未记录验证',
       'dock.workers': '{count} 个子任务执行中', 'dock.audit': '独立审查中', 'dock.review': '待验收 {count} 项',
       'dock.unavailable': '协作暂不可用', 'dock.offline': '状态暂不可用',
       'direct.advice': '系统建议委派，当前尚未启动子代理', 'direct.calls': '本轮工具调用 {count} 次',
@@ -702,6 +705,9 @@ window.__ModuleLoader__.load({
       'service.requestRefused': 'The model service refused this request.', 'service.refusalScope': 'This refusal applies to this request; it does not establish that the model is unavailable.',
       'service.refusalNext': 'Check the provider\'s supported usage and restrictions, then explicitly retry this task after resolving the cause.', 'service.rawDetails': 'Original error details',
       'chat.othersContinue': 'Other running tasks continue.',
+      'accordion.worker': 'Worker', 'accordion.reviewing': 'Independent review in progress', 'accordion.scope': 'Task scope',
+      'accordion.report': 'Worker report', 'accordion.auditReport': 'Review report', 'accordion.acceptance': 'Coordinator acceptance',
+      'accordion.verified': '{passed}/{total} checks verified', 'accordion.noChecks': 'No verification recorded',
       'dock.workers': '{count} subtasks running', 'dock.audit': 'Independent review', 'dock.review': '{count} awaiting acceptance',
       'dock.unavailable': 'Delegation unavailable', 'dock.offline': 'Status unavailable',
       'direct.advice': 'Delegation was suggested; no child agent has started', 'direct.calls': '{count} tool calls this turn',
@@ -1109,7 +1115,7 @@ window.__ModuleLoader__.load({
       if (!plan || plan.status === 'accepted') return null
       const unfinished = (plan.tasks ?? []).filter(task => task.status !== 'accepted')
       const stopped = plan.status === 'cancelled' || plan.cancelled || unfinished.length > 0 && unfinished.every(task => task.status === 'cancelled')
-      const affected = (plan.tasks ?? []).map(task => ['failed', 'blocked'].includes(task.audit?.status) ? { ...task.audit, title: task.audit.title || task.title } : task).filter(task => stopped
+      const affected = (plan.tasks ?? []).map(task => !stopped && ['failed', 'blocked'].includes(task.audit?.status) ? { ...task.audit, title: task.audit.title || task.title } : task).filter(task => stopped
         ? task.status !== 'accepted' : ['failed', 'blocked', 'cancelled'].includes(task.status))
       if (!affected.length && !['failed', 'blocked'].includes(plan.status)) {
         const pending = (plan.tasks ?? []).flatMap(task => [task, ...(task.audit ? [task.audit] : [])])
@@ -1133,6 +1139,26 @@ window.__ModuleLoader__.load({
 .ddf-chat-notice[data-kind="progress"] .ddf-chat-notice-heading { color:var(--dsw-alias-brand-primary,#4f6ef7); }
 .ddf-chat-live-task + .ddf-chat-live-task { margin-top:8px; padding-top:8px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-chat-live-meta { color:var(--dsw-alias-label-secondary,#646a73); }
+.ddf-chat-task-list { margin-top:10px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-chat-task { min-width:0; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-chat-task-summary { display:grid; grid-template-columns:10px minmax(0,1fr) auto; align-items:center; gap:10px; padding:12px 0; cursor:pointer; list-style:none; }
+.ddf-chat-task-summary::-webkit-details-marker { display:none; }
+.ddf-chat-task-summary::before { content:""; width:5px; height:5px; border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor; transform:rotate(-45deg); color:var(--dsw-alias-label-secondary,#646a73); }
+.ddf-chat-task[open]>.ddf-chat-task-summary::before { transform:rotate(45deg); }
+.ddf-chat-task-summary:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7); outline-offset:3px; }
+.ddf-chat-task-identity { display:flex; min-width:0; flex-direction:column; gap:3px; }
+.ddf-chat-task-title { font-size:14px; font-weight:600; overflow-wrap:anywhere; }
+.ddf-chat-task-model { display:block; min-width:0; overflow:hidden; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+.ddf-chat-task-status { padding:2px 7px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:5px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; white-space:nowrap; }
+.ddf-chat-task[data-status="running"]>.ddf-chat-task-summary .ddf-chat-task-status,.ddf-chat-task[data-status="starting"]>.ddf-chat-task-summary .ddf-chat-task-status { color:var(--dsw-alias-brand-primary,#4f6ef7); }
+.ddf-chat-task[data-status="failed"]>.ddf-chat-task-summary .ddf-chat-task-status,.ddf-chat-task[data-status="blocked"]>.ddf-chat-task-summary .ddf-chat-task-status { color:var(--dsw-alias-state-error-primary,#f54a45); }
+.ddf-chat-task[data-status="accepted"]>.ddf-chat-task-summary .ddf-chat-task-status { color:var(--dsw-alias-state-success-primary,#1f9d55); }
+.ddf-chat-task-body { padding:0 0 12px 20px; }
+.ddf-chat-task-actor + .ddf-chat-task-actor { margin-top:10px; padding-top:10px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-chat-task-issue { margin-top:10px; padding:8px 10px; border-left:2px solid var(--dsw-alias-state-error-primary,#f54a45); background:var(--dsw-alias-bg-layer-2,#f5f6f7); }
+.ddf-chat-task-issue[data-kind="stopped"],.ddf-chat-task-issue[data-kind="supervision"] { border-left-color:var(--dsw-alias-border-l2,#c9cdd4); }
+.ddf-chat-task-decision { margin-top:10px; color:var(--dsw-alias-label-secondary,#646a73); }
+.ddf-chat-task-decision>summary { padding:5px 0; cursor:pointer; }
 .ddf-chat-dock { --ddf-dock-tone:var(--dsw-alias-state-business-primary,#4f6ef7); position:relative; isolation:isolate; container:ddf-progress / inline-size; width:100%; min-width:0; max-width:min(760px,calc(100% - 24px)); margin:0 auto 6px; padding:4px 0; color:var(--dsw-alias-label-primary,#1f2329); font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif; }
 .ddf-chat-dock[data-tone="supervision"] { --ddf-dock-tone:var(--dsw-alias-state-warning-primary,#b7791f); }
 .ddf-chat-dock[data-tone="service"] { --ddf-dock-tone:var(--dsw-alias-state-error-primary,#f54a45); }
@@ -1299,15 +1325,26 @@ window.__ModuleLoader__.load({
       return key ? t('live.' + key) + (compact ? '' : `（${name}）`) : name
     }
 
+    function ChatTaskActivity({ t, task, label, route, action }) {
+      const state = task.supervision, time = value => new Date(value).toLocaleTimeString()
+      return h('div', { className: 'ddf-chat-task-actor' },
+        h('p', null, h('strong', null, label), ' · ', route?.model || t('dock.unknownModel')),
+        h('p', null, t('live.current') + '：', action),
+        ['starting', 'running'].includes(task.status) && Number.isFinite(state?.startedAt) ? h('p', { className: 'ddf-chat-live-meta' },
+          fill(t('supervision.elapsed'), { minutes: Math.max(0, Math.floor((Date.now() - state.startedAt) / 60000)) }),
+          state.lastActivityAt ? ' · ' + t('live.activityAt') + ' ' + time(state.lastActivityAt) : '') : null,
+        task.progress?.tool ? h('p', { className: 'ddf-chat-live-meta' }, t('live.recent') + '：', liveToolLabel(t, task.progress.tool),
+          task.progress.at ? ' · ' + time(task.progress.at) : '', task.progress.failed ? ' · ' + t('live.toolFailed') : '') : null,
+        state?.checkpoint?.summary ? h('p', null, t('supervision.stage') + '：' + state.checkpoint.summary) : null)
+    }
+
     function ChatLiveProgress({ t, plan, openView, error }) {
-      const tasks = plan?.tasks ?? [], unfinished = tasks.filter(task => task.status !== 'accepted')
-      const visible = unfinished.filter(task => !['failed', 'blocked', 'cancelled'].includes(task.status)
-        && !['failed', 'blocked', 'cancelled'].includes(task.audit?.status))
-      if (!visible.length) return null
+      const tasks = plan?.tasks ?? [], accepted = tasks.filter(task => task.status === 'accepted').length
+      if (!tasks.length || plan.completion || accepted === tasks.length && plan.protocolVersion < 2) return null
       const live = task => ['starting', 'running'].includes(task.status)
       const running = tasks.filter(task => live(task) || live(task.audit ?? {})).length
-      const current = task => {
-        const target = live(task.audit ?? {}) ? task.audit : task
+      const routeOf = task => task?.modelRoute?.actual ?? task?.modelRoute?.resolved ?? task?.modelRoute?.requested ?? task?.model
+      const current = (task, target = task) => {
         if (live(target)) {
           if (target.status === 'starting') return t('status.starting')
           if (target.execution) return t('supervision.reporting')
@@ -1315,28 +1352,42 @@ window.__ModuleLoader__.load({
           return activity?.kind === 'tool' ? liveToolLabel(t, activity.tool)
             : activity?.kind ? t('supervision.activity.' + activity.kind) : t('live.unknown')
         }
-        if (task.audit?.status === 'queued') return t('audit.queued')
+        if (target !== task) return t('audit.' + target.status)
         if (task.status === 'review') return t('view.acceptanceReview')
         if (task.status === 'queued') return plan.dispatchWait?.message || t((task.dependsOn ?? []).some(id => tasks.some(other => other.id === id && other.status !== 'accepted')) ? 'view.actualDependency' : 'view.actualQueued')
         return t('status.' + task.status)
       }
       return h('section', { className: 'ddf-chat-notice ddf-chat-live', 'data-kind': 'progress', role: 'status' },
         h('style', null, CHAT_NOTICE_STYLES), h('strong', { className: 'ddf-chat-notice-heading' }, t('live.title') + ' · ' + fill(t('live.counts'), {
-          running, returned: tasks.filter(task => ['review', 'accepted'].includes(task.status)).length, accepted: tasks.length - unfinished.length, total: tasks.length })),
+          running, returned: tasks.filter(task => ['review', 'accepted'].includes(task.status)).length, accepted, total: tasks.length })),
         error ? h('p', { className: 'ddf-chat-live-meta' }, t('view.staleTitle')) : null,
-        h(DecisionDetails, { t, decision: plan.decision, current: plan.decisionCurrent !== false, resolution: plan.messageResolution, pending: plan.pendingMessages }),
-        ...visible.map(task => {
-          const target = live(task.audit ?? {}) ? task.audit : task, state = target.supervision
-          const time = value => new Date(value).toLocaleTimeString()
-          return h('div', { key: task.id, className: 'ddf-chat-live-task' },
-            h('p', null, h('strong', null, task.title || task.id)),
-            h('p', null, t('live.current') + '：', task.audit && live(task.audit) ? t('audit.title') + ' · ' : '', current(task)),
-            live(target) && Number.isFinite(state?.startedAt) ? h('p', { className: 'ddf-chat-live-meta' }, fill(t('supervision.elapsed'), { minutes: Math.max(0, Math.floor((Date.now() - state.startedAt) / 60000)) }),
-              state.lastActivityAt ? ' · ' + t('live.activityAt') + ' ' + time(state.lastActivityAt) : '') : null,
-            target.progress?.tool ? h('p', { className: 'ddf-chat-live-meta' }, t('live.recent') + '：', liveToolLabel(t, target.progress.tool),
-              target.progress.at ? ' · ' + time(target.progress.at) : '', target.progress.failed ? ' · ' + t('live.toolFailed') : '') : null,
-            state?.checkpoint?.summary ? h('p', null, t('supervision.stage') + '：' + state.checkpoint.summary) : null)
-        }),
+        h('div', { className: 'ddf-chat-task-list' }, ...tasks.map((task, index) => {
+          const audit = task.audit, auditing = audit && ['queued', 'starting', 'running', 'failed', 'blocked'].includes(audit.status)
+          const target = task.status === 'accepted' || task.status === 'cancelled' ? task : auditing ? audit : task
+          const route = routeOf(target) ?? (target === audit ? task.dispatcherModel : null)
+          const status = requestRefused(target) && ['failed', 'blocked'].includes(target.status) ? t('dock.requestRefused')
+            : target === audit ? live(audit) ? t('accordion.reviewing') : t('audit.' + audit.status) : t('status.' + task.status)
+          const problem = task.status === 'accepted' ? null : chatProblem({ status: task.status, cancelled: plan.cancelled, tasks: [task] })
+          const checks = task.checks ?? []
+          return h('details', { key: task.id, className: 'ddf-chat-task', 'data-task-id': task.id, 'data-status': target.status, open: index === 0 },
+            h('summary', { className: 'ddf-chat-task-summary' },
+              h('span', { className: 'ddf-chat-task-identity' }, h('strong', { className: 'ddf-chat-task-title' }, task.title || task.id),
+                h('span', { className: 'ddf-chat-task-model', title: route ? `${route.provider} / ${route.model}` : undefined },
+                  t(target === audit ? 'audit.title' : 'accordion.worker') + ' · ' + (route?.model || t('dock.unknownModel')))),
+              h('span', { className: 'ddf-chat-task-status' }, status)),
+            h('div', { className: 'ddf-chat-task-body' },
+              task.scope ? h('p', { className: 'ddf-chat-live-meta' }, t('accordion.scope') + '：' + task.scope) : null,
+              h(ChatTaskActivity, { t, task, label: t('accordion.worker'), route: routeOf(task), action: current(task) }),
+              task.execution?.summary ? h('p', null, t('accordion.report') + '：' + task.execution.summary) : null,
+              audit ? h(ChatTaskActivity, { t, task: audit, label: t('audit.title'), route: routeOf(audit) ?? task.dispatcherModel, action: current(task, audit) }) : null,
+              audit?.execution?.summary ? h('p', null, t('accordion.auditReport') + '：' + audit.execution.summary) : null,
+              h('p', { className: 'ddf-chat-live-meta' }, t('accordion.acceptance') + '：' + t(task.status === 'accepted' ? 'status.accepted'
+                : task.status === 'cancelled' ? 'view.acceptanceStopped' : 'view.acceptanceReview'), ' · ', checks.length
+                ? fill(t('accordion.verified'), { passed: checks.filter(check => check.result?.passed).length, total: checks.length }) : t('accordion.noChecks')),
+              h(ChatPlanProblem, { t, plan, problem, compact: true, ownerId: task.id })))
+        })),
+        h('details', { className: 'ddf-chat-task-decision' }, h('summary', null, t('dock.decision')),
+          h(DecisionDetails, { t, decision: plan.decision, current: plan.decisionCurrent !== false, resolution: plan.messageResolution, pending: plan.pendingMessages })),
         typeof openView === 'function' ? h('button', { type: 'button', className: 'ddf-chat-notice-action',
           onClick: () => openView(VIEW_ID) }, t('view.details')) : null)
     }
@@ -1426,8 +1477,8 @@ window.__ModuleLoader__.load({
         content = h(CoordinatorProgress, { t, state, error: result.error })
         tone = failures.length ? execution.running ? 'supervision' : 'service' : 'progress'
       }
-      const identity = [sessionId, state?.source?.messageId || plan?.source?.messageId, execution?.startedAt || plan?.createdAt,
-        backendMissing ? 'backend' : missing ? 'unavailable' : plan ? plan.status : failures.length ? 'change-failed' : 'direct', failures.map(item => item.callId).join(',')].join(':')
+      const identity = [sessionId, state?.source?.messageId || plan?.source?.messageId, plan ? plan.createdAt : execution?.startedAt,
+        backendMissing ? 'backend' : missing ? 'unavailable' : plan ? 'plan' : failures.length ? 'change-failed' : 'direct', plan ? '' : failures.map(item => item.callId).join(',')].join(':')
       const label = [summary, ...indicators.map(item => item.text), t('dock.details')].join('，')
       return h('div', { className: 'ddf-chat-dock', 'data-tone': tone, ref: dockRef }, h('style', null, CHAT_NOTICE_STYLES),
         h('details', { className: 'ddf-dock-disclosure', key: identity, onToggle: fitDetails },
@@ -1513,8 +1564,11 @@ window.__ModuleLoader__.load({
     function ChatPlanBody({ t, plan, openView, error }) {
       const progress = h(ChatLiveProgress, { t, plan, openView, error })
       if (plan?.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled) return h('div', null, progress, h(ServiceIssueNotice, { t, issue: plan.coordinatorIssue }))
-      const problem = chatProblem(plan)
-      if (!problem) return progress
+      return plan?.tasks?.length ? progress : h(ChatPlanProblem, { t, plan, problem: chatProblem(plan), openView, error })
+    }
+
+    function ChatPlanProblem({ t, plan, problem, openView, error, compact = false, ownerId }) {
+      if (!problem) return null
       const task = problem.primary, tasks = plan.tasks ?? []
       const issue = taskServiceIssue(t, task), refused = requestRefused(task) && problem.kind !== 'stopped'
       const recorded = problem.kind === 'supervision' ? task.supervision.pending.reason : task?.stop?.reason || issue?.message || task?.error
@@ -1526,24 +1580,25 @@ window.__ModuleLoader__.load({
       const done = tasks.filter(task => task.status === 'accepted').length
       const heading = fill(t(problem.kind === 'stopped' || problem.kind === 'supervision' ? 'chat.acceptedSummary' : 'chat.planSummary'), {
         status: refused ? t('dock.requestRefused') : problem.kind === 'supervision' ? t(task.supervision.pending.advisory ? 'supervision.inquiry' : 'supervision.waiting') : problem.kind === 'stopped' ? t(done ? 'completion.partialStopped' : 'completion.cancelled') : t(`chat.${problem.kind}`), done, total: tasks.length })
-      const canOpen = typeof openView === 'function'
-      return h('div', null, progress, h('section', { className: 'ddf-chat-notice', 'data-kind': problem.kind,
+      const canOpen = !compact && typeof openView === 'function'
+      return h('section', { className: compact ? 'ddf-chat-task-issue' : 'ddf-chat-notice', 'data-kind': problem.kind,
         role: problem.kind === 'stopped' ? 'status' : 'alert', 'aria-label': heading },
         h('style', null, CHAT_NOTICE_STYLES),
-        h('strong', { className: 'ddf-chat-notice-heading' }, heading),
+        !compact || problem.kind === 'supervision' ? h('strong', { className: 'ddf-chat-notice-heading' }, compact
+          ? t(task.supervision.pending.advisory ? 'supervision.inquiry' : 'supervision.waiting') : heading) : null,
         error ? h('p', { className: 'ddf-chat-notice-hint' }, t('view.staleTitle')) : null,
-        h('p', null, h('strong', null, t('chat.issueTask') + '：'),
+        compact ? null : h('p', null, h('strong', null, t('chat.issueTask') + '：'),
           problem.tasks.map(item => item.title || item.id).join('、') || t('chat.unknownTask')),
         h('p', null, h('strong', null, t('chat.issueReason') + '：'), reason),
         refused ? h('p', { className: 'ddf-chat-live-meta' }, t('service.refusalScope')) : null,
         h('p', null, h('strong', null, t('view.next') + '：'), next),
-        problem.kind !== 'stopped' && tasks.some(item => ['starting', 'running'].includes(item.status) || ['starting', 'running'].includes(item.audit?.status))
+        problem.kind !== 'stopped' && tasks.some(item => item.id !== ownerId && (['starting', 'running'].includes(item.status) || ['starting', 'running'].includes(item.audit?.status)))
           ? h('p', { className: 'ddf-chat-live-meta' }, t('chat.othersContinue')) : null,
         refused ? h(ServiceErrorDetails, { t, details: issue.details || task.error }) : null,
         problem.kind !== 'stopped' && problem.affected > 1
           ? h('p', { className: 'ddf-chat-notice-hint' }, fill(t('chat.affected'), { count: problem.affected })) : null,
         canOpen ? h('button', { type: 'button', className: 'ddf-chat-notice-action',
-          onClick: () => openView(VIEW_ID) }, t('view.details')) : null))
+          onClick: () => openView(VIEW_ID) }, t('view.details')) : null)
     }
 
     // -----------------------------------------------------------------------

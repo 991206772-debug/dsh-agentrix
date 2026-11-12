@@ -1067,10 +1067,143 @@ test('a stopped two-of-four plan explains the unfinished tasks in the dock witho
     assert.match(notice.text(), /技术栈核查.*汇总报告/)
     assert.match(notice.text(), /主控已停止任务/)
     assert.match(notice.text(), /下一步.*重新安排/)
-    assert.equal(notice.nodes('section')[0]?.props['data-kind'], 'stopped')
-    assert.equal(notice.nodes('section')[0]?.props.role, 'status')
+    const stopped = notice.nodes('section').find(node => node.props?.['data-kind'] === 'stopped')
+    assert.ok(stopped)
+    assert.equal(stopped.props.role, 'status')
     assert.equal(action.nodes('section').length, 0)
   } finally { action.close(); notice.close(); f.close() }
+})
+
+test('chat groups mixed task states into independent accordions with readable task, status and model headers', async () => {
+  const request = { messageId: 'accordion-request', text: '核对隔离示例文章' }
+  const route = { requested: { provider: 'demo', model: 'requested-worker' }, actual: { provider: 'demo', model: 'observed-worker' } }
+  const tasks = ['核对事实', '检查用词', '整理意见'].map((title, index) => ({ id: 'worker-' + index, title, status: 'running', modelRoute: route }))
+  tasks.push({ id: 'refused', title: '评审结构', status: 'blocked', modelRoute: route,
+    issue: { code: 'MODEL_SERVICE_REQUEST_REFUSED', message: '本次请求被服务商拒绝', action: '处理后明确重试该任务。' } })
+  const body = { ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current', protocolVersion: 2,
+    source: request, createdAt: 100, status: 'running', tasks }], sessions: [{ sessionId: 'session-current', source: request }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock('session-current'), notice = f.mountNotice('session-current')
+  const text = node => !node ? '' : typeof node !== 'object' ? String(node) : typeof node.type === 'function' ? text(node.type(node.props))
+    : node.children.flat(Infinity).map(text).join(' ')
+  try {
+    await dock.flush(); await notice.flush()
+    for (const surface of [dock, notice]) {
+      const items = surface.nodes('details').filter(node => node.props?.['data-task-id'])
+      assert.equal(items.length, 4, 'all tasks, including the refused request, have their own disclosure')
+      for (const [index, item] of items.entries()) {
+        const header = item.children.find(node => node?.type === 'summary')
+        assert.ok(header, 'the task identity is readable without expanding its body')
+        assert.match(text(header), new RegExp(tasks[index].title))
+        assert.match(text(header), index === 3 ? /请求被拒/ : /执行中|进行中/)
+        assert.match(text(header), /observed-worker/)
+        assert.doesNotMatch(text(header), /requested-worker/)
+        assert.equal(item.props.open, index === 0, 'only the first task opens by default')
+        assert.equal(item.props.name, undefined, 'native accordions must allow multiple open tasks')
+      }
+    }
+  } finally { dock.close(); notice.close(); f.close() }
+})
+
+test('task accordion identity survives polling, coordinator turns and execution to review transitions', async () => {
+  const request = { messageId: 'accordion-stable', text: '核对原需求' }
+  const task = { id: 'original-task', title: '原任务', status: 'running', model: { provider: 'demo', model: 'worker' } }
+  const plan = { sessionId: 'session-current', protocolVersion: 2, source: request, createdAt: 100, status: 'running', tasks: [task] }
+  const row = { sessionId: plan.sessionId, source: request, execution: { running: true, startedAt: 200, unresolvedChanges: [] } }
+  const body = { ok: true, sessionId: plan.sessionId, plans: [plan], sessions: [row] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock(plan.sessionId)
+  const disclosure = () => dock.nodes('details').find(node => node.props?.className === 'ddf-dock-disclosure')
+  const item = () => dock.nodes('details').find(node => node.props?.['data-task-id'] === task.id)
+  try {
+    await dock.flush()
+    const parentKey = disclosure().props.key, taskKey = item().props.key, defaultOpen = item().props.open
+    await dock.tick()
+    assert.equal(disclosure().props.key, parentKey)
+    assert.equal(item().props.key, taskKey)
+    row.execution.startedAt = 300
+    row.execution.unresolvedChanges = [{ callId: 'coordinator-denial', reason: '主控重复写入被拒绝' }]
+    plan.status = 'review'; task.status = 'review'
+    task.audit = { status: 'running', model: { provider: 'demo', model: 'reviewer' } }
+    await dock.tick()
+    assert.equal(disclosure().props.key, parentKey, 'a new coordinator turn and plan phase do not remount the dock')
+    assert.equal(item().props.key, taskKey, 'the reviewer continues inside the existing task disclosure')
+    assert.equal(item().props.open, defaultOpen, 'polling does not introduce a different controlled-open value')
+    assert.equal(item().props.name, undefined)
+    task.audit.status = 'completed'
+    await dock.tick()
+    assert.equal(disclosure().props.key, parentKey)
+    assert.equal(item().props.key, taskKey)
+    const nextRequest = { messageId: 'accordion-next', text: '核对下一项需求' }
+    plan.source = nextRequest; plan.createdAt = 400; row.source = nextRequest
+    await dock.tick()
+    assert.notEqual(disclosure().props.key, parentKey, 'a different request or plan starts a new disclosure identity')
+  } finally { dock.close(); f.close() }
+})
+
+test('one task accordion groups worker and independent review while its header follows the active role', async () => {
+  const request = { messageId: 'accordion-review', text: '核查执行与审查' }
+  const task = { id: 'reviewed-task', title: '核对改写建议', status: 'review',
+    modelRoute: { actual: { provider: 'demo', model: 'actual-worker' } },
+    execution: { status: 'DONE', summary: '执行报告已返回，尚待独立审查与主控验收。' },
+    audit: { status: 'running', modelRoute: { requested: { provider: 'demo', model: 'requested-reviewer' },
+      actual: { provider: 'demo', model: 'actual-reviewer' } },
+      supervision: { startedAt: Date.now() - 60000, lastActivityAt: Date.now(), activity: { kind: 'tool', tool: 'read' } } } }
+  const plan = { sessionId: 'session-current', protocolVersion: 2, source: request, createdAt: 100, status: 'running', tasks: [task] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: plan.sessionId, plans: [structuredClone(plan)], sessions: [{ sessionId: plan.sessionId, source: request }] }) }) })
+  const dock = f.mountDock(plan.sessionId)
+  const text = node => !node ? '' : typeof node !== 'object' ? String(node) : typeof node.type === 'function' ? text(node.type(node.props))
+    : node.children.flat(Infinity).map(text).join(' ')
+  const item = () => dock.nodes('details').find(node => node.props?.['data-task-id'] === task.id)
+  const header = () => item().children.find(node => node?.type === 'summary')
+  try {
+    await dock.flush()
+    assert.equal(dock.nodes('details').filter(node => node.props?.['data-task-id']).length, 1)
+    assert.match(text(header()), /核对改写建议.*独立审查.*actual-reviewer.*审查中/)
+    assert.doesNotMatch(text(header()), /requested-reviewer|actual-worker|已验收/)
+    assert.match(text(item()), /执行者.*actual-worker/)
+    assert.match(text(item()), /独立审查.*actual-reviewer/)
+    assert.match(text(item()), /当前.*读取文件/)
+    assert.match(text(item()), /执行报告已返回，尚待独立审查与主控验收/)
+    task.audit.status = 'completed'; task.audit.specVerdict = 'pass'; task.audit.qualityVerdict = 'pass'
+    await dock.tick()
+    assert.match(text(header()), /actual-worker.*待.*验收/)
+    assert.doesNotMatch(text(header()), /已验收/)
+    task.status = 'accepted'; plan.status = 'accepted'
+    await dock.tick()
+    assert.match(text(header()), /已验收/)
+    plan.completion = { id: 'accordion-receipt', outcome: 'completed', accepted: 1, total: 1, deliverables: [], evidence: [], remaining: [] }
+    await dock.tick()
+    assert.equal(dock.text(), '', 'the final receipt owns completed delivery instead of duplicating the accordion dock')
+  } finally { dock.close(); f.close() }
+})
+
+test('task accordion headers keep accepted and cancelled results ahead of stale review activity or errors', async () => {
+  const request = { messageId: 'accordion-terminal', text: '显示实际验收与取消结果' }
+  const plan = { sessionId: 'session-current', protocolVersion: 2, source: request, status: 'cancelled', cancelled: true,
+    tasks: [{ id: 'accepted', title: '已验收任务', status: 'accepted', model: { provider: 'demo', model: 'worker' },
+      audit: { status: 'running', model: { provider: 'demo', model: 'stale-reviewer' } } },
+    { id: 'cancelled', title: '用户取消任务', status: 'cancelled', model: { provider: 'demo', model: 'worker' },
+      stop: { reason: '用户取消剩余工作。' }, audit: { status: 'failed', model: { provider: 'demo', model: 'stale-reviewer' },
+        issue: { code: 'MODEL_SERVICE_REQUEST_REFUSED', message: '审查请求曾被拒绝' } } }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: plan.sessionId, plans: [structuredClone(plan)], sessions: [{ sessionId: plan.sessionId, source: request }] }) }) })
+  const dock = f.mountDock(plan.sessionId)
+  const text = node => !node ? '' : typeof node !== 'object' ? String(node) : node.type === 'style' ? ''
+    : typeof node.type === 'function' ? text(node.type(node.props)) : node.children.flat(Infinity).map(text).join(' ')
+  try {
+    await dock.flush()
+    const tasks = dock.nodes('details').filter(node => node.props?.['data-task-id'])
+    assert.equal(tasks.length, 2)
+    const header = taskId => text(tasks.find(node => node.props['data-task-id'] === taskId).children.find(node => node?.type === 'summary'))
+    assert.match(header('accepted'), /执行者.*worker.*已验收/)
+    assert.doesNotMatch(header('accepted'), /审查中|stale-reviewer/)
+    assert.match(header('cancelled'), /执行者.*worker.*已停止/)
+    assert.doesNotMatch(header('cancelled'), /请求被拒|审查失败|stale-reviewer/)
+    assert.match(text(tasks.find(node => node.props['data-task-id'] === 'cancelled')), /用户取消剩余工作/)
+    assert.doesNotMatch(text(tasks.find(node => node.props['data-task-id'] === 'accepted')), /原因：/)
+  } finally { dock.close(); f.close() }
 })
 
 test('mixed failures keep all running task activity visible in the dock and chat notice', async () => {
@@ -1146,14 +1279,22 @@ test('failure details identify the source failure while another child is still r
   ] }], sessions: [] }
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => body }) })
   const notice = f.mountDock('session-current')
+  const text = node => !node ? '' : typeof node !== 'object' ? String(node) : node.type === 'style' ? '' : typeof node.type === 'function' ? text(node.type(node.props))
+    : node.children.flat(Infinity).map(text).join(' ')
+  const nodes = (node, type) => !node || typeof node !== 'object' ? [] : typeof node.type === 'function' ? nodes(node.type(node.props), type)
+    : [...(node.type === type ? [node] : []), ...node.children.flat(Infinity).flatMap(child => nodes(child, type))]
   try {
     await notice.flush()
-    assert.match(notice.text(), /技术栈核查/)
-    assert.match(notice.text(), /HTTP 401: provider authentication failed/)
-    assert.match(notice.text(), /下一步.*核对失败原因/)
-    assert.doesNotMatch(notice.text(), /等待失败任务处理后继续/)
-    assert.match(notice.text(), /仍在审查/)
-    const failure = notice.nodes('section').find(node => node.props?.role === 'alert')
+    const tasks = notice.nodes('details').filter(node => node.props?.['data-task-id'])
+    const source = tasks.find(node => node.props['data-task-id'] === 'failed')
+    assert.ok(source)
+    assert.match(text(source), /技术栈核查/)
+    assert.match(text(source), /HTTP 401: provider authentication failed/)
+    assert.match(text(source), /下一步.*核对失败原因/)
+    assert.doesNotMatch(text(source), /等待失败任务处理后继续/)
+    assert.match(text(tasks.find(node => node.props['data-task-id'] === 'waiting')), /等待失败任务处理后继续/)
+    assert.match(text(tasks.find(node => node.props['data-task-id'] === 'running')), /仍在审查/)
+    const failure = nodes(source, 'section').find(node => node.props?.role === 'alert')
     assert.equal(failure?.props['data-kind'], 'failed')
   } finally { notice.close(); f.close() }
 })
