@@ -1144,6 +1144,7 @@ window.__ModuleLoader__.load({
     }
 
     const CHAT_NOTICE_STYLES = `
+.ddf-chat-notice { --ddf-status-running:var(--dsw-alias-state-business-primary,color-mix(in srgb,#2563eb 65%,var(--dsw-alias-label-primary,#1f2329))); --ddf-status-warning:var(--dsw-alias-state-warning-primary,var(--dsw-alias-state-warn-primary,color-mix(in srgb,#9a5900 65%,var(--dsw-alias-label-primary,#1f2329)))); --ddf-status-error:var(--dsw-alias-state-error-primary,var(--dsw-alias-state-danger-primary,color-mix(in srgb,#c43d48 65%,var(--dsw-alias-label-primary,#1f2329)))); --ddf-status-success:var(--dsw-alias-state-success-primary,color-mix(in srgb,#14804a 65%,var(--dsw-alias-label-primary,#1f2329))); }
 .ddf-chat-notice { display:block; position:static; box-sizing:border-box; min-width:0; max-width:100%; margin:12px 0; padding:10px 12px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-left:3px solid var(--dsw-alias-state-error-primary,#f54a45); border-radius:7px; background:var(--dsw-alias-bg-layer-1,#fff); color:var(--dsw-alias-label-primary,#1f2329); font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif; overflow-wrap:anywhere; }
 .ddf-chat-notice[data-kind="stopped"] { border-left-color:var(--dsw-alias-border-l2,#c9cdd4); }
 .ddf-chat-notice-heading { color:var(--dsw-alias-state-error-primary,#f54a45); }
@@ -1158,7 +1159,7 @@ window.__ModuleLoader__.load({
 .ddf-chat-plan-heading strong { font-size:15px; font-weight:600; }
 .ddf-chat-plan-heading span,.ddf-chat-plan-results { color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; font-variant-numeric:tabular-nums; }
 .ddf-chat-task-list { margin-top:10px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
-.ddf-chat-task { min-width:0; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-chat-task { --ddf-task-tone:var(--dsw-alias-label-secondary,#646a73); min-width:0; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-chat-task-summary { display:grid; grid-template-columns:10px minmax(0,1fr) auto; align-items:center; gap:10px; padding:12px 0; cursor:pointer; list-style:none; }
 .ddf-chat-task-summary::-webkit-details-marker { display:none; }
 .ddf-chat-task-summary::before { content:""; width:5px; height:5px; border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor; transform:rotate(-45deg); color:var(--dsw-alias-label-secondary,#646a73); }
@@ -1167,10 +1168,12 @@ window.__ModuleLoader__.load({
 .ddf-chat-task-identity { display:flex; min-width:0; flex-direction:column; gap:3px; }
 .ddf-chat-task-title { font-size:14px; font-weight:600; overflow-wrap:anywhere; }
 .ddf-chat-task-model { display:block; min-width:0; overflow:hidden; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
-.ddf-chat-task-status { padding:2px 7px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:5px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; white-space:nowrap; }
-.ddf-chat-task[data-status="running"]>.ddf-chat-task-summary .ddf-chat-task-status,.ddf-chat-task[data-status="starting"]>.ddf-chat-task-summary .ddf-chat-task-status { color:var(--dsw-alias-brand-primary,#4f6ef7); }
-.ddf-chat-task[data-status="failed"]>.ddf-chat-task-summary .ddf-chat-task-status,.ddf-chat-task[data-status="blocked"]>.ddf-chat-task-summary .ddf-chat-task-status { color:var(--dsw-alias-state-error-primary,#f54a45); }
-.ddf-chat-task[data-status="accepted"]>.ddf-chat-task-summary .ddf-chat-task-status { color:var(--dsw-alias-state-success-primary,#1f9d55); }
+.ddf-chat-task-status { display:inline-flex; align-items:center; gap:6px; padding:3px 9px; border:1px solid color-mix(in srgb,var(--ddf-task-tone) 24%,transparent); border-radius:6px; background:color-mix(in srgb,var(--ddf-task-tone) 9%,var(--dsw-alias-bg-layer-1,#fff)); color:var(--ddf-task-tone); font-size:12px; font-weight:600; white-space:nowrap; }
+.ddf-chat-task-status::before { content:""; flex:none; width:6px; height:6px; border-radius:50%; background:currentColor; }
+.ddf-chat-task[data-status="running"],.ddf-chat-task[data-status="starting"] { --ddf-task-tone:var(--ddf-status-running); }
+.ddf-chat-task[data-status="review"] { --ddf-task-tone:var(--ddf-status-warning); }
+.ddf-chat-task[data-status="failed"],.ddf-chat-task[data-status="blocked"] { --ddf-task-tone:var(--ddf-status-error); }
+.ddf-chat-task[data-status="accepted"] { --ddf-task-tone:var(--ddf-status-success); }
 .ddf-chat-task-body { padding:0 0 12px 20px; }
 .ddf-chat-task-actor + .ddf-chat-task-actor { margin-top:10px; padding-top:10px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-chat-task-issue { margin-top:10px; padding:8px 10px; border-left:2px solid var(--dsw-alias-state-error-primary,#f54a45); background:var(--dsw-alias-bg-layer-2,#f5f6f7); }
@@ -1208,6 +1211,11 @@ window.__ModuleLoader__.load({
 .ddf-dock-disclosure>summary:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7); outline-offset:2px; }
 .ddf-chat-dock .ddf-chat-notice { margin:0; }
 .ddf-dock-details .ddf-chat-notice { padding:12px 18px 16px; border:0; border-radius:0; font-size:14px; }
+.ddf-chat-notice[data-kind="coordination"] { --ddf-coordination-tone:var(--ddf-status-warning); padding:12px 14px; border:1px solid color-mix(in srgb,var(--ddf-coordination-tone) 22%,transparent); border-left:3px solid var(--ddf-coordination-tone); border-radius:8px; background:color-mix(in srgb,var(--ddf-coordination-tone) 6%,var(--dsw-alias-bg-layer-1,#fff)); }
+.ddf-dock-details .ddf-chat-notice[data-kind="coordination"] { margin:14px 18px 4px; }
+.ddf-chat-notice[data-kind="coordination"] .ddf-chat-notice-heading { display:flex; align-items:center; gap:8px; color:var(--ddf-coordination-tone); }
+.ddf-coordination-symbol { display:grid; place-items:center; flex:none; width:16px; height:16px; border:1px solid currentColor; border-radius:50%; font-size:11px; line-height:1; }
+.ddf-chat-notice .ddf-coordination-next { margin:10px 0 0; padding-top:9px; border-top:1px solid color-mix(in srgb,var(--ddf-coordination-tone) 18%,transparent); }
 .ddf-dock-details .ddf-decision { margin-top:12px; padding-top:10px; border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-dock-details .ddf-decision-choice { font-weight:600; }
 .ddf-chat-notice p { margin:5px 0; white-space:pre-wrap; }
@@ -1632,8 +1640,10 @@ window.__ModuleLoader__.load({
       const issue = plan?.coordinationIssue
       if (!issue || issue.resolvedAt || plan.completion) return null
       return h('section', { className: 'ddf-chat-notice', 'data-kind': 'coordination', role: 'status' },
-        h('strong', null, t(issue.role === 'coordinator' || !issue.role ? 'coordination.coordinator' : 'coordination.worker')),
-        h('p', null, issue.tool + '：' + issue.message), h('p', null, t('view.next') + '：' + issue.nextAction))
+        h('strong', { className: 'ddf-chat-notice-heading' }, h('span', { className: 'ddf-coordination-symbol', 'aria-hidden': true }, '!'),
+          t(issue.role === 'coordinator' || !issue.role ? 'coordination.coordinator' : 'coordination.worker')),
+        h('p', null, issue.tool + '：' + issue.message),
+        h('p', { className: 'ddf-coordination-next' }, h('strong', null, t('view.next') + '：'), issue.nextAction))
     }
 
     function ChatPlanNotice({ t, plan, openView, error }) {
