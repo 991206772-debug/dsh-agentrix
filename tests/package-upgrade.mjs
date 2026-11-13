@@ -1,6 +1,6 @@
 // Isolated npm install/upgrade/rollback, file integrity, and packaged native-runtime replay.
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises'
+import { copyFile, mkdtemp, mkdir, readFile, rm } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -42,11 +42,21 @@ try {
     assert.match(output, /PASS: installed native reliability/)
     process.stdout.write(output)
   }
+  async function replayBaseline() {
+    const tests = path.join(installed, 'tests')
+    await mkdir(tests, { recursive: true })
+    const script = path.join(tests, 'native-contract.mjs')
+    await copyFile(path.join(old, 'tests', 'native-contract.mjs'), script)
+    const output = run(process.env.DSH_EXECUTABLE, ['--expose-internals', script], root,
+      { ...process.env, ELECTRON_RUN_AS_NODE: '1' })
+    assert.match(output, /PASS:/)
+    process.stdout.write(output)
+  }
   npm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', path.join(old, oldPackage.filename)], install)
-  await verify(old, oldPackage); replay('direct')
+  await verify(old, oldPackage); await replayBaseline()
   npm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', path.join(artifacts, nextPackage.filename)], install)
   await verify(root, nextPackage); replay('cancel-cleanup'); replay('acceptance-save'); replay('delivery-persistence'); replay('audited-resolutions'); replay('project-directory')
   npm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', path.join(old, oldPackage.filename)], install)
-  await verify(old, oldPackage); replay('direct')
+  await verify(old, oldPackage); await replayBaseline()
   console.log('PASS: baseline install, current tgz upgrade and baseline rollback match every packaged file; isolated native replays passed')
 } finally { await rm(directory, { recursive: true, force: true }) }

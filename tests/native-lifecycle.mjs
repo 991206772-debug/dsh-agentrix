@@ -274,6 +274,7 @@ class ScriptedAdapter extends LlmAdapter {
         taskId: 'a', action: 'steer', message: progressCorrection,
       })
       else if (progressReview && task.status === 'running') block = tool('delegation_wait', {})
+      else if (earlyEvidence && task.status === 'running' && task.execution) block = tool('delegation_wait', {})
       else if (task.status === 'running' && task.supervision?.pending) block = tool('delegation_control', {
         taskId: task.id, action: 'steer', message: '核对现有证据；隔离样例的重复读取用于持续执行回放，原代理按原要求继续并提交报告。',
       })
@@ -676,7 +677,7 @@ try {
   const coordinatorCalls = requests.filter(request => request.sessionId === 'root').length
   if (truncateOutput) assert.ok(coordinatorCalls >= 7 && coordinatorCalls <= 8, 'the original coordinator resumes each truncated output and may wait once for the child')
   else if (progressReview) assert.ok(coordinatorCalls >= 6 && coordinatorCalls <= 8, 'only bounded progress supervision adds coordinator calls')
-  else if (continuous) assert.ok(coordinatorCalls >= 5 && coordinatorCalls <= 8, 'one repeated-observation inquiry adds bounded supervision rather than completion recovery')
+  else if (continuous || earlyEvidence) assert.ok(coordinatorCalls >= 5 && coordinatorCalls <= 8, 'one repeated-observation inquiry and report-confirmation wait add bounded supervision rather than completion recovery')
   else assert.equal(coordinatorCalls, coordinationConflict ? 12 : supplement ? 8 : 5, 'only the scripted operations and existing recovery use the original coordinator')
   if (progressReview) {
     assert.equal(plan.tasks[0].attempts, 1)

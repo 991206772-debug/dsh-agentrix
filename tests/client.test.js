@@ -5,6 +5,427 @@ import vm from 'node:vm'
 
 const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
 
+test('acceptance keeps the current task and actual execution visible above the activity feed', async () => {
+  const request = { messageId: 'layout-request', text: '核对导入视频的效果' }
+  const plan = { sessionId: 'session-current', source: request, goal: '核对视频导入与导出', status: 'running',
+    decision: { mode: 'direct', reason: '最初预计直接核查' }, tasks: [{ id: 'a', title: '核查导入', status: 'running' }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: plan.sessionId, plans: [plan], sessions: [{ sessionId: plan.sessionId, source: request }] }) }) })
+  const view = f.mountView(plan.sessionId)
+  const text = node => !node ? '' : typeof node !== 'object' ? String(node) : typeof node.type === 'function' ? text(node.type(node.props))
+    : node.children.flat(Infinity).map(text).join(' ')
+  try {
+    await view.flush()
+    const header = view.nodes('header')[0]
+    assert.match(text(header), /核对视频导入与导出/)
+    assert.match(text(header), /子代理协作/)
+    assert.match(text(header), /执行中/)
+    assert.doesNotMatch(text(header), /主控直接处理/)
+  } finally { view.close(); f.close() }
+})
+
+test('long coordinator decisions lead with the conclusion and retain the full reason in a closed disclosure', async () => {
+  const reason = '视觉调整依赖本轮上下文。' + '需要逐项核对交付效果和用户补充的要求。'.repeat(16)
+  const request = { messageId: 'decision-layout', text: '调整视频导入效果' }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: 'session-current', plans: [], sessions: [{ sessionId: 'session-current', source: request,
+      decision: { mode: 'direct', reason, requestId: request.messageId, at: 100 },
+      execution: { requestId: request.messageId, running: true, lastResult: { tool: 'present', at: 110 } } }] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    const decision = view.nodes('details').find(node => node.props?.['data-decision-reason'] === '')
+    assert.ok(decision)
+    assert.ok(!decision.props.open)
+    assert.match(view.text(), /主控直接处理/)
+    assert.ok(view.text().includes(reason), 'the complete recorded reason remains available')
+    const tool = view.nodes('article').find(node => node.props?.['data-source'] === 'tool')
+    assert.equal(tool.props['data-compact'], true)
+    assert.doesNotMatch(view.text(), /present ·/)
+  } finally { view.close(); f.close() }
+})
+
+/** Flatten a virtual element (including function components) to readable text. */
+const flatten = node => !node ? '' : typeof node !== 'object' ? String(node)
+  : node.type === 'style' ? ''
+  : typeof node.type === 'function' ? flatten(node.type(node.props))
+  : node.children.flat(Infinity).map(flatten).join(' ')
+
+test('acceptance task labels distinguish pending review, errors, cancellation and capacity waiting', async () => {
+  const request = { messageId: 'acceptance-labels', text: '核对独立审查与执行状态' }
+  const plan = { sessionId: 'session-current', source: request, status: 'running', tasks: [
+    { id: 'auditing', title: '核对改写', status: 'review', attempts: 2, audit: { status: 'running', forAttempt: 2 } },
+    { id: 'failed', title: '运行失败', status: 'failed' },
+    { id: 'blocked', title: '缺少资料', status: 'blocked' },
+    { id: 'cancelled', title: '取消重复检查', status: 'cancelled' },
+    { id: 'waiting', title: '等待并发名额', status: 'queued', dependsOn: [] },
+  ] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: plan.sessionId, plans: [structuredClone(plan)], sessions: [{ sessionId: plan.sessionId, source: request }] }) }) })
+  const view = f.mountView(plan.sessionId)
+  const card = id => view.nodes('details').find(node => node.props?.['data-acceptance-task'] === id)
+  try {
+    await view.flush()
+    assert.doesNotMatch(flatten(card('auditing')), /独立审查通过/)
+    assert.match(flatten(card('auditing')), /独立审查.*执行中|独立审查.*进行中/)
+    assert.match(flatten(view.nodes('section').find(node => node.props?.['data-acceptance-conclusion'])), /待验收 0/,
+      'a running independent review must not also count as awaiting coordinator acceptance')
+    assert.match(flatten(card('failed')), /执行失败/)
+    assert.match(flatten(card('blocked')), /已阻塞/)
+    assert.match(flatten(card('cancelled')), /已取消/)
+    assert.match(flatten(card('waiting')), /待派单/)
+    assert.doesNotMatch(flatten(card('waiting')), /等待前置/)
+    plan.tasks[0].audit = { status: 'completed', forAttempt: 2, specVerdict: 'fail', qualityVerdict: 'pass' }
+    await view.tick()
+    assert.doesNotMatch(flatten(card('auditing')), /独立审查通过/)
+    plan.tasks[0].audit.specVerdict = 'pass'
+    await view.tick()
+    assert.match(flatten(card('auditing')), /独立审查通过/)
+    plan.tasks[0].audit.forAttempt = 1
+    await view.tick()
+    assert.doesNotMatch(flatten(card('auditing')), /独立审查通过/, 'an earlier attempt cannot certify the current deliverable')
+  } finally { view.close(); f.close() }
+})
+
+test('acceptanceViewOf is the single state source for all nine page states', async () => {
+  const f = await sidebarFixture()
+  try {
+    const of = (plans, sessions) => f.acceptanceViewOf({ sessionId: 's', plans, sessions }, 's')
+    const request = { messageId: 'm1', text: '需求' }
+    const session = { sessionId: 's', source: request }
+    const plan = { sessionId: 's', source: request, status: 'running', tasks: [{ id: 'a', status: 'running' }] }
+    assert.equal(of([], []), 'empty')
+    assert.equal(of([], [session]), 'unknown')
+    assert.equal(of([], [{ ...session, pendingMessages: [{ text: '新消息' }] }]), 'pending')
+    assert.equal(of([], [{ ...session, decision: { mode: 'direct', reason: '理由' } }]), 'direct')
+    assert.equal(of([plan], [session]), 'running')
+    assert.equal(of([{ ...plan, cancelled: true }], [session]), 'cancelled')
+    for (const outcome of ['completed', 'partial', 'blocked', 'cancelled']) {
+      assert.equal(of([{ ...plan, completion: { id: 'r1', outcome, accepted: 0, total: 1,
+        deliverables: [], evidence: [], remaining: [] } }], [session]), outcome)
+    }
+    assert.equal(of([{ ...plan, completion: { id: 'r2', outcome: 'unknown-value' } }], [session]), 'unknown')
+    // A plan belonging to a previous request is never the current conclusion.
+    assert.equal(of([{ ...plan, source: { messageId: 'old' } }], [{ ...session, source: { messageId: 'new' } }]), 'unknown')
+  } finally { f.close() }
+})
+
+test('acceptance keeps the first conclusion visible instead of following a collapsed activity feed', async () => {
+  const request = { messageId: 'acceptance-scroll', text: '核对首屏结论' }
+  const body = { ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current', source: request,
+    status: 'running', tasks: [{ id: 'a', title: '核查', status: 'running' }] }],
+    sessions: [{ sessionId: 'session-current', source: request }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const view = f.mountView(body.sessionId)
+  const page = { scrollTop: 0, scrollHeight: 3000, clientHeight: 500, querySelector: () => ({ open: false }) }
+  try {
+    await view.flush()
+    view.nodes('main')[0].props.ref.current = page
+    await view.tick()
+    assert.equal(page.scrollTop, 0, 'the initial conclusion cannot disappear after a refresh')
+    page.scrollTop = 120
+    view.nodes('main')[0].props.onScroll({ currentTarget: page })
+    await view.tick()
+    assert.equal(page.scrollTop, 120, 'reading the evidence must preserve the current position')
+    body.plans[0].source = body.sessions[0].source = { messageId: 'acceptance-next', text: '新的验收对象' }
+    await view.tick()
+    assert.equal(page.scrollTop, 0, 'another request starts at its conclusion')
+  } finally { view.close(); f.close() }
+})
+
+test('direct execution renders a conclusion card with decision, execution summary and no-receipt notice', async () => {
+  const request = { messageId: 'direct-req', text: '调整分享文章的案例，并核对生成的文档' }
+  const session = { sessionId: 'session-current', source: request,
+    decision: { mode: 'direct', reason: '目标产物路径明确，主控直接处理可减少派单开销。', requestId: request.messageId, at: 100 },
+    execution: { requestId: request.messageId, running: false, toolCalls: 6,
+      lastResult: { tool: 'write', target: 'exports/成片.mp4', at: 110 }, unresolvedChanges: [] } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: 'session-current', plans: [], sessions: [session] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    assert.match(view.text(), /主控直接执行/)
+    assert.match(view.text(), /主控直接完成/)
+    assert.match(view.text(), /本次需求未建立托管计划/)
+    assert.match(view.text(), /不产生托管验收回执/)
+    assert.match(view.text(), /判断理由.*目标产物路径明确/)
+    assert.match(view.text(), /业务操作.*6 次/)
+    assert.match(view.text(), /未解决修改.*0 项/)
+    assert.match(view.text(), /最近工具/)
+    assert.doesNotMatch(view.text(), /当前没有托管子代理计划/)
+    assert.doesNotMatch(view.text(), /执行方式待记录|尚未记录执行活动/)
+    const card = view.nodes('section').find(node => node.props?.['data-acceptance-conclusion'])
+    assert.equal(card.props['data-acceptance-conclusion'], 'direct')
+    assert.equal(card.props['data-tone'], 'blue')
+    const feed = view.nodes('details').find(node => node.props?.['data-acceptance-fold'] === 'feed')
+    assert.equal(feed.props.open, true, 'direct execution expands collaboration activity by default')
+  } finally { view.close(); f.close() }
+})
+
+test('a direct decision with no retained execution record says so instead of inventing counts', async () => {
+  const request = { messageId: 'direct-noexec', text: '检查一段文字' }
+  const session = { sessionId: 'session-current', source: request,
+    decision: { mode: 'direct', reason: '直接处理', requestId: request.messageId, at: 100 } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: 'session-current', plans: [], sessions: [session] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    assert.match(view.text(), /本次执行记录未保留操作计数/)
+    assert.match(view.text(), /不产生托管验收回执/)
+  } finally { view.close(); f.close() }
+})
+
+test('in-progress conclusion uses returned counts, real task chips and a concrete next step', async () => {
+  const request = { messageId: 'run-req', text: '生成四段成片与定稿图' }
+  const plan = { sessionId: 'session-current', source: request, goal: '生成四段成片与定稿图', status: 'running', tasks: [
+    { id: 'a', title: '生成四段成片', status: 'accepted', criteria: ['C1 可播放'],
+      checks: [{ tool: 'ffprobe', result: { passed: true, callId: 'v1', at: 100, summary: '时长与编码通过' } }], outputs: ['exports/a.mp4'] },
+    { id: 'b', title: '生成定稿图', status: 'review', criteria: ['C2 尺寸正确'], outputs: ['exports/b.png'] },
+    { id: 'c', title: '拼接转场', status: 'running', criteria: ['C3 顺序一致'], outputs: ['exports/c/'] },
+    { id: 'd', title: '交付说明', status: 'queued', dependsOn: ['a', 'b'], criteria: ['C4 说明完整'], outputs: [] }
+  ] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: 'session-current', plans: [structuredClone(plan)], sessions: [{ sessionId: 'session-current', source: request }] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    const card = view.nodes('section').find(node => node.props?.['data-acceptance-conclusion'])
+    assert.equal(card.props['data-acceptance-conclusion'], 'running')
+    assert.equal(card.props['data-tone'], 'blue')
+    const cardText = flatten(card)
+    assert.match(cardText, /已返回 2\/4/)
+    assert.match(cardText, /任务 4 · 执行中 1 · 等待 1 · 待验收 1/)
+    assert.match(cardText, /等待执行者返回报告/)
+    assert.doesNotMatch(cardText, /%/)
+    const chips = view.nodes('div').find(node => node.props?.['data-acc-chips'] === '')
+    assert.equal(chips.children.length, 4)
+    assert.match(flatten(chips), /生成四段成片 · 已验收/)
+    assert.match(flatten(chips), /拼接转场 · 执行中/)
+    assert.match(flatten(chips), /交付说明 · 等待前置/)
+    const receipt = view.nodes('details').find(node => node.props?.['data-acceptance-fold'] === 'receipt')
+    assert.match(flatten(receipt), /尚未生成/)
+    assert.equal(view.button('复制结论'), undefined, 'copy is only offered for accepted receipts')
+  } finally { view.close(); f.close() }
+})
+
+test('task cards are real accordions: first open, others collapsed, polling never resets them', async () => {
+  const request = { messageId: 'accordion-req', text: '生成四段成片' }
+  const plan = { sessionId: 'session-current', source: request, goal: '生成四段成片', status: 'running', tasks: [
+    { id: 'a', title: '生成四段成片', status: 'accepted', criteria: ['C1 可播放'],
+      checks: [{ tool: 'ffprobe', result: { passed: true, callId: 'v1', at: 100, summary: '通过' } }], outputs: ['exports/a.mp4'] },
+    { id: 'b', title: '生成定稿图', status: 'review', criteria: ['C2 尺寸正确'], checks: [], outputs: [] },
+    { id: 'c', title: '整理交付说明', status: 'queued', criteria: ['C3 路径完整'], checks: [], outputs: [] }
+  ] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: 'session-current', plans: [structuredClone(plan)], sessions: [{ sessionId: 'session-current', source: request }] }) }) })
+  const view = f.mountView('session-current')
+  const cards = () => view.nodes('details').filter(node => node.props?.['data-acceptance-task'])
+  try {
+    await view.flush()
+    assert.equal(cards().length, 3)
+    assert.equal(cards()[0].props.open, true, 'only the first task accordion opens by default')
+    assert.equal(cards()[1].props.open, undefined, 'other tasks are uncontrolled, so a user can open them')
+    assert.equal(cards()[2].props.open, undefined)
+    const heads = view.nodes('summary').filter(node => node.props?.className === 'ddf-acc-task-head')
+    assert.equal(heads.length, 3)
+    assert.ok(view.nodes('span').some(node => node.props?.className === 'ddf-acc-task-chev'), 'each summary has a chevron')
+    assert.match(flatten(heads[0]), /生成四段成片.*已验收/)
+    const firstBody = cards()[0].children.find(node => node?.props?.className === 'ddf-acc-task-body')
+    assert.ok(firstBody)
+    assert.match(flatten(firstBody), /验收标准.*实际验证.*结论/)
+    assert.match(flatten(firstBody), /C1 可播放/)
+    assert.match(flatten(firstBody), /✓ 通过/)
+    assert.equal(view.nodes('table').filter(node => node.props?.className === 'ddf-acc-criteria').length, 3,
+      'collapsed bodies still contain their criteria tables')
+    // The duplicate "current request" hero lives in the decision fold, never
+    // at the top of the task list.
+    const foldBody = id => view.nodes('details').find(node => node.props?.['data-acceptance-fold'] === id)
+      .children.find(node => node?.props?.className === 'ddf-acc-fold-body')
+    const hasHero = body => body.children.flat(Infinity).some(node => node?.props?.className === 'ddf-board-hero')
+    assert.equal(hasHero(foldBody('tasks')), false)
+    assert.equal(hasHero(foldBody('decision')), true)
+    // A 3-second poll re-renders the page; no card gains or loses a controlled open value.
+    await view.tick()
+    assert.equal(cards()[0].props.open, true)
+    assert.equal(cards()[1].props.open, undefined)
+    assert.equal(cards()[2].props.open, undefined)
+  } finally { view.close(); f.close() }
+})
+
+test('completed conclusion shows receipt, deliverables, evidence and a three-column task table', async () => {
+  const request = { messageId: 'done-req', text: '生成成片' }
+  const task = { id: 'a', title: '生成四段成片', status: 'accepted', criteria: ['C1 可播放', 'C2 顺序一致'],
+    checks: [{ tool: 'ffprobe', result: { passed: true, callId: 'v1', at: 100, summary: '时长与编码通过' } }],
+    outputs: ['exports/成片.mp4'], review: { findings: [{ criterion: 0, finding: '符合标准', evidence: ['verification-2f1a'] }] } }
+  const plan = { sessionId: 'session-current', source: request, goal: '生成成片', status: 'accepted', tasks: [task],
+    completion: { id: 'd1f0c3', at: 1000, outcome: 'completed', accepted: 1, total: 1,
+      deliverables: [{ taskId: 'a', title: '生成四段成片', paths: ['exports/成片.mp4'] }],
+      evidence: ['verification-2f1a'], remaining: [] } }
+  const copied = []
+  const f = await sidebarFixture(undefined, { clipboard: async text => { copied.push(text) }, fetchState: async () => ({ ok: true,
+    json: async () => ({ ok: true, sessionId: 'session-current', plans: [structuredClone(plan)],
+      sessions: [{ sessionId: 'session-current', source: request }] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    const card = view.nodes('section').find(node => node.props?.['data-acceptance-conclusion'])
+    assert.equal(card.props['data-acceptance-conclusion'], 'completed')
+    assert.equal(card.props['data-tone'], 'green')
+    const cardText = flatten(card)
+    assert.match(cardText, /已完成/)
+    assert.match(cardText, /已验收 1\/1/)
+    assert.match(cardText, /回执 #d1f0c3/)
+    assert.match(cardText, /exports\/成片\.mp4/)
+    assert.match(cardText, /verification-2f1a/)
+    assert.doesNotMatch(cardText, /已返回 1\/1/)
+    assert.deepEqual(view.nodes('th').map(flatten), ['验收标准', '实际验证', '结论'])
+    const tasksFold = view.nodes('details').find(node => node.props?.['data-acceptance-fold'] === 'tasks')
+    assert.equal(tasksFold.props.open, true, 'accepted work expands the task evidence fold')
+    const button = view.nodes('button').find(node => node.props?.['data-copy-conclusion'] === '')
+    assert.ok(button)
+    await button.props.onClick(); await view.flush()
+    assert.equal(copied.length, 1)
+    const markdown = copied[0]
+    assert.match(markdown, /## 已完成/)
+    assert.match(markdown, /回执 #d1f0c3/)
+    assert.match(markdown, /已验收 1\/1/)
+    assert.match(markdown, /- `exports\/成片\.mp4`/)
+    assert.match(markdown, /- ✓ verification-2f1a/)
+    assert.match(markdown, /> 下一步：/)
+  } finally { view.close(); f.close() }
+})
+
+test('partial conclusion lists unfinished work bound to task names from the receipt', async () => {
+  const request = { messageId: 'partial-req', text: '生成成片与报告' }
+  const plan = { sessionId: 'session-current', source: request, goal: '生成成片与报告', status: 'blocked', tasks: [
+    { id: 'a', title: '生成四段成片', status: 'accepted', criteria: ['C1 可播放'], checks: [], outputs: ['exports/a.mp4'] },
+    { id: 'c', title: '汇总报告', status: 'review', criteria: ['C5 覆盖四段'], checks: [], outputs: [] },
+    { id: 'd', title: '交付说明', status: 'cancelled', criteria: ['C6 路径完整'], checks: [], outputs: [] }
+  ], completion: { id: 'e7b2a0', at: 1000, outcome: 'partial', accepted: 1, total: 3,
+    deliverables: [{ taskId: 'a', title: '生成四段成片', paths: ['exports/a.mp4'] }], evidence: ['v1'],
+    remaining: [{ taskId: 'c', title: '汇总报告', status: 'review', reason: '主控尚未完成最终验收' },
+      { taskId: 'd', title: '交付说明', status: 'cancelled', reason: '已取消' }] } }
+  const copied = []
+  const f = await sidebarFixture(undefined, { clipboard: async text => { copied.push(text) }, fetchState: async () => ({ ok: true,
+    json: async () => ({ ok: true, sessionId: 'session-current', plans: [structuredClone(plan)],
+      sessions: [{ sessionId: 'session-current', source: request }] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    const card = view.nodes('section').find(node => node.props?.['data-acceptance-conclusion'])
+    assert.equal(card.props['data-acceptance-conclusion'], 'partial')
+    assert.equal(card.props['data-tone'], 'amber')
+    const cardText = flatten(card)
+    assert.match(cardText, /部分完成 · 已验收 1\/3/)
+    assert.match(cardText, /回执 #e7b2a0/)
+    assert.match(cardText, /未完成项/)
+    assert.match(cardText, /汇总报告 · 主控尚未完成最终验收/)
+    assert.match(cardText, /交付说明 · 已取消/)
+    assert.match(cardText, /exports\/a\.mp4/)
+    const button = view.nodes('button').find(node => node.props?.['data-copy-conclusion'] === '')
+    assert.ok(button)
+    await button.props.onClick(); await view.flush()
+    assert.match(copied[0], /- 汇总报告 · 主控尚未完成最终验收/)
+    assert.match(copied[0], /- 交付说明 · 已取消/)
+  } finally { view.close(); f.close() }
+})
+
+test('the empty view shows only a no-request conclusion, with no statistics or feed', async () => {
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: 'session-current', plans: [], sessions: [] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    assert.match(view.text(), /当前会话还没有需求记录/)
+    assert.match(view.text(), /尚无需求记录/)
+    assert.match(view.text(), /主控收到需求后/)
+    assert.doesNotMatch(view.text(), /当前没有托管子代理计划|主控直接处理/)
+    assert.equal(view.nodes('div').filter(node => node.props?.className === 'ddf-focus-stats').length, 0)
+    assert.equal(view.nodes('section').filter(node => node.props?.['data-collaboration-feed'] === '').length, 0)
+    assert.equal(view.nodes('textarea').length, 0)
+    assert.equal(view.nodes('input').length, 0)
+    assert.ok(view.button('回到聊天'))
+    assert.equal(view.button('复制结论'), undefined)
+  } finally { view.close(); f.close() }
+})
+
+test('the first screen is header → conclusion → four evidence folds → collaboration activity → footer', async () => {
+  const request = { messageId: 'order-req', text: '整理交付' }
+  const plan = { sessionId: 'session-current', source: request, goal: '整理交付', status: 'accepted',
+    tasks: [{ id: 'a', title: '整理文件', status: 'accepted', criteria: ['C1 完整'], checks: [], outputs: [] }],
+    completion: { id: 'order-receipt', at: 1000, outcome: 'completed', accepted: 1, total: 1,
+      deliverables: [], evidence: [], remaining: [] } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: 'session-current', plans: [structuredClone(plan)], sessions: [{ sessionId: 'session-current', source: request }] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    const direct = view.nodes('main')[0].children.flat(Infinity).filter(node => node && typeof node === 'object')
+    const header = direct.findIndex(node => node.props?.className === 'ddf-board-header')
+    const body = direct.findIndex(node => node.props?.className === 'ddf-acc-body')
+    assert.ok(header >= 0 && body > header, 'the whole page body follows the sticky header in one column')
+    const column = direct[body].children.flat(Infinity).filter(node => node && typeof node === 'object')
+    const conclusion = column.findIndex(node => typeof node.type === 'function' && node.props?.conclusion)
+    const folds = column.findIndex(node => node.props?.className === 'ddf-focus-context')
+    const feed = column.findIndex(node => node.props?.['data-acceptance-fold'] === 'feed')
+    const foot = column.findIndex(node => node.props?.className === 'ddf-acc-footnote')
+    assert.ok(conclusion >= 0 && folds > conclusion && feed > folds && foot > feed)
+    const evidenceFolds = column[folds].children.flat(Infinity).filter(node => node?.props?.['data-acceptance-fold'])
+    assert.deepEqual(evidenceFolds.map(node => node.props['data-acceptance-fold']), ['tasks', 'decision', 'receipt', 'diagnostics'])
+    assert.equal(evidenceFolds[0].props.open, true)
+    assert.ok(!column[feed].props.open, 'collaboration activity stays collapsed for completed work')
+    assert.match(flatten(column[foot]), /完整过程：Fleet/)
+    const styles = view.nodes('style').map(node => node.children.join('')).join('\n')
+    assert.match(styles, /--ddf-acc-gutter:max\(24px,calc\(\(100% - 880px\)\/2\)\)/)
+    assert.match(styles, /\.ddf-focus-board>\.ddf-acc-body \{[^}]*padding:14px var\(--ddf-acc-gutter\)/)
+    assert.match(styles, /@container ddf-focus \(max-width:900px\) \{ \.ddf-focus-board \{ --ddf-acc-gutter:16px; \} \}/)
+  } finally { view.close(); f.close() }
+})
+
+test('acceptance copy is synchronised for the English locale', async () => {
+  const request = { messageId: 'en-req', text: 'Check the article' }
+  const session = { sessionId: 'session-current', source: request,
+    decision: { mode: 'direct', reason: 'Small scope, handle directly.', requestId: request.messageId, at: 100 },
+    execution: { requestId: request.messageId, toolCalls: 2, running: false, unresolvedChanges: [] } }
+  const f = await sidebarFixture(undefined, { language: 'en', fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: 'session-current', plans: [], sessions: [session] }) }) })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    assert.match(view.text(), /Coordinator executed directly/)
+    assert.match(view.text(), /Completed directly by the coordinator/)
+    assert.match(view.text(), /No managed plan was created/)
+    assert.match(view.text(), /produces no managed acceptance receipt/)
+    assert.match(view.text(), /Tasks and evidence/)
+    assert.match(view.text(), /Coordinator decision and execution/)
+    assert.match(view.text(), /Receipt details/)
+    assert.match(view.text(), /Runtime diagnostics/)
+    assert.match(view.text(), /Collaboration activity/)
+    assert.doesNotMatch(view.text(), /主控直接完成|当前没有托管子代理计划|本次需求/)
+  } finally { view.close(); f.close() }
+})
+
+test('copying a conclusion is a local clipboard write and never adds a network request', async () => {
+  const request = { messageId: 'net-req', text: '交付' }
+  const plan = { sessionId: 'session-current', source: request, goal: '交付', status: 'accepted', tasks: [],
+    completion: { id: 'net-receipt', at: 1000, outcome: 'completed', accepted: 1, total: 1,
+      deliverables: [], evidence: [], remaining: [] } }
+  let stateCalls = 0
+  const f = await sidebarFixture(undefined, { clipboard: async () => {}, fetchState: async () => { stateCalls++; return { ok: true,
+    json: async () => ({ ok: true, sessionId: 'session-current', plans: [structuredClone(plan)],
+      sessions: [{ sessionId: 'session-current', source: request }] }) } } })
+  const view = f.mountView('session-current')
+  try {
+    await view.flush()
+    const before = stateCalls
+    const button = view.nodes('button').find(node => node.props?.['data-copy-conclusion'] === '')
+    await button.props.onClick(); await view.flush()
+    assert.equal(stateCalls, before)
+    assert.match(view.text(), /结论已复制/)
+  } finally { view.close(); f.close() }
+})
+
 test('focused worker artifacts expose full output and report locations without opening technical details', async () => {
   const task = { id: 'a', title: '核对接口', status: 'review', outputs: ['reports/result.md', 'E:\\shared\\schema.json'],
     execution: { status: 'DONE', summary: '核对已返回', reportPath: 'C:\\archive\\reports\\a\\worker-1.md' },
@@ -285,8 +706,8 @@ test('focused board keeps tasks in a closed drawer and restores current-request 
     view.nodes('button').find(node => node.props?.['data-drawer-toggle'] === '').props.onClick(); await view.flush()
     assert.equal(drawer().props.hidden, false)
     assert.equal(drawer().props['data-selected-task'], null)
-    assert.ok(view.nodes('header')[0].children.flat(Infinity).some(node => node?.props?.className === 'ddf-board-actions'
-      && node.children.flat(Infinity).some(child => child?.props?.['data-drawer-toggle'] === '')), 'the pinned header keeps the detail close action reachable while the whole page scrolls')
+    assert.ok(view.nodes('button').some(node => node.props?.['data-drawer-toggle'] === ''),
+      'the task drawer toggle stays reachable from the Tasks and evidence fold while the whole page scrolls')
     view.nodes('button').find(node => node.props?.['data-member-filter'] === 'worker:a').props.onClick(); await view.flush()
     await view.tick()
     assert.equal(drawer().props.hidden, false)
@@ -1175,7 +1596,7 @@ test('chat progress describes waiting and review tasks even when this turn dispa
 async function sidebarFixture(initialCatalog = { status: 'ready', value: { groups: [], failures: [] } }, options = {}) {
   const entries = new Map(), cleanups = [], timers = new Map(), subscribers = new Set(), timeouts = new Map(), posted = []
   let config = { ok: true, mode: 'auto', models: { routine: { provider: 'retired', model: 'worker' }, complex: null } }
-  let catalogState = initialCatalog, dictionaries, sequence = 0, selectedPanel, hookRunner
+  let catalogState = initialCatalog, dictionaries, sequence = 0, selectedPanel, hookRunner, moduleApi
   const catalog = {
     store: { getSnapshot: () => catalogState, subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn) } },
     async load() {}, async refresh() {},
@@ -1201,7 +1622,7 @@ async function sidebarFixture(initialCatalog = { status: 'ready', value: { group
   }
   const window = {
     navigator: options.clipboard ? { clipboard: { writeText: options.clipboard } } : {},
-    __ModuleLoader__: { load: ({ factory }) => factory(() => React).apply(ctx) },
+    __ModuleLoader__: { load: ({ factory }) => { moduleApi = factory(() => React); moduleApi.apply(ctx) } },
     setInterval(fn) { const id = ++sequence; timers.set(id, fn); return id },
     clearInterval(id) { timers.delete(id) },
     setTimeout(fn) { const id = ++sequence; timeouts.set(id, fn); return id },
@@ -1229,6 +1650,9 @@ async function sidebarFixture(initialCatalog = { status: 'ready', value: { group
   const reminder = () => elements(entries.get('shell.overlay')?.render())
   return {
     label: () => entries.get('sidebar.panellist').options.label(),
+    // The pure state function is the single source for the P0 view; expose it
+    // so the state table can be asserted directly as well as through the DOM.
+    acceptanceViewOf: (state, sessionId) => moduleApi.acceptanceViewOf(state, sessionId),
     async setConfig(value) { config = value; for (const fn of timers.values()) fn(); await flush() },
     setCatalog(value) { catalogState = value; for (const fn of subscribers) fn() },
     reminderText: () => reminder().filter(node => node.props?.role === 'alert').map(textOf).join(' '),
@@ -1500,9 +1924,11 @@ test('an older host response is scoped locally without showing unrelated tasks o
   const view = f.mountView('session-current')
   try {
     await view.flush()
-    assert.match(view.text(), /当前没有托管子代理计划/)
+    assert.match(view.text(), /当前会话还没有需求记录/)
+    assert.doesNotMatch(view.text(), /当前没有托管子代理计划/)
     assert.match(view.text(), /重新加载.*DSH Agentrix/)
     assert.doesNotMatch(view.text(), /读取失败|其他会话的私有需求|其他会话的档案提示/)
+    assert.equal(view.nodes('section').filter(node => node.props?.['data-collaboration-feed'] === '').length, 0, 'an empty view shows no empty feed')
   } finally { view.close(); f.close() }
 })
 
@@ -1919,7 +2345,8 @@ test('manual retry disables repeated requests and restores the normal view after
     assert.equal(calls, 2)
     finish({ ok: true, json: async () => ({ ok: true, sessionId: 'session-current', plans: [], sessions: [] }) })
     await view.flush()
-    assert.match(view.text(), /当前没有托管子代理计划/)
+    assert.match(view.text(), /当前会话还没有需求记录/)
+    assert.doesNotMatch(view.text(), /当前没有托管子代理计划/)
     assert.doesNotMatch(view.text(), /暂时无法显示|Failed to fetch/)
     assert.ok(view.button('整理与导出'))
   } finally { view.close(); f.close() }
@@ -1942,7 +2369,7 @@ test('a refresh failure retains the last successful result and marks it as not u
     assert.ok(view.button('重新读取'))
     assert.doesNotMatch(view.text(), /暂时无法显示任务状态/)
     const sections = view.nodes('main')[0].children.flat(Infinity).filter(node => node?.props?.className)
-    assert.ok(sections.findIndex(node => node.props.className === 'ddf-board-load-issue') < sections.findIndex(node => node.props.className === 'ddf-focus-context'),
+    assert.ok(sections.findIndex(node => node.props.className === 'ddf-board-load-issue') < sections.findIndex(node => node.props.className === 'ddf-acc-body'),
       'a stale-result warning must appear before the retained task content')
   } finally { view.close(); f.close() }
 })
@@ -2056,8 +2483,11 @@ test('the no-plan view shows the session name and actual coordinator work separa
     assert.match(view.text(), /主控已直接执行/)
     assert.match(view.text(), /本轮业务操作 12/)
     assert.match(view.text(), /规则评分只给分流建议，不会自动派单/)
-    assert.match(view.text(), /当前没有托管子代理计划/)
+    assert.match(view.text(), /尚无需求记录/)
+    assert.match(view.text(), /当前会话还没有需求记录/)
+    assert.doesNotMatch(view.text(), /当前没有托管子代理计划/)
     assert.doesNotMatch(view.text(), /已安排子代理/)
+    assert.equal(view.nodes('div').filter(node => node.props?.className === 'ddf-focus-stats').length, 0, 'an empty view shows no empty statistics')
   } finally { view.close(); f.close() }
 })
 
@@ -2139,7 +2569,7 @@ test('the acceptance view is an operation board for stopped work and exposes the
     assert.match(view.text(), /受影响/)
     assert.doesNotMatch(view.text(), /待派单.*已停止/)
     assert.equal(view.nodes('svg').length, 0, 'the default view must not render the blueprint wires or mascot')
-    assert.equal(view.nodes('details').filter(node => node.props?.open).length, 0, 'technical details start collapsed')
+    assert.equal(view.nodes('details').filter(node => node.props?.open && !node.props?.['data-acceptance-fold'] && !node.props?.['data-acceptance-task']).length, 0, 'technical details start collapsed')
     assert.ok(view.nodes('button').some(node => String(node.props?.['aria-expanded']) === 'false'))
   } finally { view.close(); f.close() }
 })
@@ -2248,7 +2678,8 @@ test('collapsed board task details retain the full request, model, checks, evide
   const view = f.mountView('session-current')
   try {
     await view.flush()
-    assert.equal(view.nodes('details').filter(node => node.props?.open).length, 0)
+    assert.equal(view.nodes('details').filter(node => node.props?.open && !node.props?.['data-acceptance-fold'] && !node.props?.['data-acceptance-task']).length, 0,
+      'page folds and the first task accordion may start open, but technical task details stay collapsed')
     view.button('任务详情').props.onClick()
     await view.flush()
     for (const value of ['原始需求完整内容', 'message-source', '返回字段完整', 'node --test', 'check-123', '字段验证通过', '符合标准',

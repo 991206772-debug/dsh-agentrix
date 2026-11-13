@@ -268,6 +268,36 @@ window.__ModuleLoader__.load({
       return source?.messageId && source.messageId !== plan?.source?.messageId ? null : plan
     }
 
+    /**
+     * One source of truth for the P0 acceptance page. The header badge, the
+     * conclusion card, the "next step" line and the task list all derive from
+     * this, so they can never contradict each other.
+     *
+     * Data constraints (keep these in mind when editing):
+     * - session.execution exists only in the running process. After a plugin
+     *   reload, or when reviewing a historical session, it is empty; direct
+     *   execution counts can then only say that the record was not retained.
+     * - A session has at most one managed plan (plans keyed by sessionId).
+     *   Already accepted historical requests are out of this page's scope;
+     *   use Share/export for those.
+     * - The only admissible conclusion is plan.completion. Reports, tool
+     *   returns and a model claiming completion never substitute for it.
+     */
+    function acceptanceViewOf(state, sessionId) {
+      const plan = currentPlanOf(state, sessionId)
+      const session = state?.sessions?.find(item => item.sessionId === sessionId)
+      const request = session?.source
+      const receipt = plan?.completion
+      const decision = plan?.decision ?? session?.decision
+      const outcomes = ['completed', 'partial', 'blocked', 'cancelled']
+      if (receipt) return outcomes.includes(receipt.outcome) ? receipt.outcome : 'unknown'
+      if (plan) return plan.cancelled ? 'cancelled' : 'running'
+      if (decision?.mode === 'direct') return 'direct'
+      if (session?.pendingMessages?.length) return 'pending'
+      if (!request && !plan) return 'empty'
+      return 'unknown'
+    }
+
     Object.assign(zh, {
       'limits.title': '执行限制', 'limits.maxParallel': '全局同时执行', 'limits.maxAttempts': '每任务最多执行',
       'limits.maxActivations': '每个计划最多派发', 'limits.maxActivationsHint': '首次派发、返工和独立审查都计入；达到上限后停止自动开新子 Agent。', 'limits.taskTimeoutMinutes': '运行时间提醒（分钟）', 'models.title': '子任务模型',
@@ -1326,7 +1356,326 @@ window.__ModuleLoader__.load({
 .ddf-receipt summary { cursor:pointer; }
 `
 
-    function CompletionReceipt({ t, plan, state }) {
+    const ACCEPTANCE_STYLES = `
+.ddf-acc-eyebrow { display:flex; align-items:center; gap:8px; font-size:11px; letter-spacing:.08em; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); }
+.ddf-acc-readonly { padding:0 6px; border:1px solid var(--ddf-focus-line,var(--dsw-alias-border-l1,#e5e6eb)); border-radius:4px; letter-spacing:0; background:var(--ddf-focus-surface,var(--dsw-alias-bg-layer-1,#fff)); }
+.ddf-acc-badge { display:inline-flex; align-items:center; gap:6px; flex:0 0 auto; margin-top:2px; padding:2px 9px; border-radius:999px; border:1px solid transparent; font-size:11px; font-weight:500; white-space:nowrap; }
+.ddf-acc-badge i { width:6px; height:6px; border-radius:50%; background:currentColor; }
+.ddf-acc-badge[data-tone="blue"],.ddf-acc-chip[data-tone="blue"],.ddf-acc-pill[data-tone="blue"] { color:var(--dsw-alias-state-business-primary,#1664ff); background:color-mix(in srgb,currentColor 9%,var(--ddf-focus-surface,#fff)); border-color:color-mix(in srgb,currentColor 26%,transparent); }
+.ddf-acc-badge[data-tone="green"],.ddf-acc-chip[data-tone="green"],.ddf-acc-pill[data-tone="green"] { color:var(--ddf-board-success,var(--dsw-alias-state-success-primary,#128a45)); background:color-mix(in srgb,currentColor 9%,var(--ddf-focus-surface,#fff)); border-color:color-mix(in srgb,currentColor 26%,transparent); }
+.ddf-acc-badge[data-tone="amber"],.ddf-acc-chip[data-tone="amber"],.ddf-acc-pill[data-tone="amber"] { color:var(--ddf-board-warning,#a35a00); background:color-mix(in srgb,currentColor 9%,var(--ddf-focus-surface,#fff)); border-color:color-mix(in srgb,currentColor 26%,transparent); }
+.ddf-acc-badge[data-tone="red"],.ddf-acc-chip[data-tone="red"],.ddf-acc-pill[data-tone="red"] { color:var(--ddf-board-error,var(--dsw-alias-state-danger-primary,#d14343)); background:color-mix(in srgb,currentColor 9%,var(--ddf-focus-surface,#fff)); border-color:color-mix(in srgb,currentColor 26%,transparent); }
+.ddf-acc-badge[data-tone="gray"],.ddf-acc-chip[data-tone="gray"],.ddf-acc-pill[data-tone="gray"] { color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); background:var(--ddf-focus-canvas,#f2f3f5); border-color:var(--ddf-focus-line,var(--dsw-alias-border-l1,#e5e6eb)); }
+.ddf-acc-conclusion { margin-top:14px; padding:14px 16px 12px; border:1px solid var(--ddf-focus-line,var(--dsw-alias-border-l1,#e5e6eb)); border-left:3px solid var(--ddf-acc-line,#c9cdd4); border-radius:10px; background:var(--ddf-focus-surface,var(--dsw-alias-bg-layer-1,#fff)); }
+.ddf-acc-conclusion[data-tone="blue"] { --ddf-acc-line:var(--dsw-alias-state-business-primary,#1664ff); --ddf-acc-fg:#1664ff; }
+.ddf-acc-conclusion[data-tone="green"] { --ddf-acc-line:var(--ddf-board-success,#1f9d55); --ddf-acc-fg:#128a45; }
+.ddf-acc-conclusion[data-tone="amber"] { --ddf-acc-line:#d97706; --ddf-acc-fg:#a35a00; }
+.ddf-acc-conclusion[data-tone="red"] { --ddf-acc-line:var(--ddf-board-error,#d14343); --ddf-acc-fg:#d14343; }
+.ddf-acc-head { display:flex; gap:14px; justify-content:space-between; align-items:flex-start; }
+.ddf-acc-title { display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-size:15px; font-weight:600; }
+.ddf-acc-icon { flex:0 0 auto; width:20px; height:20px; border-radius:50%; display:grid; place-items:center; font-size:11px; line-height:1; color:var(--ddf-acc-fg,#646a73); background:color-mix(in srgb,var(--ddf-acc-fg,#646a73) 9%,var(--ddf-focus-surface,#fff)); border:1px solid var(--ddf-acc-line,#e5e6eb); }
+.ddf-acc-sub { font-size:12px; font-weight:400; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); }
+.ddf-acc-line { margin:6px 0 0; font-size:12.5px; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); }
+.ddf-acc-receipt { flex:0 0 auto; font-size:11px; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); border:1px solid var(--ddf-focus-line,var(--dsw-alias-border-l1,#e5e6eb)); background:var(--ddf-focus-surface,#fff); border-radius:999px; padding:2px 9px; white-space:nowrap; }
+.ddf-acc-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:11px; }
+.ddf-acc-chip { font-size:11px; padding:1px 8px; border-radius:999px; border:1px solid transparent; white-space:nowrap; }
+.ddf-acc-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 20px; margin-top:13px; }
+.ddf-acc-grid[data-single="true"] { grid-template-columns:1fr; }
+.ddf-acc-label { font-size:11px; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); margin:0 0 5px; }
+.ddf-acc-file { display:flex; align-items:center; gap:8px; padding:5px 0; border-bottom:1px dashed var(--ddf-focus-line,#eef0f3); }
+.ddf-acc-file:last-child { border-bottom:0; }
+.ddf-acc-file code { overflow-wrap:anywhere; }
+.ddf-acc-mini { border:0; background:transparent; color:var(--dsw-alias-state-business-primary,#1664ff); font-size:11px; cursor:pointer; white-space:nowrap; }
+.ddf-acc-ev,.ddf-acc-list { list-style:none; margin:0; padding:0; }
+.ddf-acc-ev li,.ddf-acc-list li { display:flex; gap:8px; padding:5px 0; border-bottom:1px dashed var(--ddf-focus-line,#eef0f3); font-size:12px; }
+.ddf-acc-ev li:last-child,.ddf-acc-list li:last-child { border-bottom:0; }
+.ddf-acc-ok { color:var(--ddf-board-success,#128a45); font-weight:700; flex:0 0 auto; }
+.ddf-acc-bad { color:var(--ddf-board-error,#d14343); font-weight:700; flex:0 0 auto; }
+.ddf-acc-list .d { color:var(--ddf-board-warning,#a35a00); font-weight:700; flex:0 0 auto; }
+.ddf-acc-ev-name { min-width:0; flex:1; overflow-wrap:anywhere; }
+.ddf-acc-ev-meta { color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); font-size:11px; white-space:nowrap; }
+.ddf-acc-kv { display:flex; gap:10px; font-size:12px; padding:3px 0; }
+.ddf-acc-kv .k { flex:0 0 84px; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); }
+.ddf-acc-kv .v { min-width:0; overflow-wrap:anywhere; }
+.ddf-acc-next { margin-top:13px; padding-top:10px; border-top:1px solid var(--ddf-focus-line,#eef0f3); font-size:12px; }
+.ddf-acc-next b { margin-right:8px; font-weight:600; }
+.ddf-acc-foot { margin:8px 0 0; font-size:11px; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); }
+.ddf-acc-primary { background:var(--dsw-alias-state-business-primary,#1664ff)!important; border-color:var(--dsw-alias-state-business-primary,#1664ff)!important; color:#fff!important; font-weight:500; }
+.ddf-acc-fold { margin-top:12px; background:var(--ddf-focus-surface,var(--dsw-alias-bg-layer-1,#fff)); border:1px solid var(--ddf-focus-line,var(--dsw-alias-border-l1,#e5e6eb)); border-radius:10px; overflow:hidden; }
+.ddf-acc-fold>summary { list-style:none; display:flex; align-items:center; gap:10px; padding:11px 16px; cursor:pointer; font-size:13px; font-weight:600; }
+.ddf-acc-fold>summary::-webkit-details-marker { display:none; }
+.ddf-acc-fold-title { flex:0 0 auto; }
+.ddf-acc-fold-meta { font-weight:400; font-size:11px; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ddf-acc-chev { flex:0 0 auto; margin-left:auto; width:7px; height:7px; border-right:1.5px solid #86909c; border-bottom:1.5px solid #86909c; transform:rotate(45deg); }
+.ddf-acc-fold[open]>summary .ddf-acc-chev { transform:rotate(-135deg); }
+.ddf-acc-fold-body { padding:2px 16px 14px; border-top:1px solid var(--ddf-focus-line,#eef0f3); }
+.ddf-acc-muted { margin-top:10px; padding:9px 12px; border-radius:8px; background:var(--ddf-focus-canvas,#fafbfc); font-size:12px; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); }
+.ddf-acc-task { margin-top:10px; border:1px solid var(--ddf-focus-line,#eef0f3); border-radius:8px; overflow:hidden; }
+.ddf-acc-task>summary { list-style:none; cursor:pointer; }
+.ddf-acc-task>summary::-webkit-details-marker { display:none; }
+.ddf-acc-task-head { display:flex; align-items:center; gap:8px; padding:10px 12px; font-size:12.5px; font-weight:600; }
+.ddf-acc-task-chev { flex:0 0 auto; margin-left:4px; width:11px; height:11px; border-right:2px solid #86909c; border-bottom:2px solid #86909c; transform:rotate(45deg); transition:transform .15s; }
+.ddf-acc-task[open]>summary .ddf-acc-task-chev { transform:rotate(-135deg); }
+.ddf-acc-task-body { padding:2px 12px 12px; border-top:1px solid var(--ddf-focus-line,#eef0f3); }
+.ddf-acc-dot { width:7px; height:7px; border-radius:50%; background:#c9cdd4; flex:0 0 auto; }
+.ddf-acc-dot[data-tone="green"] { background:var(--ddf-board-success,#1f9d55); }
+.ddf-acc-dot[data-tone="blue"] { background:var(--dsw-alias-state-business-primary,#1664ff); }
+.ddf-acc-dot[data-tone="amber"] { background:#d97706; }
+.ddf-acc-dot[data-tone="red"] { background:var(--ddf-board-error,#d14343); }
+.ddf-acc-pill { font-size:10.5px; padding:1px 7px; border-radius:999px; border:1px solid transparent; white-space:nowrap; }
+.ddf-acc-task-meta { margin-left:auto; font-weight:400; font-size:11px; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); text-align:right; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ddf-acc-criteria { border-collapse:collapse; font-size:11.5px; margin:8px 0 0; width:100%; }
+.ddf-acc-criteria th { text-align:left; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); font-weight:400; padding:6px 8px; border-bottom:1px solid var(--ddf-focus-line,#eef0f3); font-size:11px; }
+.ddf-acc-criteria td { padding:7px 8px; border-bottom:1px dashed var(--ddf-focus-line,#eef0f3); vertical-align:top; overflow-wrap:anywhere; }
+.ddf-acc-result-ok { color:var(--ddf-board-success,#128a45); font-weight:600; white-space:nowrap; }
+.ddf-acc-result-bad { color:var(--ddf-board-error,#d14343); font-weight:600; white-space:nowrap; }
+.ddf-acc-result-wait { color:var(--ddf-board-warning,#a35a00); font-weight:600; white-space:nowrap; }
+.ddf-acc-result-run { color:var(--dsw-alias-state-business-primary,#1664ff); font-weight:600; white-space:nowrap; }
+.ddf-acc-result- { color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); white-space:nowrap; }
+.ddf-acc-task-foot { margin:8px 0 0; font-size:11px; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); overflow-wrap:anywhere; }
+.ddf-acc-footnote { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; margin:14px 0 0; font-size:10.5px; color:var(--ddf-focus-muted,var(--dsw-alias-label-secondary,#646a73)); }
+/* One content column for the whole page. The sticky header keeps its own
+   gutter; every other block shares the same 880px column from .ddf-acc-body. */
+.ddf-focus-board { --ddf-acc-gutter:max(24px,calc((100% - 880px)/2)); }
+.ddf-focus-board>.ddf-acc-body { flex:none; min-width:0; padding:14px var(--ddf-acc-gutter) 24px; }
+.ddf-focus-board>.ddf-acc-body>.ddf-acc-conclusion { margin-top:0; }
+.ddf-focus-board>.ddf-board-load-issue,.ddf-focus-board>.ddf-board-inline-notice { margin-left:var(--ddf-acc-gutter); margin-right:var(--ddf-acc-gutter); }
+.ddf-acc-body>.ddf-focus-context { padding:0; border-bottom:0; }
+.ddf-acc-body .ddf-focus-stats { padding:8px 0; }
+.ddf-acc-body .ddf-focus-notices { padding:0; }
+.ddf-acc-body .ddf-focus-members { padding:12px 0; }
+.ddf-acc-body .ddf-focus-messages { max-width:none; padding:16px 0; }
+.ddf-acc-body .ddf-board-hero { display:block; margin:0 0 10px; padding:0; border:0; background:transparent; }
+.ddf-acc-body .ddf-board-hero .ddf-board-goal { font-size:13px; font-weight:500; }
+@container ddf-focus (max-width:900px) { .ddf-focus-board { --ddf-acc-gutter:16px; } }
+@container ddf-focus (max-width:720px) { .ddf-acc-grid { grid-template-columns:1fr; } .ddf-acc-head { flex-direction:column; } .ddf-acc-criteria th:nth-child(2),.ddf-acc-criteria td:nth-child(2) { display:none; } .ddf-acc-task-meta { display:none; } }
+`
+
+    /** Tone of the single page badge / conclusion card for a view state. */
+    function acceptanceViewTone(view) {
+      return { direct: 'blue', running: 'blue', completed: 'green', partial: 'amber', blocked: 'red', cancelled: 'gray', empty: 'gray', pending: 'gray', unknown: 'gray' }[view] || 'gray'
+    }
+
+    /** One task's real status, shared by the chips and the task cards. */
+    function acceptanceTaskState(t, task, plan) {
+      const status = task?.status || 'queued'
+      const key = { accepted: 'accepted', review: 'review', running: 'running', starting: 'running', queued: 'queued', planned: 'planned', cancelled: 'cancelled', failed: 'failed', blocked: 'blocked' }[status] || 'queued'
+      const tone = { accepted: 'green', review: 'amber', running: 'blue', queued: 'gray', planned: 'gray', cancelled: 'red', failed: 'red', blocked: 'red' }[key] || 'gray'
+      const dependency = key === 'queued' && (task.dependsOn ?? []).some(id => plan?.tasks?.some(item => item.id === id && item.status !== 'accepted'))
+      return { key, tone, label: t('acc.taskStatus.' + (dependency ? 'dependency' : key)) }
+    }
+
+    /** "Acceptance criteria → actual verification → result" rows for one task. */
+    function acceptanceTaskRows(t, task, plan) {
+      const criteria = task.criteria ?? [], checks = task.checks ?? [], findings = task.review?.findings ?? []
+      const status = task.status || 'queued', state = acceptanceTaskState(t, task, plan)
+      const time = value => Number.isFinite(value) ? new Date(value).toLocaleTimeString() : ''
+      const dependencies = (task.dependsOn ?? []).map(id => (plan?.tasks ?? []).find(item => item.id === id)?.title || id).join('、')
+      const fallback = () => {
+        if (state.key === 'review') return { verification: t('acc.verify.waiting'), result: t('acc.result.wait'), cls: 'wait' }
+        if (state.key === 'running') return { verification: t('acc.verify.running'), result: t('acc.result.running'), cls: 'run' }
+        if (state.key === 'queued' || state.key === 'planned') return { verification: dependencies ? fill(t('acc.verify.waitingDependency'), { tasks: dependencies }) : t('acc.verify.waiting'), result: t('acc.result.pending'), cls: '' }
+        if (['cancelled', 'failed', 'blocked'].includes(state.key)) return { verification: fill(t('acc.verify.stopped'), { reason: t('acc.result.stopped') }), result: t('acc.result.pending'), cls: '' }
+        return { verification: t('acc.verify.noCheck'), result: t('acc.result.wait'), cls: 'wait' }
+      }
+      const source = criteria.length ? criteria : checks.length ? checks.map(check => check.tool || t('acc.verify.tool')) : [t('acc.noCriteria')]
+      return source.map((criterion, index) => {
+        const check = checks[index], finding = findings.find(item => item.criterion === index)
+        let verification, result, cls
+        if (check?.result) {
+          verification = (check.tool || t('acc.verify.tool')) + (time(check.result.at) ? ' · ' + time(check.result.at) : '')
+            + (check.result.summary ? ' · ' + check.result.summary : '')
+          result = t(check.result.passed ? 'acc.result.passed' : 'acc.result.failed')
+          cls = check.result.passed ? 'ok' : 'bad'
+        } else if (finding) {
+          verification = t('acc.verify.review') + (finding.evidence?.length ? ' · ' + finding.evidence.join('、') : '')
+          result = t('acc.result.passed'); cls = 'ok'
+        } else if (status === 'accepted') {
+          verification = t('acc.verify.accepted'); result = t('acc.result.passed'); cls = 'ok'
+        } else {
+          const value = fallback(); verification = value.verification; result = value.result; cls = value.cls
+        }
+        return { name: /^C\d+\s/.test(String(criterion)) ? String(criterion) : 'C' + (index + 1) + ' ' + criterion, verification, result, cls }
+      })
+    }
+
+    /**
+     * Inline task accordion inside "Tasks and evidence". `open` is only a
+     * default for the first task: React does not re-apply an unchanged prop on
+     * later renders, so a user's manual open/close survives the 3-second poll.
+     * The three-column criteria table lives in the collapsed body.
+     */
+    function AcceptanceTaskCard({ t, task, plan, defaultOpen }) {
+      const state = acceptanceTaskState(t, task, plan)
+      const rows = acceptanceTaskRows(t, task, plan)
+      const route = task.modelRoute?.actual ?? task.modelRoute?.resolved ?? task.modelRoute?.requested ?? task.model
+      const audit = task.audit
+      const reviewed = audit?.status === 'completed' && audit.forAttempt === task.attempts && audit.specVerdict === 'pass' && audit.qualityVerdict === 'pass'
+      const reviewLabel = audit ? reviewed ? t('acc.task.reviewed') : t('audit.title') + ' · ' + t('audit.' + audit.status) : ''
+      const meta = [route?.model ? t('acc.task.worker') + ' ' + route.model : '', reviewLabel].filter(Boolean).join(' · ') || t('acc.task.noModel')
+      const outputs = (task.outputs ?? []).join('、')
+      const report = task.execution?.reportPath || task.audit?.execution?.reportPath
+      const foot = [outputs ? fill(t(task.status === 'accepted' ? 'acc.task.deliverables' : 'acc.task.planned'), { paths: outputs }) : '',
+        report ? fill(t('acc.task.report'), { path: report }) : ''].filter(Boolean).join(' · ')
+      const evidence = (task.review?.findings ?? []).flatMap(item => item.evidence ?? [])
+      return h('details', { className: 'ddf-acc-task', 'data-acceptance-task': task.id,
+        'data-status': task.status || 'queued', open: defaultOpen ? true : undefined },
+        h('summary', { className: 'ddf-acc-task-head' },
+          h('span', { className: 'ddf-acc-dot', 'data-tone': state.tone, 'aria-hidden': 'true' }),
+          h('strong', null, task.title || task.id),
+          h('span', { className: 'ddf-acc-pill', 'data-tone': state.tone }, state.label),
+          h('span', { className: 'ddf-acc-task-meta' }, meta),
+          h('span', { className: 'ddf-acc-task-chev', 'aria-hidden': 'true' })),
+        h('div', { className: 'ddf-acc-task-body' },
+          h('table', { className: 'ddf-acc-criteria' },
+            h('thead', null, h('tr', null, h('th', null, t('acc.criteria')), h('th', null, t('acc.verification')), h('th', null, t('acc.conclusion')))),
+            h('tbody', null, ...rows.map((row, index) => h('tr', { key: index },
+              h('td', null, row.name), h('td', null, row.verification),
+              h('td', null, h('span', { className: 'ddf-acc-result-' + (row.cls || 'wait') }, row.result)))))),
+          foot ? h('p', { className: 'ddf-acc-task-foot' }, foot) : null,
+          evidence.length ? h('p', { className: 'ddf-acc-task-foot' }, t('acc.task.evidence') + '：' + evidence.join('、')) : null))
+    }
+
+    /** One section of the conclusion card: files / evidence / list / key-values. */
+    function ConclusionSection({ t, section, artifactActions }) {
+      const label = h('div', { className: 'ddf-acc-label' }, section.label, Number.isFinite(section.count) ? ' ' + section.count : '')
+      let body
+      if (section.kind === 'files') {
+        body = h('div', null,
+          ...section.items.map((item, index) => h('div', { key: index, className: 'ddf-acc-file' },
+            h('code', null, item.path),
+            artifactActions?.copy ? h('button', { type: 'button', className: 'ddf-acc-mini', 'data-acc-copy': item.path,
+              onClick: () => artifactActions.copy(item.path) }, t('artifacts.copy')) : null)),
+          ...(!section.items.length ? [h('p', { className: 'ddf-acc-muted' }, t('acc.noFiles'))] : []))
+      } else if (section.kind === 'evidence') {
+        body = h('ul', { className: 'ddf-acc-ev' }, ...section.items.map((item, index) => h('li', { key: index },
+          h('span', { className: item.ok ? 'ddf-acc-ok' : 'ddf-acc-bad' }, item.ok ? '✓' : '✕'),
+          h('span', { className: 'ddf-acc-ev-name' }, item.name),
+          h('span', { className: 'ddf-acc-ev-meta' }, item.meta || ''))))
+      } else if (section.kind === 'list') {
+        body = h('ul', { className: 'ddf-acc-list' }, ...section.items.map((item, index) => h('li', { key: index },
+          h('span', { className: 'd' }, '!'), h('span', null, item))))
+      } else {
+        body = h('div', null, ...(section.rows ?? []).map(([key, value], index) => h('div', { key: index, className: 'ddf-acc-kv' },
+          h('span', { className: 'k' }, key), h('span', { className: 'v' }, value))))
+      }
+      return h('div', { className: 'ddf-acc-section', 'data-acc-section': section.kind }, label, body)
+    }
+
+    /**
+     * Build the whole L1 conclusion model for a view state. The heading, sub,
+     * receipt, chips, sections, next step and copied Markdown all come from this
+     * single object, and completed/partial data is taken from plan.completion.
+     */
+    function acceptanceConclusionOf(t, view, ctx) {
+      const { plan, session, request, decision, execution, tasks } = ctx
+      const receipt = plan?.completion
+      const accepted = tasks.filter(task => task.status === 'accepted').length
+      const returned = tasks.filter(task => ['review', 'accepted'].includes(task.status)).length
+      const running = tasks.filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
+      const waiting = tasks.filter(task => task.status === 'queued' || task.audit?.status === 'queued').length
+      const review = tasks.filter(task => task.status === 'review' && !['queued', 'starting', 'running'].includes(task.audit?.status)).length
+      const timeText = value => Number.isFinite(value) ? new Date(value).toLocaleString() : ''
+      const receiptLabel = receipt?.id ? fill(t('acc.receiptLabel'), { id: shortId(receipt.id), time: timeText(receipt.at) }) : null
+      const files = (receipt?.deliverables ?? []).flatMap(item => item.paths ?? [])
+      const evidence = (receipt?.evidence ?? []).map(id => ({ ok: true, name: id, meta: '' }))
+      const unfinished = (receipt?.remaining ?? []).map(item => item.title + ' · ' + (item.reason || t('acc.result.wait')))
+      const chips = tasks.map(task => {
+        const state = acceptanceTaskState(t, task, plan)
+        return { tone: state.tone, label: (task.title || task.id) + ' · ' + state.label }
+      })
+      const model = { view, tone: acceptanceViewTone(view), icon: '·', heading: '', sub: '', line: '', receipt: null,
+        chips: null, sections: [], next: '', foot: '', markdown: '' }
+      const evidenceSection = { label: t('acc.evidence'), count: evidence.length, kind: 'evidence',
+        items: evidence.length ? evidence : [{ ok: true, name: t('acc.noEvidence'), meta: '' }] }
+      if (view === 'empty') Object.assign(model, { icon: '·', heading: t('acc.empty.heading'), line: t('acc.empty.line'), next: t('acc.empty.next'), foot: t('acc.empty.foot') })
+      else if (view === 'pending') Object.assign(model, { icon: '…', heading: t('acc.pending.heading'), line: t('acc.pending.line'), next: t('acc.pending.next'), foot: t('acc.pending.foot') })
+      else if (view === 'unknown') Object.assign(model, { icon: '?', heading: t('acc.unknown.heading'), line: t('acc.unknown.line'), next: t('acc.unknown.next'), foot: t('acc.unknown.foot') })
+      else if (view === 'direct') {
+        Object.assign(model, { tone: 'blue', icon: '→', heading: t('acc.direct.heading'), sub: t('acc.direct.sub'),
+          line: t('acc.direct.line'), next: t('acc.direct.next'), foot: t('acc.direct.foot') })
+        const calls = Number.isFinite(execution?.toolCalls) ? execution.toolCalls
+          : Number.isFinite(session?.turnStats?.direct) ? session.turnStats.direct : 0
+        const summaryRows = execution ? [
+          [t('acc.direct.calls'), fill(t('acc.direct.callsValue'), { count: calls })],
+          [t('acc.direct.unresolved'), fill(t('acc.direct.unresolvedValue'), { count: (execution.unresolvedChanges ?? []).length })],
+          [t('acc.direct.recentTool'), execution.lastResult ? liveToolLabel(t, execution.lastResult.tool) + (execution.lastResult.target ? ' · ' + execution.lastResult.target : '') : t('acc.direct.recentNone')]
+        ] : [[t('acc.direct.calls'), t('acc.direct.noExecution')]]
+        model.sections = [
+          { label: t('acc.direct.sectionDecision'), kind: 'kv', rows: [
+            [t('acc.direct.mode'), t('acc.direct.directMode')],
+            [t('acc.direct.reason'), decision?.reason || t('acc.direct.noReason')],
+            [t('acc.direct.request'), request?.text || plan?.source?.text || t('acc.direct.noRequest')] ] },
+          { label: t('acc.direct.sectionSummary'), kind: 'kv', rows: summaryRows }
+        ]
+      } else if (view === 'running') {
+        Object.assign(model, { tone: 'blue', icon: '…',
+          heading: fill(t('acc.running.heading'), { returned, total: tasks.length }),
+          sub: fill(t('acc.running.sub'), { total: tasks.length, running, waiting, review }),
+          line: t('acc.running.line'), next: t('acc.running.next'), foot: t('acc.running.foot'), chips })
+      } else if (view === 'completed') {
+        Object.assign(model, { tone: 'green', icon: '✓', heading: t('acc.completed.heading'),
+          sub: fill(t('acc.completed.sub'), { accepted: receipt?.accepted ?? accepted, total: receipt?.total ?? tasks.length, files: files.length }),
+          line: t('acc.completed.line'), next: t('acc.completed.next'), foot: t('acc.completed.foot'), receipt: receiptLabel })
+        model.sections = [{ label: t('acc.files'), count: files.length, kind: 'files', items: files.map(path => ({ path })) }, evidenceSection]
+      } else if (view === 'partial') {
+        Object.assign(model, { tone: 'amber', icon: '!', heading: fill(t('acc.partial.heading'), { accepted: receipt?.accepted ?? accepted, total: receipt?.total ?? tasks.length }),
+          sub: receiptLabel, line: t('acc.partial.line'), next: t('acc.partial.next'), foot: t('acc.partial.foot'), chips })
+        model.sections = [
+          { label: t('acc.unfinished'), kind: 'list', items: unfinished.length ? unfinished : [t('acc.result.wait')] },
+          { label: t('acc.files'), count: files.length, kind: 'files', items: files.map(path => ({ path })) }, evidenceSection ]
+      } else if (view === 'blocked') {
+        Object.assign(model, { tone: 'red', icon: '!', heading: t('acc.blocked.heading'), sub: receiptLabel,
+          line: t('acc.blocked.line'), next: t('acc.blocked.next'), foot: t('acc.blocked.foot'), chips })
+        model.sections = [{ label: t('acc.unfinished'), kind: 'list', items: unfinished.length ? unfinished : [t('acc.result.wait')] },
+          { label: t('acc.files'), count: files.length, kind: 'files', items: files.map(path => ({ path })) }]
+      } else if (view === 'cancelled') {
+        Object.assign(model, { tone: 'gray', icon: '·', heading: t('acc.cancelled.heading'), sub: receiptLabel,
+          line: t('acc.cancelled.line'), next: t('acc.cancelled.next'), foot: t('acc.cancelled.foot') })
+        const unaccepted = tasks.filter(task => task.status !== 'accepted').map(task => (task.title || task.id) + ' · ' + acceptanceTaskState(t, task, plan).label)
+        model.sections = [{ label: t('acc.unfinished'), kind: 'list', items: unaccepted.length ? unaccepted : (unfinished.length ? unfinished : [t('acc.result.wait')]) }]
+      }
+      // The copy button writes exactly the receipt-backed facts shown above.
+      const lines = ['## ' + (model.heading || t('acc.copyHeading'))]
+      if (model.sub) lines.push(model.sub)
+      if (model.receipt) lines.push(model.receipt)
+      if (model.line) lines.push(model.line)
+      for (const section of model.sections) {
+        lines.push('', '### ' + section.label + (Number.isFinite(section.count) ? ' (' + section.count + ')' : ''))
+        if (section.kind === 'files') for (const item of section.items) lines.push('- `' + item.path + '`')
+        else if (section.kind === 'evidence') for (const item of section.items) lines.push('- ' + (item.ok ? '✓' : '✕') + ' ' + item.name + (item.meta ? ' · ' + item.meta : ''))
+        else if (section.kind === 'list') for (const item of section.items) lines.push('- ' + item)
+        else for (const [key, value] of section.rows ?? []) lines.push('- **' + key + '**：' + value)
+      }
+      lines.push('', '> ' + t('view.next') + '：' + model.next)
+      if (model.foot) lines.push('', model.foot)
+      model.markdown = lines.join('\n')
+      return model
+    }
+
+    /**
+     * CompletionReceipt is the shared conclusion-card shell (P0). With a
+     * `conclusion` model it renders the L1 card; without one it keeps the
+     * original chat receipt markup, which the notification area still uses.
+     */
+    function CompletionReceipt({ t, plan, state, conclusion, artifactActions, stats }) {
+      if (conclusion) {
+        const sections = conclusion.sections ?? []
+        const grid = sections.length ? h('div', { className: 'ddf-acc-grid', 'data-single': sections.length === 1 ? 'true' : 'false' },
+          ...sections.map((section, index) => h(ConclusionSection, { key: index, t, section, artifactActions }))) : null
+        const chips = conclusion.chips?.length ? h('div', { className: 'ddf-acc-chips', 'data-acc-chips': '' },
+          ...conclusion.chips.map((chip, index) => h('span', { key: index, className: 'ddf-acc-chip', 'data-tone': chip.tone }, chip.label))) : null
+        return h('section', { className: 'ddf-acc-conclusion', 'data-acceptance-conclusion': conclusion.view, 'data-tone': conclusion.tone, role: 'status' },
+          h('div', { className: 'ddf-acc-head' },
+            h('div', null,
+              h('div', { className: 'ddf-acc-title' }, h('span', { className: 'ddf-acc-icon' }, conclusion.icon), conclusion.heading,
+                conclusion.sub ? h('span', { className: 'ddf-acc-sub' }, conclusion.sub) : null),
+              conclusion.line ? h('p', { className: 'ddf-acc-line' }, conclusion.line) : null),
+            conclusion.receipt ? h('span', { className: 'ddf-acc-receipt', 'data-acc-receipt': '' }, conclusion.receipt) : null),
+          chips, stats, grid,
+          h('div', { className: 'ddf-acc-next', 'data-acc-next': '' }, h('b', null, t('view.next')), conclusion.next),
+          conclusion.foot ? h('p', { className: 'ddf-acc-foot' }, conclusion.foot) : null)
+      }
       const receipt = plan?.completion
       const cleanup = plan?.cancellation?.cleanup ?? receipt?.cleanup
       const pending = cleanup && cleanup.status !== 'completed'
@@ -2507,6 +2856,9 @@ window.__ModuleLoader__.load({
       'focus.tasks': '任务详情', 'focus.close': '收起任务详情', 'focus.context': '需求与主控判断', 'focus.member': '按成员筛选',
       'focus.latest': '回到最新活动', 'focus.details': '查看报告与验收依据', 'focus.passed': '验证通过', 'focus.failed': '验证失败',
       'focus.more': '查看更多（还有 {count} 条）',
+      'focus.direct': '主控直接处理', 'focus.delegated': '子代理协作', 'focus.preparing': '主控准备中', 'focus.unrecorded': '执行方式待记录',
+      'focus.decisionReason': '查看完整判断依据', 'focus.resultShown': '结果已展示，内容待核对', 'focus.present': '展示结果',
+      'focus.current': '当前', 'focus.resultPending': '工具已有结果，待核对', 'focus.readonly': '只读查看',
       'artifacts.title': '交付物与报告', 'artifacts.output': '计划交付文件', 'artifacts.workerReport': '执行报告', 'artifacts.reviewReport': '独立审查报告',
       'artifacts.planned': '计划交付，尚未提交报告', 'artifacts.reported': '已提交报告，待验收', 'artifacts.accepted': '主控已验收',
       'artifacts.stopped': '任务已停止，未验收', 'artifacts.empty': '尚未记录交付文件或报告路径',
@@ -2524,11 +2876,171 @@ window.__ModuleLoader__.load({
       'focus.tasks': 'Task details', 'focus.close': 'Close task details', 'focus.context': 'Request and coordinator decision', 'focus.member': 'Filter by member',
       'focus.latest': 'Latest activity', 'focus.details': 'View report and acceptance evidence', 'focus.passed': 'Verification passed', 'focus.failed': 'Verification failed',
       'focus.more': 'Show more ({count} earlier records)',
+      'focus.direct': 'Coordinator handling directly', 'focus.delegated': 'Sub-agent collaboration', 'focus.preparing': 'Coordinator preparing', 'focus.unrecorded': 'Execution not recorded yet',
+      'focus.decisionReason': 'Read the full decision', 'focus.resultShown': 'Result displayed; content needs verification', 'focus.present': 'Display result',
+      'focus.current': 'Current', 'focus.resultPending': 'Tool results awaiting verification', 'focus.readonly': 'Read-only view',
       'artifacts.title': 'Deliverables and reports', 'artifacts.output': 'Planned output file', 'artifacts.workerReport': 'Worker report', 'artifacts.reviewReport': 'Independent review report',
       'artifacts.planned': 'Planned; no report submitted', 'artifacts.reported': 'Report submitted; awaiting acceptance', 'artifacts.accepted': 'Accepted by coordinator',
       'artifacts.stopped': 'Stopped without acceptance', 'artifacts.empty': 'No output or report paths recorded yet',
       'artifacts.locationUnknown': 'The full directory was not recorded; original path shown.', 'artifacts.note': 'A planned path does not confirm a file exists. Delivery is confirmed by coordinator acceptance.',
       'artifacts.copy': 'Copy path', 'artifacts.copied': 'Copied', 'artifacts.copyFailed': 'Copy failed. Select the path and copy it manually.',
+    })
+
+    // -----------------------------------------------------------------------
+    // P0 acceptance view copy. All strings exist in zh and en; the state table
+    // below is keyed by the single value returned by acceptanceViewOf().
+    // -----------------------------------------------------------------------
+    Object.assign(zh, {
+      'acc.eyebrow': '本次需求', 'acc.readonly': '只读',
+      'acc.badge.empty': '尚无需求记录', 'acc.badge.pending': '待确认需求归属', 'acc.badge.direct': '主控直接执行',
+      'acc.badge.running': '执行中', 'acc.badge.completed': '已完成', 'acc.badge.partial': '部分完成，其余未验收',
+      'acc.badge.blocked': '尚未完成，已阻塞', 'acc.badge.cancelled': '已取消（未验收）', 'acc.badge.unknown': '记录未完整',
+      'acc.requestMessage': '需求消息 #{id}', 'acc.receiptMeta': '回执 #{id}', 'acc.lastRead': '最后读取 {time}',
+      'acc.copyConclusion': '复制结论', 'acc.copyDone': '结论已复制', 'acc.copyFailed': '复制失败，请选中内容手动复制',
+      'acc.empty.heading': '当前会话还没有需求记录', 'acc.empty.line': '主控收到需求后，这里会显示本次需求的判断、任务与验收结论。',
+      'acc.empty.next': '回到聊天开始一个新需求。', 'acc.empty.foot': '本页只读，不提供输入框或派发操作。',
+      'acc.pending.heading': '等待确认需求归属', 'acc.pending.line': '这条消息与当前需求的关联尚未确认，暂不显示验收结论。',
+      'acc.pending.next': '回到聊天核对需求归属；确认后这里会显示对应的判断与任务。', 'acc.pending.foot': '本页只读；关联确认以主控记录为准。',
+      'acc.unknown.heading': '记录未完整', 'acc.unknown.line': '当前会话的需求记录不足以给出验收结论，可能是历史会话或记录未保留。',
+      'acc.unknown.next': '回到聊天核对当前需求；如需归档可「整理与导出」。', 'acc.unknown.foot': '结论只能来自程序回执，不由报告或工具返回推断。',
+      'acc.direct.heading': '主控直接完成', 'acc.direct.sub': '本次需求未建立托管计划',
+      'acc.direct.line': '主控按上下文判断直接处理；以下是已记录的执行摘要，不产生托管验收回执。',
+      'acc.direct.next': '内容已在聊天核验；如需回看过程，展开下方协作动态；如需长期归档，可「整理与导出」。',
+      'acc.direct.foot': '直接执行不产生托管验收回执，不能替代对文件内容的确认。',
+      'acc.direct.sectionDecision': '主控判断', 'acc.direct.sectionSummary': '执行摘要',
+      'acc.direct.mode': '执行方式', 'acc.direct.reason': '判断理由', 'acc.direct.request': '需求原文',
+      'acc.direct.calls': '业务操作', 'acc.direct.unresolved': '未解决修改', 'acc.direct.recentTool': '最近工具',
+      'acc.direct.directMode': 'direct · 主控直接处理', 'acc.direct.noExecution': '本次执行记录未保留操作计数',
+      'acc.direct.noReason': '主控未记录判断理由', 'acc.direct.noRequest': '未记录需求原文',
+      'acc.direct.callsValue': '{count} 次', 'acc.direct.unresolvedValue': '{count} 项', 'acc.direct.recentNone': '尚未记录工具返回',
+      'acc.running.heading': '执行中 · 已返回 {returned}/{total}',
+      'acc.running.sub': '任务 {total} · 执行中 {running} · 等待 {waiting} · 待验收 {review}',
+      'acc.running.line': '主控正在等待执行者提交报告；报告返回后会实际验证并逐条验收。',
+      'acc.running.next': '等待执行者返回报告；主控验证后会在这里显示验收结论。补充要求请在聊天发送。',
+      'acc.running.foot': '本页只读，每 3 秒读取一次；页面进度不会推进主控动作。',
+      'acc.completed.heading': '已完成', 'acc.completed.sub': '已验收 {accepted}/{total} · {files} 个产物已交付',
+      'acc.completed.line': '主控已逐条验证并验收全部任务，交付文件与验收依据见下方。',
+      'acc.completed.next': '无需处理。结果已在聊天交付；如需归档，可「整理与导出」。',
+      'acc.completed.foot': '最终结论以程序回执为准。',
+      'acc.partial.heading': '部分完成 · 已验收 {accepted}/{total}',
+      'acc.partial.line': '主控在本次验收中未完成全部任务；其余任务未验收或已停止。',
+      'acc.partial.next': '回到聊天处理未完成项；处理完成后主控会重新验证并生成新回执。',
+      'acc.partial.foot': '未完成项不计入交付；最终结论以程序回执为准。',
+      'acc.blocked.heading': '尚未完成，已阻塞', 'acc.blocked.line': '部分任务受阻，程序回执记录了未完成项与原因。',
+      'acc.blocked.next': '回到聊天处理阻塞原因；处理后由主控明确重试并生成新回执。', 'acc.blocked.foot': '最终结论以程序回执为准。',
+      'acc.cancelled.heading': '已取消（未验收）', 'acc.cancelled.line': '计划已取消，以下任务未验收；取消来源见回执详情。',
+      'acc.cancelled.next': '回到聊天核对取消原因；如需继续请让主控新建计划。', 'acc.cancelled.foot': '未验收任务不计入交付。',
+      'acc.files': '交付文件', 'acc.evidence': '验收依据', 'acc.unfinished': '未完成项',
+      'acc.receiptLabel': '回执 #{id} · {time}', 'acc.noReceipt': '尚未生成 · 全部任务通过验收后由程序生成',
+      'acc.receiptFoldHint': '尚无验收回执：全部任务通过验收后由程序生成。', 'acc.noFiles': '回执未记录交付文件',
+      'acc.noEvidence': '回执未记录验证证据 id', 'acc.copyHeading': '任务验收结论',
+      'acc.fold.tasks': '任务与证据', 'acc.fold.decision': '主控判断与执行安排', 'acc.fold.receipt': '验收回执详情',
+      'acc.fold.diagnostics': '运行诊断', 'acc.fold.feed': '协作动态', 'acc.feedMeta': '最近 20 条 · 完整过程看 Fleet',
+      'acc.decisionMeta.direct': 'direct · 直接处理', 'acc.decisionMeta.delegate': '委派（delegate）· 并行 {count} 项',
+      'acc.decisionMeta.unknown': '执行方式尚未记录', 'acc.diagnosticsMeta': '只读 · 策略已生效',
+      'acc.noManagedTasks': '本次需求没有托管任务', 'acc.tasksMeta': '{count} 项 · {summary}',
+      'acc.summary.accepted': '已验收 {count}', 'acc.summary.running': '执行中 {count}', 'acc.summary.waiting': '等待 {count}',
+      'acc.summary.review': '待验收 {count}', 'acc.summary.allAccepted': '全部已验收',
+      'acc.noTasksHint': '主控没有建立托管子代理计划，因此没有任务验收标准与验收记录。直接执行的操作记录见「协作动态」。',
+      'acc.criteria': '验收标准', 'acc.verification': '实际验证', 'acc.conclusion': '结论',
+      'acc.result.passed': '✓ 通过', 'acc.result.failed': '✕ 未通过', 'acc.result.wait': '待验证',
+      'acc.result.running': '进行中', 'acc.result.pending': '未开始', 'acc.result.stopped': '已停止',
+      'acc.verify.waiting': '等待主控实际验证', 'acc.verify.running': '执行中，尚未提交报告',
+      'acc.verify.waitingDependency': '等待前置任务：{tasks}', 'acc.verify.stopped': '未执行：{reason}',
+      'acc.verify.noCheck': '尚未记录实际验证', 'acc.verify.review': '主控验收记录', 'acc.verify.accepted': '主控已逐条验证并验收',
+      'acc.verify.tool': '工具', 'acc.noCriteria': '未记录验收标准',
+      'acc.taskStatus.accepted': '已验收', 'acc.taskStatus.review': '待验收', 'acc.taskStatus.running': '执行中',
+      'acc.taskStatus.queued': '待派单', 'acc.taskStatus.dependency': '等待前置', 'acc.taskStatus.cancelled': '已取消', 'acc.taskStatus.failed': '执行失败',
+      'acc.taskStatus.blocked': '已阻塞', 'acc.taskStatus.planned': '未开始',
+      'acc.task.worker': '执行者', 'acc.task.reviewed': '独立审查通过', 'acc.task.noModel': '未记录执行模型',
+      'acc.task.deliverables': '交付：{paths}', 'acc.task.planned': '计划交付：{paths}',
+      'acc.task.report': '报告：{path}', 'acc.task.evidence': '证据',
+      'acc.decisionSummary': '判断与执行安排', 'acc.execModel': '执行模型', 'acc.auditMode': '审查方式',
+      'acc.attempts': '启动尝试', 'acc.modeDirectDetail': '主控直接处理', 'acc.modeDelegateDetail': '子代理协作',
+      'acc.receiptRows.id': '回执编号', 'acc.receiptRows.at': '生成时间', 'acc.receiptRows.outcome': '验收结果',
+      'acc.receiptRows.evidence': '证据 id', 'acc.receiptRows.deliverables': '交付数', 'acc.receiptRows.cleanup': '清理状态',
+      'acc.receiptRows.released': '子代理已全部释放', 'acc.receiptRows.pending': '取消已请求，资源清理未完成',
+      'acc.receiptRows.none': '无', 'acc.footnote': '只读 · 每 3 秒读取当前会话 · 不提供签收或控制',
+      'acc.footnoteLinks': '完整过程：Fleet · 整理导出：Share',
+    })
+    Object.assign(en, {
+      'acc.eyebrow': 'This request', 'acc.readonly': 'Read-only',
+      'acc.badge.empty': 'No request recorded', 'acc.badge.pending': 'Request attribution pending', 'acc.badge.direct': 'Coordinator executed directly',
+      'acc.badge.running': 'In progress', 'acc.badge.completed': 'Completed', 'acc.badge.partial': 'Partially completed, rest not accepted',
+      'acc.badge.blocked': 'Incomplete, blocked', 'acc.badge.cancelled': 'Cancelled (not accepted)', 'acc.badge.unknown': 'Incomplete record',
+      'acc.requestMessage': 'Request message #{id}', 'acc.receiptMeta': 'Receipt #{id}', 'acc.lastRead': 'Last read {time}',
+      'acc.copyConclusion': 'Copy conclusion', 'acc.copyDone': 'Conclusion copied', 'acc.copyFailed': 'Copy failed. Select the text and copy manually.',
+      'acc.empty.heading': 'This conversation has no request recorded', 'acc.empty.line': 'Once the coordinator receives a request, its decision, tasks and acceptance conclusion appear here.',
+      'acc.empty.next': 'Return to chat and start a new request.', 'acc.empty.foot': 'This page is read-only; no input box or dispatch action.',
+      'acc.pending.heading': 'Waiting for request attribution', 'acc.pending.line': 'The link between this message and the current request is not confirmed yet, so no conclusion is shown.',
+      'acc.pending.next': 'Return to chat to confirm the request attribution; its decision and tasks then appear here.',
+      'acc.pending.foot': 'This page is read-only; the coordinator record decides the attribution.',
+      'acc.unknown.heading': 'Incomplete record', 'acc.unknown.line': 'This conversation does not retain enough records for an acceptance conclusion; it may be a historical session.',
+      'acc.unknown.next': 'Return to chat to check the current request; use Summarize and export to archive.',
+      'acc.unknown.foot': 'Only the program receipt can produce a conclusion, never a report or tool output.',
+      'acc.direct.heading': 'Completed directly by the coordinator', 'acc.direct.sub': 'No managed plan was created for this request',
+      'acc.direct.line': 'The coordinator handled this from context; the recorded execution summary follows. Direct execution produces no managed acceptance receipt.',
+      'acc.direct.next': 'The content was verified in chat. Expand collaboration activity below to review the process, or use Summarize and export to archive.',
+      'acc.direct.foot': 'Direct execution produces no managed acceptance receipt and cannot replace checking the file contents.',
+      'acc.direct.sectionDecision': 'Coordinator decision', 'acc.direct.sectionSummary': 'Execution summary',
+      'acc.direct.mode': 'Execution', 'acc.direct.reason': 'Reason', 'acc.direct.request': 'Original request',
+      'acc.direct.calls': 'Business operations', 'acc.direct.unresolved': 'Unresolved edits', 'acc.direct.recentTool': 'Latest tool',
+      'acc.direct.directMode': 'direct · handled by the coordinator', 'acc.direct.noExecution': 'This execution did not retain an operation count',
+      'acc.direct.noReason': 'No decision reason recorded', 'acc.direct.noRequest': 'No original request recorded',
+      'acc.direct.callsValue': '{count}', 'acc.direct.unresolvedValue': '{count}', 'acc.direct.recentNone': 'No tool result recorded',
+      'acc.running.heading': 'In progress · {returned}/{total} returned',
+      'acc.running.sub': 'Tasks {total} · running {running} · waiting {waiting} · awaiting acceptance {review}',
+      'acc.running.line': 'The coordinator is waiting for worker reports; once they return it verifies and accepts each task.',
+      'acc.running.next': 'Wait for the worker report; the coordinator will show its acceptance conclusion here. Send any extra requirements in chat.',
+      'acc.running.foot': 'This page is read-only and refreshes every 3 seconds; it never advances coordinator actions.',
+      'acc.completed.heading': 'Completed', 'acc.completed.sub': '{accepted}/{total} accepted · {files} deliverables',
+      'acc.completed.line': 'The coordinator verified and accepted every task; deliverables and acceptance evidence are below.',
+      'acc.completed.next': 'Nothing to do. The result was delivered in chat; use Summarize and export to archive.',
+      'acc.completed.foot': 'The final conclusion comes from the program receipt.',
+      'acc.partial.heading': 'Partially completed · {accepted}/{total} accepted',
+      'acc.partial.line': 'The coordinator did not accept every task in this run; the rest are unaccepted or stopped.',
+      'acc.partial.next': 'Return to chat to handle the unfinished work; the coordinator will re-verify and generate a new receipt.',
+      'acc.partial.foot': 'Unfinished work is not delivered; the program receipt is final.',
+      'acc.blocked.heading': 'Incomplete, blocked', 'acc.blocked.line': 'Some tasks are blocked; the program receipt records the unfinished work and its cause.',
+      'acc.blocked.next': 'Return to chat to resolve the cause; the coordinator then retries explicitly and generates a new receipt.',
+      'acc.blocked.foot': 'The final conclusion comes from the program receipt.',
+      'acc.cancelled.heading': 'Cancelled (not accepted)', 'acc.cancelled.line': 'The plan was cancelled; the tasks below were not accepted. See receipt details for the source.',
+      'acc.cancelled.next': 'Return to chat to check the cancellation; ask the coordinator for a new plan to continue.',
+      'acc.cancelled.foot': 'Unaccepted tasks are not delivered.',
+      'acc.files': 'Deliverables', 'acc.evidence': 'Acceptance evidence', 'acc.unfinished': 'Unfinished work',
+      'acc.receiptLabel': 'Receipt #{id} · {time}', 'acc.noReceipt': 'Not generated · produced once every task passes acceptance',
+      'acc.receiptFoldHint': 'No receipt yet: it is produced once every task passes acceptance.',
+      'acc.noFiles': 'The receipt records no deliverables', 'acc.noEvidence': 'The receipt records no evidence ids',
+      'acc.copyHeading': 'Task acceptance conclusion',
+      'acc.fold.tasks': 'Tasks and evidence', 'acc.fold.decision': 'Coordinator decision and execution',
+      'acc.fold.receipt': 'Receipt details', 'acc.fold.diagnostics': 'Runtime diagnostics', 'acc.fold.feed': 'Collaboration activity',
+      'acc.feedMeta': 'Latest 20 records · full process in Fleet',
+      'acc.decisionMeta.direct': 'direct · handled directly', 'acc.decisionMeta.delegate': 'Delegate · {count} parallel',
+      'acc.decisionMeta.unknown': 'Execution not recorded', 'acc.diagnosticsMeta': 'Read-only · policy active',
+      'acc.noManagedTasks': 'This request has no managed tasks', 'acc.tasksMeta': '{count} tasks · {summary}',
+      'acc.summary.accepted': '{count} accepted', 'acc.summary.running': '{count} running', 'acc.summary.waiting': '{count} waiting',
+      'acc.summary.review': '{count} awaiting acceptance', 'acc.summary.allAccepted': 'all accepted',
+      'acc.noTasksHint': 'The coordinator created no managed child-agent plan, so there are no acceptance criteria or records. Direct execution activity is in Collaboration activity.',
+      'acc.criteria': 'Acceptance criteria', 'acc.verification': 'Actual verification', 'acc.conclusion': 'Result',
+      'acc.result.passed': '✓ Passed', 'acc.result.failed': '✕ Failed', 'acc.result.wait': 'Awaiting verification',
+      'acc.result.running': 'In progress', 'acc.result.pending': 'Not started', 'acc.result.stopped': 'Stopped',
+      'acc.verify.waiting': 'Awaiting actual coordinator verification', 'acc.verify.running': 'Running; report not submitted',
+      'acc.verify.waitingDependency': 'Waiting for prerequisite: {tasks}', 'acc.verify.stopped': 'Not executed: {reason}',
+      'acc.verify.noCheck': 'No actual verification recorded', 'acc.verify.review': 'Coordinator acceptance record',
+      'acc.verify.accepted': 'Verified and accepted by the coordinator', 'acc.verify.tool': 'tool', 'acc.noCriteria': 'No acceptance criteria recorded',
+      'acc.taskStatus.accepted': 'Accepted', 'acc.taskStatus.review': 'Awaiting acceptance', 'acc.taskStatus.running': 'Running',
+      'acc.taskStatus.queued': 'Queued', 'acc.taskStatus.dependency': 'Waiting for prerequisite', 'acc.taskStatus.cancelled': 'Cancelled', 'acc.taskStatus.failed': 'Failed',
+      'acc.taskStatus.blocked': 'Blocked', 'acc.taskStatus.planned': 'Not started',
+      'acc.task.worker': 'Worker', 'acc.task.reviewed': 'Independent review passed', 'acc.task.noModel': 'No worker model recorded',
+      'acc.task.deliverables': 'Delivered: {paths}', 'acc.task.planned': 'Planned: {paths}',
+      'acc.task.report': 'Report: {path}', 'acc.task.evidence': 'Evidence',
+      'acc.decisionSummary': 'Decision and execution', 'acc.execModel': 'Worker model', 'acc.auditMode': 'Review mode',
+      'acc.attempts': 'Startup attempts', 'acc.modeDirectDetail': 'handled by the coordinator', 'acc.modeDelegateDetail': 'child-agent collaboration',
+      'acc.receiptRows.id': 'Receipt ID', 'acc.receiptRows.at': 'Generated at', 'acc.receiptRows.outcome': 'Outcome',
+      'acc.receiptRows.evidence': 'Evidence ids', 'acc.receiptRows.deliverables': 'Deliverables', 'acc.receiptRows.cleanup': 'Cleanup',
+      'acc.receiptRows.released': 'All child agents released', 'acc.receiptRows.pending': 'Cancellation requested; cleanup incomplete',
+      'acc.receiptRows.none': 'None', 'acc.footnote': 'Read-only · reads this conversation every 3 seconds · no sign-off or control',
+      'acc.footnoteLinks': 'Full process: Fleet · Export: Share',
     })
 
     function collaborationRecords(t, plan, session) {
@@ -2538,18 +3050,20 @@ window.__ModuleLoader__.load({
       const execution = request?.messageId && session?.execution?.requestId && session.execution.requestId !== request.messageId ? null : session?.execution
       const members = [{ id: 'coordinator', name: t('focus.coordinator'), role: t('focus.coordinator'), model: execution?.model?.model || decision?.model?.model }]
       const records = new Map()
-      const add = (id, member, source, text, at, taskId, detail) => {
-        if (text) records.set(id, { id, member, source, text, at: Number.isFinite(at) ? at : null, taskId, detail })
+      const add = (id, member, source, text, at, taskId, detail, title) => {
+        if (text) records.set(id, { id, member, source, text, at: Number.isFinite(at) ? at : null, taskId, detail, title })
       }
       add('request:' + (request?.messageId || ''), 'user', 'request', request?.text, request?.at)
-      if (decision) add('decision:' + (decision.revisionId || decision.at || ''), 'coordinator', 'decision', decision.reason, decision.at)
-      const activityText = activity => activity?.kind === 'tool' ? liveToolLabel(t, activity.tool)
+      if (decision) add('decision:' + (decision.revisionId || decision.at || ''), 'coordinator', 'decision', decision.reason, decision.at,
+        undefined, undefined, t(decision.mode === 'direct' ? 'focus.direct' : 'decision.' + decision.mode))
+      const toolLabel = tool => tool === 'present' ? t('focus.present') : liveToolLabel(t, tool, true)
+      const activityText = activity => activity?.kind === 'tool' ? toolLabel(activity.tool)
         : activity?.kind ? t('supervision.activity.' + activity.kind) : ''
       if (execution?.running) add('coordinator:activity', 'coordinator', 'activity', activityText(execution.activity), execution.activity?.at)
       if (execution?.lastResult) {
         const result = execution.lastResult
-        add('coordinator:result:' + result.at, 'coordinator', 'tool', liveToolLabel(t, result.tool) + (result.target ? ' · ' + result.target : '')
-          + ' · ' + t(result.failed ? 'focus.toolFailed' : 'focus.toolReturned'), result.at)
+        add('coordinator:result:' + result.at, 'coordinator', 'tool', toolLabel(result.tool) + (result.target ? ' · ' + result.target : '')
+          + ' · ' + t(result.failed ? 'focus.toolFailed' : result.tool === 'present' ? 'focus.resultShown' : 'focus.toolReturned'), result.at)
       }
       for (const failure of execution?.unresolvedChanges ?? []) add('coordinator:issue:' + failure.callId, 'coordinator', 'issue', failure.reason, failure.at)
       for (const task of plan?.tasks ?? []) {
@@ -2560,9 +3074,9 @@ window.__ModuleLoader__.load({
           const supervision = target.supervision, live = !['accepted', 'cancelled'].includes(task.status) && ['starting', 'running'].includes(target.status)
           if (Number.isFinite(supervision?.startedAt)) add(prefix + 'started', id, 'started', task.title || task.id, supervision.startedAt, task.id)
           for (const evidence of supervision?.evidence ?? []) add(prefix + 'tool:' + (evidence.callId || evidence.tool + ':' + evidence.at), id, 'tool',
-            liveToolLabel(t, evidence.tool) + ' · ' + t(evidence.failed ? 'focus.toolFailed' : 'focus.toolReturned'), evidence.at, task.id)
+            toolLabel(evidence.tool) + ' · ' + t(evidence.failed ? 'focus.toolFailed' : 'focus.toolReturned'), evidence.at, task.id)
           if (target.progress?.tool && !(supervision?.evidence ?? []).some(item => item.tool === target.progress.tool && item.at === target.progress.at))
-            add(prefix + 'progress:' + target.progress.at, id, 'tool', liveToolLabel(t, target.progress.tool) + ' · ' + t(target.progress.failed ? 'focus.toolFailed' : 'focus.toolReturned'), target.progress.at, task.id)
+            add(prefix + 'progress:' + target.progress.at, id, 'tool', toolLabel(target.progress.tool) + ' · ' + t(target.progress.failed ? 'focus.toolFailed' : 'focus.toolReturned'), target.progress.at, task.id)
           if (live) add(prefix + 'activity', id, 'activity', target.execution ? t('supervision.reporting') : activityText(supervision?.activity) || t('live.unknown'), supervision?.activity?.at, task.id)
           if (supervision?.checkpoint) add(prefix + 'checkpoint', id, 'checkpoint', supervision.checkpoint.summary, supervision.checkpoint.at, task.id)
           if (target.execution || target.report) add(prefix + 'report', id, role === 'reviewer' ? 'auditReport' : 'report', target.execution?.summary || target.report,
@@ -2647,13 +3161,20 @@ window.__ModuleLoader__.load({
             const actor = members.find(item => item.id === record.member) ?? { name: t('focus.user'), role: t('focus.user') }
             const task = plan?.tasks?.find(item => item.id === record.taskId)
             const source = record.source === 'report' ? task?.status === 'accepted' ? 'reportAccepted' : task?.status === 'cancelled' ? 'reportStopped' : 'report' : record.source
-            return h('article', { key: record.id, className: 'ddf-focus-message', 'data-feed-entry': record.id, 'data-member': record.member, 'data-source': record.source },
+            const compact = ['tool', 'activity', 'started', 'waiting'].includes(record.source)
+            const longReason = record.source === 'decision' && record.text.length > 160
+            const preview = longReason ? record.text.slice(0, 96).split(/(?<=[。！？])\s*/)[0] + (record.text.length > 96 ? '…' : '') : record.text
+            return h('article', { key: record.id, className: 'ddf-focus-message', 'data-feed-entry': record.id, 'data-member': record.member, 'data-source': record.source, 'data-compact': compact },
               h('span', { className: 'ddf-focus-avatar', 'aria-hidden': 'true' }, actor.role?.slice(0, 1)),
               h('div', { className: 'ddf-focus-message-main' },
                 h('div', { className: 'ddf-focus-byline' }, h('strong', null, actor.role + (actor.taskId ? ' · ' + actor.name : '')),
-                  actor.model ? h('span', null, actor.model) : null,
+                  actor.model ? h('span', { className: 'ddf-focus-model' }, actor.model) : null,
                   record.at !== null ? h('time', { dateTime: new Date(record.at).toISOString() }, new Date(record.at).toLocaleTimeString()) : null),
-                h('div', { className: 'ddf-focus-bubble' }, record.text),
+                h('div', { className: 'ddf-focus-bubble' },
+                  record.title ? h('strong', { className: 'ddf-focus-conclusion' }, record.title) : null,
+                  h('div', { className: 'ddf-focus-text' }, preview),
+                  longReason ? h('details', { className: 'ddf-focus-reason', 'data-decision-reason': '' },
+                    h('summary', null, t('focus.decisionReason')), h('p', null, record.text)) : null),
                 h('small', { className: 'ddf-focus-source' }, t('focus.' + source), actor.modelState ? ' · ' + t(actor.modelState) : ''),
                 ['report', 'auditReport'].includes(record.source) ? !selectedTask && task ? h(TaskArtifacts, { t, plan, task,
                   role: record.source === 'auditReport' ? 'reviewer' : 'worker', surface: 'report', artifactActions }) : null : record.detail ? h('p', { className: 'ddf-focus-path' }, record.detail) : null,
@@ -2665,19 +3186,28 @@ window.__ModuleLoader__.load({
     }
 
     const FOCUS_BOARD_STYLES = `
-.ddf-board-root:has(.ddf-focus-board) { overflow:hidden; background:var(--dsw-alias-bg-layer-1,#fff); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; }
-.ddf-focus-board { flex:1 1 auto; height:100%; min-height:0; max-width:1440px; padding:0; gap:0; overflow:auto; overflow-anchor:none; overscroll-behavior:contain; scrollbar-width:thin; container:ddf-focus / inline-size; }
+.ddf-board-root:has(.ddf-focus-board) { --ddf-focus-surface:var(--dsw-alias-bg-layer-1,#fff); --ddf-focus-ink:var(--dsw-alias-label-primary,#1d1d1f); --ddf-focus-muted:var(--dsw-alias-label-secondary,#6e6e73); --ddf-focus-canvas:color-mix(in srgb,var(--ddf-focus-surface) 96%,var(--ddf-focus-ink)); --ddf-focus-line:color-mix(in srgb,var(--ddf-focus-ink) 12%,var(--ddf-focus-surface)); --ddf-focus-blue:var(--dsw-alias-state-business-primary,#007aff); --ddf-focus-tint:color-mix(in srgb,var(--ddf-focus-blue) 9%,var(--ddf-focus-surface)); overflow:hidden; background:var(--ddf-focus-canvas); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; }
+.ddf-focus-board { flex:1 1 auto; height:100%; min-height:0; max-width:none; padding:0; gap:0; overflow:auto; overflow-anchor:none; overscroll-behavior:contain; scrollbar-width:thin; container:ddf-focus / inline-size; }
 .ddf-focus-board [hidden] { display:none!important; }
-.ddf-focus-board>.ddf-board-header { flex:none; position:sticky; top:0; z-index:3; background:var(--dsw-alias-bg-layer-1,#fff); padding:18px 22px 13px; margin:0; gap:14px; }
+.ddf-focus-board>.ddf-board-header { flex:none; position:sticky; top:0; z-index:3; background:var(--ddf-focus-surface); padding:20px max(24px,calc((100% - 880px)/2)) 16px; margin:0; gap:16px; border-color:var(--ddf-focus-line); box-shadow:0 2px 12px color-mix(in srgb,var(--ddf-focus-ink) 3%,transparent); }
 .ddf-focus-board pre { max-height:none; overflow:visible; }
-.ddf-focus-board .ddf-board-title { font-size:18px; font-weight:600; line-height:1.5; }
-.ddf-focus-board .ddf-board-meta { font-size:11px; margin-top:3px; }
-.ddf-focus-board .ddf-board-actions { gap:6px; }
-.ddf-focus-board .ddf-board-action { font-size:12px; min-height:29px; border-radius:7px; }
-.ddf-focus-stats { display:flex; flex-wrap:wrap; align-items:center; gap:7px 18px; padding:10px 22px; font-size:12px; color:var(--dsw-alias-label-secondary,#646a73); flex:none; }
+.ddf-focus-board .ddf-board-title { min-width:0; margin:0; font-size:16px; font-weight:600; line-height:1.5; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
+.ddf-focus-heading { flex:1; min-width:0; }
+.ddf-focus-heading-line { display:flex; align-items:center; flex-wrap:wrap; gap:6px 12px; }
+.ddf-focus-arrangement { flex:none; padding:3px 8px; border-radius:6px; background:var(--ddf-focus-tint); color:var(--ddf-focus-blue); font-size:11px; font-weight:500; }
+.ddf-focus-current { display:flex; align-items:center; gap:7px; margin:7px 0 0; font-size:13px; color:var(--ddf-focus-ink); }
+.ddf-focus-status-dot { width:6px; height:6px; flex:none; border-radius:50%; background:var(--ddf-focus-muted); }
+.ddf-focus-status-dot[data-state="running"],.ddf-focus-status-dot[data-state="starting"] { background:var(--ddf-focus-blue); }
+.ddf-focus-status-dot[data-state="accepted"] { background:var(--ddf-board-success); }
+.ddf-focus-status-dot[data-state="failed"],.ddf-focus-status-dot[data-state="blocked"] { background:var(--ddf-board-error); }
+.ddf-focus-board .ddf-board-meta { font-size:11px; margin:5px 0 0; color:var(--ddf-focus-muted); }
+.ddf-focus-board .ddf-board-actions { gap:6px; flex-wrap:wrap; max-width:240px; justify-content:flex-end; }
+.ddf-focus-board .ddf-board-action { font-size:12px; min-height:30px; border-radius:7px; background:var(--ddf-focus-surface); border-color:var(--ddf-focus-line); }
+.ddf-focus-stats { display:flex; flex-wrap:wrap; align-items:center; gap:7px 18px; padding:12px max(24px,calc((100% - 880px)/2)); font-size:12px; color:var(--ddf-focus-muted); flex:none; }
+.ddf-focus-stats:empty { display:none; }
 .ddf-focus-stats>strong { color:var(--dsw-alias-label-primary,#1f2329); font-size:13px; font-weight:500; }
 .ddf-focus-stats .ddf-board-status { margin:0; padding:2px 8px; font-size:11px; }
-.ddf-focus-context { flex:none; padding:0 22px 11px; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); font-size:12px; }
+.ddf-focus-context { flex:none; padding:10px max(24px,calc((100% - 880px)/2)) 14px; border-bottom:1px solid var(--ddf-focus-line); font-size:12px; }
 .ddf-focus-context>summary { cursor:pointer; color:var(--dsw-alias-label-secondary,#646a73); width:fit-content; }
 .ddf-focus-context .ddf-board-hero { margin-top:12px; padding:12px 15px; }
 .ddf-focus-context .ddf-board-goal { font-size:14px; }
@@ -2686,35 +3216,48 @@ window.__ModuleLoader__.load({
 .ddf-focus-context .ddf-board-decision-level strong { font-size:22px; }
 .ddf-focus-context .ddf-board-decision-signals,.ddf-focus-context .ddf-board-decision-note { font-size:12px; }
 .ddf-focus-context .ddf-board-diagnostics { margin-top:10px; }
-.ddf-focus-notices { flex:none; padding:0 22px; font-size:12px; }
+.ddf-focus-notices { flex:none; padding:0 max(24px,calc((100% - 880px)/2)); font-size:12px; }
 .ddf-focus-notices:empty { display:none; }
 .ddf-focus-notices .ddf-board-next,.ddf-focus-notices .ddf-board-empty,.ddf-focus-notices .ddf-chat-notice { margin:8px 0; padding:9px 12px; font-size:12px; }
 .ddf-focus-board>.ddf-board-load-issue,.ddf-focus-board>.ddf-board-inline-notice { margin:8px 22px; flex:none; }
 .ddf-focus-workspace { flex:none; min-height:0; display:grid; grid-template-columns:minmax(0,1fr); position:relative; }
 .ddf-focus-workspace[data-drawer-open="true"] { grid-template-columns:minmax(0,1fr) minmax(290px,34%); }
 .ddf-focus-feed { min-width:0; min-height:0; }
-.ddf-focus-members { display:flex; flex-wrap:wrap; gap:6px; padding:12px 22px; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
-.ddf-focus-members button { display:inline-flex; align-items:center; gap:6px; max-width:210px; padding:4px 8px; border:0; border-radius:8px; background:transparent; color:var(--dsw-alias-label-secondary,#646a73); font:inherit; font-size:12px; line-height:1.5; cursor:pointer; }
+.ddf-focus-members { display:flex; flex-wrap:wrap; gap:6px; padding:14px max(24px,calc((100% - 880px)/2)); border-bottom:1px solid var(--ddf-focus-line); background:var(--ddf-focus-surface); }
+.ddf-focus-members button { display:inline-flex; align-items:center; gap:7px; max-width:210px; min-height:34px; padding:5px 10px; border:1px solid transparent; border-radius:8px; background:transparent; color:var(--ddf-focus-muted); font:inherit; font-size:12px; line-height:1.5; cursor:pointer; }
 .ddf-focus-members button>span:last-child { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-.ddf-focus-members button[aria-pressed="true"] { background:var(--dsw-alias-bg-layer-2,#f1f4fa); color:var(--dsw-alias-state-business-primary,#2878e5); }
-.ddf-focus-avatar { width:30px; height:30px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; flex:none; background:var(--dsw-alias-bg-layer-2,#f1f4fa); color:var(--dsw-alias-state-business-primary,#2878e5); font-size:12px; }
+.ddf-focus-members button:hover { background:var(--ddf-focus-canvas); }
+.ddf-focus-members button[aria-pressed="true"] { background:var(--ddf-focus-tint); border-color:color-mix(in srgb,var(--ddf-focus-blue) 18%,transparent); color:var(--ddf-focus-blue); }
+.ddf-focus-avatar { width:32px; height:32px; border-radius:10px; display:inline-flex; align-items:center; justify-content:center; flex:none; background:var(--ddf-focus-tint); border:1px solid color-mix(in srgb,var(--ddf-focus-blue) 12%,transparent); color:var(--ddf-focus-blue); font-size:12px; font-weight:500; }
 .ddf-focus-members .ddf-focus-avatar { width:23px; height:23px; font-size:10px; }
-.ddf-focus-messages { padding:20px clamp(18px,6%,70px); }
+.ddf-focus-messages { width:100%; max-width:880px; margin:0 auto; padding:24px; }
 .ddf-focus-history { margin:0 0 20px; text-align:center; }
-.ddf-focus-message { display:flex; gap:11px; margin:0 0 19px; min-width:0; }
-.ddf-focus-message-main { min-width:0; max-width:calc(100% - 42px); }
-.ddf-focus-byline { display:flex; align-items:baseline; flex-wrap:wrap; gap:5px 10px; margin-bottom:5px; font-size:11px; color:var(--dsw-alias-label-secondary,#646a73); }
-.ddf-focus-byline strong { font-size:12px; font-weight:500; color:var(--dsw-alias-label-primary,#1f2329); }
-.ddf-focus-bubble { border-radius:4px 14px 14px; background:var(--dsw-alias-bg-layer-2,#f1f2f5); padding:10px 14px; font-size:13px; line-height:1.7; overflow-wrap:anywhere; white-space:pre-wrap; }
-.ddf-focus-message[data-source="decision"] .ddf-focus-bubble { border-left:2px solid var(--dsw-alias-state-business-primary,#2878e5); }
+.ddf-focus-message { display:flex; gap:12px; margin:0 0 24px; min-width:0; }
+.ddf-focus-message-main { flex:1; min-width:0; max-width:calc(100% - 44px); }
+.ddf-focus-byline { display:flex; align-items:baseline; flex-wrap:wrap; gap:4px 10px; margin-bottom:7px; font-size:12px; color:var(--ddf-focus-muted); }
+.ddf-focus-byline strong { font-size:13px; font-weight:500; color:var(--ddf-focus-ink); }
+.ddf-focus-byline time { margin-left:auto; font-size:11px; font-variant-numeric:tabular-nums; }
+.ddf-focus-model { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:11px; overflow-wrap:anywhere; }
+.ddf-focus-bubble { border:1px solid var(--ddf-focus-line); border-radius:4px 14px 14px; background:var(--ddf-focus-surface); padding:14px 16px; font-size:14px; line-height:1.6; overflow-wrap:anywhere; white-space:pre-wrap; }
+.ddf-focus-conclusion { display:block; margin-bottom:6px; font-size:15px; font-weight:600; }
+.ddf-focus-reason { margin-top:12px; padding-top:10px; border-top:1px solid var(--ddf-focus-line); white-space:normal; }
+.ddf-focus-reason>summary { width:fit-content; cursor:pointer; font-size:12px; color:var(--ddf-focus-blue); }
+.ddf-focus-reason>p { margin:12px 0 0; white-space:pre-wrap; }
+.ddf-focus-message[data-source="decision"] .ddf-focus-conclusion { color:var(--ddf-focus-blue); }
 .ddf-focus-message[data-source="issue"] .ddf-focus-bubble { border-left:2px solid var(--ddf-board-error); }
 .ddf-focus-message[data-source="verification"] .ddf-focus-bubble { border-left:2px solid var(--dsw-alias-state-business-primary,#2878e5); }
 .ddf-focus-message[data-member="user"] { flex-direction:row-reverse; }
-.ddf-focus-message[data-member="user"] .ddf-focus-bubble { border-radius:14px 4px 14px 14px; }
+.ddf-focus-message[data-member="user"] .ddf-focus-message-main { flex:initial; max-width:min(640px,calc(100% - 44px)); }
+.ddf-focus-message[data-member="user"] .ddf-focus-bubble { border-color:transparent; border-radius:14px 4px 14px 14px; background:var(--ddf-focus-tint); }
+.ddf-focus-message[data-compact="true"] { margin-bottom:16px; }
+.ddf-focus-message[data-compact="true"]>.ddf-focus-avatar { width:24px; height:24px; margin:3px 4px; border-radius:8px; font-size:10px; }
+.ddf-focus-message[data-compact="true"] .ddf-focus-bubble { border:0; border-left:2px solid var(--ddf-focus-line); border-radius:0; background:transparent; padding:2px 0 2px 12px; font-size:12px; color:var(--ddf-focus-muted); }
+.ddf-focus-message[data-compact="true"] .ddf-focus-source { display:none; }
 .ddf-focus-source { display:block; margin:5px 2px 0; color:var(--dsw-alias-label-secondary,#646a73); font-size:11px; }
 .ddf-focus-path { margin:4px 2px; font-size:11px; color:var(--dsw-alias-label-secondary,#646a73); overflow-wrap:anywhere; }
 .ddf-focus-record-link { padding:4px 2px; border:0; background:transparent; color:var(--dsw-alias-state-business-primary,#2878e5); font:inherit; font-size:12px; line-height:1.5; text-align:left; cursor:pointer; }
-.ddf-focus-empty,.ddf-focus-record-note { color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; margin:10px 0; }
+.ddf-focus-empty,.ddf-focus-record-note { color:var(--ddf-focus-muted); font-size:11px; margin:12px 0; }
+.ddf-focus-record-note { padding-top:12px; border-top:1px solid var(--ddf-focus-line); line-height:1.6; }
 .ddf-focus-drawer { min-width:0; padding:0 16px 18px; border-left:1px solid var(--dsw-alias-border-l1,#e5e6eb); background:var(--dsw-alias-bg-layer-1,#fff); }
 .ddf-focus-drawer-head { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:14px 0; background:var(--dsw-alias-bg-layer-1,#fff); }
 .ddf-focus-drawer-head h2 { font-size:14px; font-weight:500; margin:0; }
@@ -2745,9 +3288,18 @@ window.__ModuleLoader__.load({
  .ddf-focus-workspace[data-drawer-open="true"] .ddf-focus-feed { display:none; }
  .ddf-focus-drawer { border-left:0; }
 }
+@container ddf-focus (max-width:480px) {
+ .ddf-focus-board>.ddf-board-header { gap:10px; }
+ .ddf-focus-board .ddf-board-actions { max-width:none; }
+ .ddf-focus-message { gap:8px; }
+ .ddf-focus-message-main { max-width:calc(100% - 40px); }
+ .ddf-focus-byline { gap:4px 7px; }
+ .ddf-focus-bubble { padding:12px; }
+ .ddf-focus-model { max-width:100%; }
+}
 `
 
-    function DashboardPage({ t, state, sessionId, plan, openView, enabledView, onFix, detailsOpen, onToggleDetails, notice, updatedAt, member, onMember, onOpenTask, selectedTask, feedRef, onFeedScroll, onLatest, showLatest, drawerButtonRef, history, onMore, artifactActions }) {
+    function DashboardPage({ t, state, sessionId, plan, openView, enabledView, onFix, detailsOpen, onToggleDetails, notice, updatedAt, member, onMember, onOpenTask, selectedTask, feedRef, onFeedScroll, onLatest, showLatest, drawerButtonRef, history, onMore, artifactActions, onCopyConclusion, copyState }) {
       const tasks = plan?.tasks ?? [], status = dashboardStatusKey(plan)
       const statusLabel = plan?.completion ? completionLabel(t, plan.completion) : status === 'accepted' && plan.protocolVersion >= 2
         ? t('chat.receiptPending') : t({ failed: 'view.boardFailed', accepted: 'view.boardDone', review: 'view.boardReview' }[status] || 'status.' + status)
@@ -2756,12 +3308,24 @@ window.__ModuleLoader__.load({
       const pending = tasks.filter(task => !['accepted', 'cancelled'].includes(task.status))
       const running = pending.filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
       const waiting = pending.filter(task => task.status === 'queued' || task.audit?.status === 'queued').length
+      const review = tasks.filter(task => task.status === 'review' && !['queued', 'starting', 'running'].includes(task.audit?.status)).length
       const problems = pending.map(task => ['failed', 'blocked'].includes(task.audit?.status) ? task.audit : task)
       const rootTask = status === 'cancelled' ? null : dashboardRootTask(tasks)
       const orderedTasks = rootTask ? [rootTask, ...tasks.filter(task => task !== rootTask)] : tasks
       const blockers = plan ? blockersOf(plan) : [], modelBlock = blockers.find(task => task.issue?.code === 'MODEL_CONFIG_INVALID')
       const session = state?.sessions?.find(item => item.sessionId === sessionId), request = session?.source
       const route = plan?.routing || session?.route, sessionTitle = plan?.sessionTitle || session?.sessionTitle
+      const execution = request?.messageId && session?.execution?.requestId && session.execution.requestId !== request.messageId ? null : session?.execution
+      const decision = (plan?.decision ?? (request?.messageId && session?.decision?.requestId && session.decision.requestId !== request.messageId ? null : session?.decision))
+      const receipt = plan?.completion
+      // The single state source drives the badge, conclusion card, next step and
+      // task list. While a load has not succeeded, only the load notice shows.
+      const view = state ? acceptanceViewOf(state, sessionId) : 'empty'
+      const loaded = Boolean(state)
+      const badge = { label: t('acc.badge.' + view), tone: acceptanceViewTone(view) }
+      const heading = plan?.goal || request?.text || plan?.source?.text || sessionTitle || t('view.currentSession')
+      const arrangement = plan ? t('focus.delegated') : null
+      const conclusion = acceptanceConclusionOf(t, view, { plan, session, request, decision, execution, tasks, statusLabel, updatedAt })
       const previous = state?.plans?.find(item => item.sessionId === sessionId && item !== plan)
       const next = plan?.completion ? completionNext(t, plan, state) : serviceProblem(plan)?.action || (plan ? dashboardNextText(t, status, tasks, modelBlock, rootTask) : '')
       const links = (state ? ['chat', 'fleet', 'share'] : ['chat']).map(id => {
@@ -2769,70 +3333,143 @@ window.__ModuleLoader__.load({
         return h('button', { key: id, type: 'button', className: 'ddf-board-action', disabled: !enabled,
           title: enabled ? undefined : t('view.unavailable'), onClick: enabled ? () => openView(id) : undefined }, t('view.' + id))
       })
+      const metaItems = [
+        sessionTitle ? fill(t('view.currentSessionTitle'), { title: sessionTitle }) : t('view.currentSession'),
+        request?.messageId ? fill(t('acc.requestMessage'), { id: shortId(request.messageId) }) : null,
+        receipt?.id ? fill(t('acc.receiptMeta'), { id: shortId(receipt.id) }) : null,
+        t('acc.readonly'),
+        updatedAt ? fill(t('acc.lastRead'), { time: new Date(updatedAt).toLocaleTimeString() }) : null,
+      ].filter(Boolean)
+      const copyButton = loaded && ['completed', 'partial'].includes(view) ? h('button', { type: 'button',
+        className: 'ddf-board-action ddf-acc-primary', 'data-copy-conclusion': '', onClick: () => onCopyConclusion(conclusion.markdown) },
+        t(copyState === 'copied' ? 'acc.copyDone' : copyState === 'failed' ? 'acc.copyFailed' : 'acc.copyConclusion')) : null
+      // Retained compact progress line: real counts only, never a percentage.
+      const stats = plan ? h('div', { className: 'ddf-focus-stats', 'aria-label': t('view.boardProgress') },
+        h('span', { className: 'ddf-board-status', 'data-status': status, role: 'status' }, statusLabel),
+        h('strong', null, fill(t('dock.taskCount'), { count: tasks.length })),
+        ...[[t('dock.running'), running], [t('dock.waiting'), waiting], [t('dock.awaitingReview'), tasks.filter(task => task.status === 'review' && !['queued', 'starting', 'running'].includes(task.audit?.status)).length]]
+          .filter(([, count]) => count > 0).map(([label, count]) => h('span', { key: label }, label + ' ' + count)),
+        ...['refused', 'failed', 'blocked'].map(kind => ({ kind, count: problems.filter(task => ['failed', 'blocked'].includes(task.status) && (kind === 'refused' ? requestRefused(task) : !requestRefused(task) && task.status === kind)).length }))
+          .filter(item => item.count > 0).map(item => h('span', { key: item.kind }, t(item.kind === 'refused' ? 'dock.requestRefused' : 'dock.' + item.kind) + ' ' + item.count)),
+        h('span', null, t('dock.accepted') + ' ' + accepted + '/' + tasks.length)) : null
+      // Native <details>: no `open` prop when closed, so a user's fold state
+      // survives the 3-second read-only poll; Escape still closes the drawer.
+      const fold = (id, title, meta, open, body) => h('details', { key: id, className: 'ddf-acc-fold', 'data-acceptance-fold': id, open: open ? true : undefined },
+        h('summary', null, h('span', { className: 'ddf-acc-fold-title' }, title),
+          h('span', { className: 'ddf-acc-fold-meta' }, meta || ''), h('span', { className: 'ddf-acc-chev', 'aria-hidden': 'true' })),
+        h('div', { className: 'ddf-acc-fold-body' }, body))
+      const hero = plan || request?.text ? h('section', { className: 'ddf-board-hero' },
+        h('div', null, h('p', { className: 'ddf-board-hero-label' }, t(request?.messageId ? 'view.boardRequest' : 'view.recordedRequest')),
+          h('p', { className: 'ddf-board-goal' }, plan?.goal || request?.text || plan?.source?.text || t('view.unknownSource'))),
+        h('span', { className: 'ddf-board-status', 'data-status': status, role: 'status' }, plan ? statusLabel : t('view.actualNoPlan'))) : null
+      const summaryParts = [
+        accepted ? fill(t('acc.summary.accepted'), { count: accepted }) : '',
+        running ? fill(t('acc.summary.running'), { count: running }) : '',
+        waiting ? fill(t('acc.summary.waiting'), { count: waiting }) : '',
+        review ? fill(t('acc.summary.review'), { count: review }) : ''
+      ].filter(Boolean)
+      const tasksMeta = tasks.length ? fill(t('acc.tasksMeta'), { count: tasks.length, summary: summaryParts.join(' · ') || t('acc.summary.allAccepted') }) : t('acc.noManagedTasks')
+      // The drawer toggle stays available (for collaboration deep links) but is
+      // no longer a primary header action; the primary action is Copy conclusion.
+      const drawerToggle = h('button', { type: 'button', className: 'ddf-board-action', 'data-drawer-toggle': '', 'aria-expanded': detailsOpen,
+        'aria-controls': 'ddf-focus-task-drawer', ref: drawerButtonRef, onClick: onToggleDetails }, t(detailsOpen ? 'focus.close' : 'focus.tasks'))
+      const tasksFold = fold('tasks', t('acc.fold.tasks'), tasksMeta, ['running', 'completed', 'partial'].includes(view), [
+        ...(tasks.length ? orderedTasks.map((task, index) => h(AcceptanceTaskCard, { key: task.id, t, task, plan, defaultOpen: index === 0 }))
+          : [h('p', { className: 'ddf-acc-muted' }, t('acc.noTasksHint'))]),
+        drawerToggle,
+        plan ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.source')), h(PlanDetails, { t, plan, sessionId, hidden: false })) : null,
+        previous ? h('details', { className: 'ddf-board-diagnostics', 'data-previous-request': previous.source?.messageId || 'unknown' },
+          h('summary', null, t('view.otherRequest')), h('p', null, previous.goal, ' · ', previous.completion ? completionLabel(t, previous.completion) : t('status.' + previous.status)),
+          h('p', null, previous.source?.text || t('view.unknownSource')), h('p', null, t('view.message') + '：', previous.source?.messageId || '—')) : null,
+      ])
+      const workerModel = tasks.map(task => task.modelRoute?.actual ?? task.modelRoute?.resolved ?? task.model).find(Boolean)?.model
+      const decisionRows = [
+        [t('acc.direct.mode'), decision?.mode ? t('decision.' + decision.mode) + ' · ' + t(decision.mode === 'direct' ? 'acc.modeDirectDetail' : 'acc.modeDelegateDetail') : t('decision.unrecorded')],
+        [t('acc.direct.reason'), decision?.reason || t('acc.direct.noReason')],
+        [t('acc.execModel'), workerModel || t('cfg.unknown')],
+        [t('acc.auditMode'), tasks.some(task => task.audit || task.reviewPolicy === 'independent') ? t('audit.title') : t('view.auditCoordinator')],
+        [t('acc.attempts'), plan?.activationBudget ? plan.activationBudget.used + ' / ' + plan.activationBudget.limit : t('cfg.unknown')]
+      ]
+      const decisionMeta = decision?.mode === 'direct' ? t('acc.decisionMeta.direct')
+        : decision?.mode === 'delegate' ? fill(t('acc.decisionMeta.delegate'), { count: Math.max(1, running) }) : t('acc.decisionMeta.unknown')
+      const decisionFold = fold('decision', t('acc.fold.decision'), decisionMeta, false, [
+        // The original request belongs with the coordinator decision, not at
+        // the top of the task list where it duplicated the header/conclusion.
+        hero,
+        h('div', { className: 'ddf-acc-section' }, h('div', { className: 'ddf-acc-label' }, t('acc.decisionSummary')),
+          ...decisionRows.map(([key, value], index) => h('div', { key: index, className: 'ddf-acc-kv' },
+            h('span', { className: 'k' }, key), h('span', { className: 'v' }, value)))),
+        plan || session || route ? h(BoardDecision, { t, session, plan, status, running }) : null,
+        h('div', { className: 'ddf-focus-notices' },
+          h(CoordinationIssueNotice, { t, plan }),
+          !plan?.completion && plan?.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled ? h(ServiceIssueNotice, { t, issue: plan.coordinatorIssue }) : null,
+          h(InputDetails, { t, plan }),
+          plan ? h('section', { className: 'ddf-board-next', role: 'status' }, h('b', null, t('view.boardNext') + '：'), next,
+            status === 'cancelled' && tasks.some(task => task.status !== 'accepted') ? h('p', null, fill(t('view.boardUnfinished'), { tasks: tasks.filter(task => task.status !== 'accepted').map(task => task.title || task.id).join('、') })) : null,
+            plan.dispatchWait?.message && !['accepted', 'cancelled'].includes(status) ? h('p', null, t('plans.dispatchWaiting') + plan.dispatchWait.message) : null,
+            plan.autoDispatch === false && blockers.length && status !== 'cancelled' ? h('p', null, t('plans.autoPaused')) : null,
+            modelBlock && status !== 'cancelled' ? h('button', { type: 'button', className: 'ddf-board-action', onClick: () => onFix(modelBlock.issue.tier) }, t('plans.fixModel')) : null) : null)
+      ])
+      const cleanup = plan?.cancellation?.cleanup ?? receipt?.cleanup
+      const receiptRows = receipt ? [
+        [t('acc.receiptRows.id'), receipt.id],
+        [t('acc.receiptRows.at'), Number.isFinite(receipt.at) ? new Date(receipt.at).toLocaleString() : t('cfg.unknown')],
+        [t('acc.receiptRows.outcome'), completionLabel(t, receipt)],
+        [t('acc.receiptRows.evidence'), (receipt.evidence ?? []).join('、') || t('acc.receiptRows.none')],
+        [t('acc.receiptRows.deliverables'), String((receipt.deliverables ?? []).length)],
+        [t('acc.receiptRows.cleanup'), cleanup?.status && cleanup.status !== 'completed' ? t('acc.receiptRows.pending') : t('acc.receiptRows.released')]
+      ].map(([key, value], index) => h('div', { key: index, className: 'ddf-acc-kv' }, h('span', { className: 'k' }, key), h('span', { className: 'v' }, value))) : null
+      const receiptFold = fold('receipt', t('acc.fold.receipt'), receipt?.id ? fill(t('acc.receiptMeta'), { id: shortId(receipt.id) }) : t('acc.noReceipt'), false, [
+        h(CompletionReceipt, { t, plan, state }),
+        receiptRows,
+        receipt ? null : h('p', { className: 'ddf-acc-muted' }, t('acc.receiptFoldHint'))
+      ])
+      const diagnosticsFold = fold('diagnostics', t('acc.fold.diagnostics'), t('acc.diagnosticsMeta'), false, [
+        h(UsageDetails, { t, usage: state?.requestUsage?.find(entry => entry.sessionId === sessionId && (!request?.messageId || entry.requestId === request.messageId)) ?? plan?.usage }),
+        state ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-policy': state.runtimePolicyVersion ?? 'unknown' }, t(state.runtimePolicyVersion >= 2 ? 'runtime.active' : 'runtime.pending')) : null,
+        state ? h('p', { className: 'ddf-board-inline-notice', 'data-coordination-policy': state.coordinationPolicyVersion ?? 'unknown' }, t(state.coordinationPolicyVersion >= 7 && state.executionPolicyVersion >= 1 ? 'coordination.active' : 'coordination.pending')) : null,
+        state?.runtimeBuild ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-build': state.runtimeBuild }, t('runtime.build') + '：' + state.runtimeBuild) : null,
+        plan?.routingWarnings?.length ? h('p', { className: 'ddf-board-inline-notice' }, fill(t('plans.routeWarnings'), { warnings: plan.routingWarnings.join('；') })) : null,
+        session ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.diagnostics')), h(StateCard, { t, state: { sessions: [session] } })) : null,
+        state?.archiveWarning ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.archiveWarning')), h('p', { className: 'ddf-board-inline-notice' }, state.archiveWarning)) : null,
+        state?.legacyHost ? h('p', { className: 'ddf-board-inline-notice', role: 'status' }, t('view.legacyHost')) : null
+      ])
+      const feedFold = loaded && view !== 'empty' ? fold('feed', t('acc.fold.feed'), t('acc.feedMeta'), view === 'direct',
+        h('div', { className: 'ddf-focus-workspace', 'data-drawer-open': detailsOpen },
+          h(CollaborationFeed, { t, plan, session, member, onMember, onOpenTask, history, onMore, artifactActions }),
+          h('aside', { id: 'ddf-focus-task-drawer', className: 'ddf-focus-drawer', 'data-task-drawer': '', 'data-selected-task': selectedTask,
+            hidden: !detailsOpen, 'aria-label': t('focus.tasks') },
+            h('div', { className: 'ddf-focus-drawer-head' }, h('h2', null, t('focus.tasks'))),
+            plan ? h('section', { 'data-task-list': '' },
+              h('div', { className: 'ddf-board-section-head' }, h('h2', { className: 'ddf-board-section-title' }, t('view.boardTasks')), h('span', { className: 'ddf-board-section-note' }, fill(t('view.boardTaskCount'), { count: tasks.length }))),
+              h('div', { className: 'ddf-board-task-list' }, ...orderedTasks.map((task, index) => h('details', { key: task.id, className: 'ddf-focus-task', open: detailsOpen && (selectedTask ? selectedTask === task.id : index === 0) },
+                h('summary', null, h('strong', null, task.title || task.id), h('span', null, t(task.status === 'queued' && (task.dependsOn ?? []).some(id => tasks.some(other => other.id === id && other.status !== 'accepted')) ? 'accordion.dependency' : 'status.' + task.status))),
+                h(DashboardTaskCard, { t, task, plan, rootTask, onFix, artifactActions }))))) : null,
+            h('p', { className: 'ddf-focus-record-note' }, t('view.boardReturned') + ' ' + returned + '/' + tasks.length,
+              plan?.activationBudget ? ' · ' + t('view.boardAttempts') + ' ' + plan.activationBudget.used + '/' + plan.activationBudget.limit : '')))) : null
       return h('div', { className: 'ddf-board-root', 'data-ddf-acceptance': '', 'data-conversation-composer-overlay': '' },
-        h('style', null, DASHBOARD_STYLES + FOCUS_BOARD_STYLES + ARTIFACT_STYLES),
-        h('main', { className: 'ddf-board ddf-focus-board', 'data-status': status, ref: feedRef, onScroll: onFeedScroll },
+        h('style', null, DASHBOARD_STYLES + FOCUS_BOARD_STYLES + ARTIFACT_STYLES + ACCEPTANCE_STYLES),
+        h('main', { className: 'ddf-board ddf-focus-board', 'data-status': status, 'data-acceptance-view': view, ref: feedRef, onScroll: onFeedScroll },
           h('header', { className: 'ddf-board-header' },
-            h('div', null, h('h1', { className: 'ddf-board-title' }, sessionTitle || t('focus.title')),
-              h('p', { className: 'ddf-board-meta' }, sessionTitle
-                ? fill(t('view.currentSessionTitle'), { title: sessionTitle }) + ' · ' + shortId(sessionId)
-                : t('view.currentSession') + ' · ' + shortId(sessionId),
-                updatedAt ? ' · ' + fill(t('view.lastRead'), { time: new Date(updatedAt).toLocaleTimeString() }) : '', ' · ' + t('view.footNote'))),
+            h('div', { className: 'ddf-focus-heading' },
+              h('div', { className: 'ddf-acc-eyebrow' }, t('acc.eyebrow'), h('span', { className: 'ddf-acc-readonly' }, t('acc.readonly'))),
+              h('div', { className: 'ddf-focus-heading-line' },
+                h('h1', { className: 'ddf-board-title', title: heading }, heading),
+                h('span', { className: 'ddf-acc-badge', 'data-tone': badge.tone, role: 'status' }, h('i', { 'aria-hidden': 'true' }), badge.label),
+                arrangement ? h('span', { className: 'ddf-focus-arrangement' }, arrangement) : null),
+              h('p', { className: 'ddf-board-meta' }, metaItems.join(' · '))),
             h('div', { className: 'ddf-board-actions' },
               showLatest && !detailsOpen ? h('button', { type: 'button', className: 'ddf-board-action', onClick: onLatest, 'data-follow-latest': '' }, t('focus.latest')) : null,
-              h('button', { type: 'button', className: 'ddf-board-action', 'data-drawer-toggle': '', 'aria-expanded': detailsOpen,
-                'aria-controls': 'ddf-focus-task-drawer', ref: drawerButtonRef, onClick: onToggleDetails }, t(detailsOpen ? 'focus.close' : 'focus.tasks')),
-              ...links)),
+              ...links, copyButton)),
           notice,
           state?.storageError ? h('p', { className: 'ddf-board-inline-notice', 'data-kind': 'error', role: 'alert' }, state.storageError) : null,
-          h('div', { className: 'ddf-focus-stats', 'aria-label': t('view.boardProgress') },
-            plan ? h('span', { className: 'ddf-board-status', 'data-status': status, role: 'status' }, statusLabel) : null,
-            h('strong', null, fill(t('dock.taskCount'), { count: tasks.length })),
-            ...[[t('dock.running'), running], [t('dock.waiting'), waiting], [t('dock.awaitingReview'), tasks.filter(task => task.status === 'review' && !['queued', 'starting', 'running'].includes(task.audit?.status)).length]]
-              .filter(([, count]) => count > 0).map(([label, count]) => h('span', { key: label }, label + ' ' + count)),
-            ...['refused', 'failed', 'blocked'].map(kind => ({ kind, count: problems.filter(task => ['failed', 'blocked'].includes(task.status) && (kind === 'refused' ? requestRefused(task) : !requestRefused(task) && task.status === kind)).length }))
-              .filter(item => item.count > 0).map(item => h('span', { key: item.kind }, t(item.kind === 'refused' ? 'dock.requestRefused' : 'dock.' + item.kind) + ' ' + item.count)),
-            plan ? h('span', null, t('dock.accepted') + ' ' + accepted + '/' + tasks.length) : null),
-          h('details', { className: 'ddf-focus-context' }, h('summary', null, t('focus.context')),
-            plan || request?.text ? h('section', { className: 'ddf-board-hero' },
-              h('div', null, h('p', { className: 'ddf-board-hero-label' }, t(request?.messageId ? 'view.boardRequest' : 'view.recordedRequest')),
-                h('p', { className: 'ddf-board-goal' }, plan?.goal || request?.text || plan?.source?.text || t('view.unknownSource'))),
-              h('span', { className: 'ddf-board-status', 'data-status': status, role: 'status' }, plan ? statusLabel : t('view.actualNoPlan'))) : null,
-            plan || session || route ? h(BoardDecision, { t, session, plan, status, running }) : null,
-            h(UsageDetails, { t, usage: state?.requestUsage?.find(entry => entry.sessionId === sessionId && (!request?.messageId || entry.requestId === request.messageId)) ?? plan?.usage }),
-            state ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-policy': state.runtimePolicyVersion ?? 'unknown' }, t(state.runtimePolicyVersion >= 2 ? 'runtime.active' : 'runtime.pending')) : null,
-            state ? h('p', { className: 'ddf-board-inline-notice', 'data-coordination-policy': state.coordinationPolicyVersion ?? 'unknown' }, t(state.coordinationPolicyVersion >= 7 && state.executionPolicyVersion >= 1 ? 'coordination.active' : 'coordination.pending')) : null,
-            state?.runtimeBuild ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-build': state.runtimeBuild }, t('runtime.build') + '：' + state.runtimeBuild) : null,
-            plan?.routingWarnings?.length ? h('p', { className: 'ddf-board-inline-notice' }, fill(t('plans.routeWarnings'), { warnings: plan.routingWarnings.join('；') })) : null,
-            plan ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.source')), h(PlanDetails, { t, plan, sessionId, hidden: false })) : null,
-            previous ? h('details', { className: 'ddf-board-diagnostics', 'data-previous-request': previous.source?.messageId || 'unknown' },
-              h('summary', null, t('view.otherRequest')), h('p', null, previous.goal, ' · ', previous.completion ? completionLabel(t, previous.completion) : t('status.' + previous.status)),
-              h('p', null, previous.source?.text || t('view.unknownSource')), h('p', null, t('view.message') + '：', previous.source?.messageId || '—')) : null,
-            session ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.diagnostics')), h(StateCard, { t, state: { sessions: [session] } })) : null,
-            state?.archiveWarning ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.archiveWarning')), h('p', { className: 'ddf-board-inline-notice' }, state.archiveWarning)) : null),
-          h('div', { className: 'ddf-focus-notices' },
-            h(CompletionReceipt, { t, plan, state }), h(CoordinationIssueNotice, { t, plan }),
-            !plan?.completion && plan?.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled ? h(ServiceIssueNotice, { t, issue: plan.coordinatorIssue }) : null,
-            h(InputDetails, { t, plan }),
-            state && !plan ? h('section', { className: 'ddf-board-empty', role: 'status' }, h('h2', null, t('view.boardNoPlan')), h('p', null, t(state?.requestBindingVersion >= 2 ? 'view.modelNoPlanHint' : 'view.boardNoPlanHint'))) : null,
-            plan ? h('section', { className: 'ddf-board-next', role: 'status' }, h('b', null, t('view.boardNext') + '：'), next,
-              status === 'cancelled' && tasks.some(task => task.status !== 'accepted') ? h('p', null, fill(t('view.boardUnfinished'), { tasks: tasks.filter(task => task.status !== 'accepted').map(task => task.title || task.id).join('、') })) : null,
-              plan.dispatchWait?.message && !['accepted', 'cancelled'].includes(status) ? h('p', null, t('plans.dispatchWaiting') + plan.dispatchWait.message) : null,
-              plan.autoDispatch === false && blockers.length && status !== 'cancelled' ? h('p', null, t('plans.autoPaused')) : null,
-              modelBlock && status !== 'cancelled' ? h('button', { type: 'button', className: 'ddf-board-action', onClick: () => onFix(modelBlock.issue.tier) }, t('plans.fixModel')) : null) : null),
-          h('div', { className: 'ddf-focus-workspace', 'data-drawer-open': detailsOpen },
-            h(CollaborationFeed, { t, plan, session, member, onMember, onOpenTask, history, onMore, artifactActions }),
-            h('aside', { id: 'ddf-focus-task-drawer', className: 'ddf-focus-drawer', 'data-task-drawer': '', 'data-selected-task': selectedTask,
-              hidden: !detailsOpen, 'aria-label': t('focus.tasks') },
-              h('div', { className: 'ddf-focus-drawer-head' }, h('h2', null, t('focus.tasks'))),
-              plan ? h('section', { 'data-task-list': '' },
-                h('div', { className: 'ddf-board-section-head' }, h('h2', { className: 'ddf-board-section-title' }, t('view.boardTasks')), h('span', { className: 'ddf-board-section-note' }, fill(t('view.boardTaskCount'), { count: tasks.length }))),
-                h('div', { className: 'ddf-board-task-list' }, ...orderedTasks.map((task, index) => h('details', { key: task.id, className: 'ddf-focus-task', open: detailsOpen && (selectedTask ? selectedTask === task.id : index === 0) },
-                  h('summary', null, h('strong', null, task.title || task.id), h('span', null, t(task.status === 'queued' && (task.dependsOn ?? []).some(id => tasks.some(other => other.id === id && other.status !== 'accepted')) ? 'accordion.dependency' : 'status.' + task.status))),
-                  h(DashboardTaskCard, { t, task, plan, rootTask, onFix, artifactActions }))))) : h('p', null, t('view.boardNoPlan')),
-              h('p', { className: 'ddf-focus-record-note' }, t('view.boardReturned') + ' ' + returned + '/' + tasks.length,
-                plan?.activationBudget ? ' · ' + t('view.boardAttempts') + ' ' + plan.activationBudget.used + '/' + plan.activationBudget.limit : ''))),
-          state?.legacyHost ? h('p', { className: 'ddf-board-inline-notice', role: 'status' }, t('view.legacyHost')) : null))
+          // One shared content column: the sticky header uses the same gutter,
+          // so the conclusion, folds, feed and footer line up on both edges.
+          h('div', { className: 'ddf-acc-body', 'data-acc-body': '' },
+            loaded ? h(CompletionReceipt, { t, plan, state, conclusion, artifactActions, stats }) : null,
+            loaded ? h('div', { className: 'ddf-focus-context', 'data-acceptance-folds': '' }, tasksFold, decisionFold, receiptFold, diagnosticsFold) : null,
+            feedFold,
+            h('p', { className: 'ddf-acc-footnote' }, h('span', null, t('acc.footnote')), h('span', null, t('acc.footnoteLinks'))))))
     }
 
 
@@ -2842,9 +3479,10 @@ window.__ModuleLoader__.load({
       const [focus, setFocus] = useState({ key: '', member: 'all', taskId: null })
       const [showLatest, setShowLatest] = useState(false)
       const [artifactCopy, setArtifactCopy] = useState(null)
+      const [conclusionCopy, setConclusionCopy] = useState(null)
       const feedRef = useRef(null)
       const drawerButtonRef = useRef(null)
-      const following = useRef({ key: '', member: 'all', active: true })
+      const following = useRef({ key: '', member: 'all', active: false })
       const historyScroll = useRef(null)
       const refreshRef = useRef(null)
       useEffect(() => {
@@ -2882,9 +3520,10 @@ window.__ModuleLoader__.load({
       }, [focusKey, selection.member, selection.history])
       useEffect(() => {
         const reset = following.current.key !== focusKey || following.current.member !== selection.member
-        following.current = { key: focusKey, member: selection.member, active: reset || following.current.active }
-        if (reset) setShowLatest(false)
-        if (following.current.active && feedRef.current && !detailsOpen) feedRef.current.scrollTop = feedRef.current.scrollHeight
+        following.current = { key: focusKey, member: selection.member, active: !reset && following.current.active }
+        if (reset) { setShowLatest(false); if (feedRef.current) feedRef.current.scrollTop = 0 }
+        if (following.current.active && feedRef.current?.querySelector?.('[data-acceptance-fold="feed"]')?.open && !detailsOpen)
+          feedRef.current.scrollTop = feedRef.current.scrollHeight
       }, [result.updatedAt, focusKey, selection.member, detailsOpen])
       useEffect(() => {
         if (!detailsOpen || focus.key !== focusKey) return
@@ -2909,6 +3548,16 @@ window.__ModuleLoader__.load({
             h('details', null, h('summary', null, t('view.loadDetails')), h('pre', null, result.error)))
         : !sessionId || !state ? h('p', { className: 'ddf-board-inline-notice', role: 'status' }, t(!sessionId ? 'view.noSession' : 'view.loading')) : null
       return h(DashboardPage, { t, state, sessionId, plan, openView, enabledView, onFix, notice, updatedAt: result.updatedAt,
+        // Read-only copy: the conclusion is the receipt-backed Markdown built
+        // for the L1 card, never a separately assembled string.
+        onCopyConclusion: async markdown => {
+          try {
+            if (typeof window.navigator?.clipboard?.writeText !== 'function') throw new Error('Clipboard unavailable')
+            await window.navigator.clipboard.writeText(markdown)
+            setConclusionCopy({ key: focusKey, status: 'copied' })
+          } catch { setConclusionCopy({ key: focusKey, status: 'failed' }) }
+        },
+        copyState: conclusionCopy?.key === focusKey ? conclusionCopy.status : null,
         artifactActions: { result: artifactCopy?.key === focusKey ? artifactCopy : null, copy: async path => {
           try {
             if (typeof window.navigator?.clipboard?.writeText !== 'function') throw new Error('Clipboard unavailable')
@@ -3133,6 +3782,9 @@ window.__ModuleLoader__.load({
 
     return {
       inject: ['slots', 'locale', 'modelDirectories', 'layout'],
+      // Exposed for the page tests: the pure state function is the single
+      // source for the badge, conclusion card and task list.
+      acceptanceViewOf,
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-delegation-first: dictionaries')
         const t = ctx.locale.bind(NS)
