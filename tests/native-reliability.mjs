@@ -8,7 +8,7 @@ const { apply, RUNTIME_BUILD } = await import(process.env.AGENTRIX_PACKAGE_ROOT
   ? pathToFileURL(path.join(process.env.AGENTRIX_PACKAGE_ROOT, 'index.js')).href : new URL('../index.js', import.meta.url).href)
 
 const scenario = process.argv[2] ?? 'direct'
-assert.ok(['direct', 'separate-error', 'acceptance-save', 'cancel-cleanup', 'delivery-persistence'].includes(scenario))
+assert.ok(['direct', 'separate-error', 'acceptance-save', 'cancel-cleanup', 'delivery-persistence', 'audited-resolutions'].includes(scenario))
 if (!process.env.DSH_MODULE_ROOT) throw new Error('DSH_MODULE_ROOT is required')
 const native = name => import(pathToFileURL(path.join(process.env.DSH_MODULE_ROOT, name, 'lib/index.js')).href)
 const { Context } = await native('cordis')
@@ -54,7 +54,13 @@ class Adapter extends LlmAdapter {
     assert.ok(phase < 12, 'unexpected model recovery loop')
     const state = await requestState(), plan = state.plans[0], task = plan?.tasks[0]
     let block
-    if (request.sessionId !== 'root') {
+    if (scenario === 'audited-resolutions' && task?.audit?.childId === request.sessionId) {
+      assert.equal(request.model, 'coordinator', 'independent review uses the dispatcher model')
+      block = phase === 0 ? tool('read', { file_path: output }) : tool('delegation_report', { status: 'DONE', summary: '独立审查实际结果',
+        report: '已实际读取隔离文件', specVerdict: task.attempts === 1 ? 'fail' : 'pass', qualityVerdict: 'pass',
+        issues: task.attempts === 1 ? [{ criterion: 0, severity: 'important', finding: '测试要求一次定向返工', evidence: ['owned.txt:1'] }] : [],
+        ...(task.attempts > 1 ? { resolutions: task.reworkIds.map(id => ({ id, status: 'ADDRESSED', evidence: ['owned.txt:1 独审复核通过'] })) } : {}) })
+    } else if (request.sessionId !== 'root') {
       assert.equal(request.model, 'worker')
       if (phase === 0) block = tool('read', { file_path: output })
       else {
@@ -90,7 +96,8 @@ class Adapter extends LlmAdapter {
     } else if (!plan) {
       const task = {
       id: 'a', title: '核对文件', instructions: '读取 owned.txt 并提交报告', scope: directory, outputs: [output], writes: [output],
-      complexity: 'routine', reviewPolicy: 'coordinator', reviewReason: '仅核对隔离文件，由主控实际验证。', criteria: ['内容包含 verified'],
+      complexity: 'routine', reviewPolicy: scenario === 'audited-resolutions' ? 'independent' : 'coordinator',
+      reviewReason: scenario === 'audited-resolutions' ? '原生回放核对独立复查与重复确认的边界。' : '仅核对隔离文件，由主控实际验证。', criteria: ['内容包含 verified'],
       checks: [{ tool: 'read', arguments: { file_path: output } }],
       }
       block = tool('delegation_plan', { relation: 'new', start: true, goal: '核对隔离文件', decisionReason: '执行者读取独立文件，主控验证验收。',
@@ -99,6 +106,10 @@ class Adapter extends LlmAdapter {
     else if (task.status === 'running') block = tool('delegation_wait')
     else if (task.status === 'review' && !task.checks[0].result) block = tool('delegation_verify', { taskId: 'a' })
     else if (task.status === 'review') {
+      if (scenario === 'audited-resolutions' && task.audit?.status !== 'completed') block = tool('delegation_wait')
+      else if (scenario === 'audited-resolutions' && task.audit.specVerdict === 'fail') block = tool('delegation_review', {
+        taskId: 'a', verdict: 'rework', issueIds: task.issues.filter(issue => issue.status === 'open').map(issue => issue.id) })
+      else {
       if (scenario === 'acceptance-save') {
         if (!fault) {
           assert.ok(path.resolve(runsFile).startsWith(path.resolve(directory) + path.sep))
@@ -108,7 +119,9 @@ class Adapter extends LlmAdapter {
           await rm(runsFile, { recursive: true }); await rename(runsFile + '.held', runsFile)
         }
       }
-      block = tool('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '实际读取符合要求', evidence: [task.checks[0].result.ref] }] })
+      block = tool('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '实际读取符合要求', evidence: [task.checks[0].result.ref] }],
+        ...(scenario === 'audited-resolutions' ? { resolutions: task.reworkIds.map(id => ({ id, status: 'ADDRESSED', evidence: [task.checks[0].result.ref] })) } : {}) })
+      }
     } else throw new Error('Unexpected task state: ' + task.status)
     yield { type: 'block-start', index: 0, blockType: block.type }
     yield { type: 'block-end', index: 0, block }
@@ -189,6 +202,14 @@ try {
     assert.equal(activations.size, 2)
     assert.ok([...releases.values()].every(count => count === 1))
     assert.ok([...activations.keys()].every(id => !ctx.agents.get(id)), 'native child registries are empty after drain retry')
+  } else if (scenario === 'audited-resolutions') {
+    const task = result.plans[0].tasks[0]
+    assert.equal(result.plans[0].completion.outcome, 'completed')
+    assert.equal(task.attempts, 2)
+    assert.equal(task.audit.forAttempt, 2)
+    assert.equal(task.issues[0].status, 'addressed')
+    assert.deepEqual(task.issues[0].resolutionEvidence, ['owned.txt:1 独审复核通过'], 'coordinator confirmation preserves reviewer proof')
+    assert.equal(activations.size, 4)
   } else if (scenario === 'delivery-persistence') {
     assert.equal(result.plans[0].completion.outcome, 'completed')
     assert.equal(await ctx.sessions.flush(parent.session), true)

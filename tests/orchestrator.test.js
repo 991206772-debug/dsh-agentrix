@@ -1931,6 +1931,66 @@ test('complex tasks require one independent read-only reviewer with shared budge
   assert.equal(f.calls.length, 2)
 })
 
+async function independentlyReviewedRework() {
+  const f = await fixture()
+  await f.plan([card('a', { complexity: 'complex', criteria: ['结果正确', '格式正确'] })]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  await f.finishAudit(1, { specVerdict: 'fail', qualityVerdict: 'pass', issues: [
+    { criterion: 0, severity: 'important', finding: '计算结果不正确', evidence: ['result.txt:1'] },
+    { criterion: 1, severity: 'important', finding: '严格格式不正确', evidence: ['result.txt:2'] },
+  ] })
+  const old = await f.execute('delegation_verify', { taskId: 'a' })
+  const ids = f.snapshot().tasks[0].issues.map(issue => issue.id)
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'rework', issueIds: ids })
+  await f.complete(2, { stopReason: 'completed', output: [] })
+  await f.finishAudit(3, { specVerdict: 'pass', qualityVerdict: 'pass', issues: [],
+    resolutions: ids.map(id => ({ id, status: 'ADDRESSED', evidence: ['实际文件已核对：' + id] })) })
+  const fresh = await f.execute('delegation_verify', { taskId: 'a' })
+  const args = { taskId: 'a', verdict: 'accept', findings: ['C1', 'C2'].map(criterionId => ({
+    criterionId, finding: '本次实际验证符合要求', evidence: [fresh.results[0].ref] })),
+    resolutions: ids.map(id => ({ id, status: 'ADDRESSED', evidence: [fresh.results[0].ref] })) }
+  return { f, args, old }
+}
+
+test('acceptance permits redundant resolutions already addressed by this independent review without replacing reviewer proof', async () => {
+  const { f, args } = await independentlyReviewedRework()
+  assert.match(f.definition('delegation_review').parameters.properties.resolutions.description, /独立审查通过后通常省略/)
+  const issues = f.snapshot().tasks[0].issues
+  assert.ok(issues.every(issue => issue.status === 'addressed' && issue.reviewedAttempt === 2))
+  await f.execute('delegation_review', args)
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+  assert.deepEqual(f.snapshot().tasks[0].issues, issues, 'redundant coordinator confirmation cannot overwrite independent review evidence')
+  assert.equal(f.pending.length, 4, 'redundant confirmation does not start another implementation or review')
+})
+
+test('redundant independent-review resolutions preserve all acceptance guards', async t => {
+  const cases = [
+    { name: 'unknown issue', change(args) { args.resolutions[0].id = 'unknown-issue' }, pattern: /未知问题/ },
+    { name: 'duplicate issue', change(args) { args.resolutions.push(args.resolutions[0]) }, pattern: /重复/ },
+    { name: 'old evidence', change(args, old) { args.resolutions[0].evidence = [old.results[0].ref] }, pattern: /本次主控验证/ },
+    { name: 'empty evidence', change(args) { args.resolutions[0].evidence = [] }, pattern: /证据/ },
+    { name: 'not addressed', change(args) { args.resolutions[0].status = 'NOT_ADDRESSED' }, pattern: /ADDRESSED|解决/ },
+    { name: 'missing criterion', change(args) { args.findings.pop() }, pattern: /逐条/ },
+    { name: 'unfinished audit', state(task) { task.audit.status = 'running' }, pattern: /独立审查尚未通过/ },
+    { name: 'failed audit', state(task) { task.audit.qualityVerdict = 'fail' }, pattern: /独立审查尚未通过/ },
+    { name: 'old audit', state(task) { task.audit.forAttempt = 1 }, pattern: /独立审查尚未通过/ },
+    { name: 'unresolved issue', state(task) { task.issues[0].status = 'open' }, pattern: /独立审查|未解决/ },
+    { name: 'old issue review', state(task) { task.issues[0].reviewedAttempt = 1 }, pattern: /本次独立审查/ },
+    { name: 'missing audit confirmation', state(task) { task.audit.resolutions = [] }, pattern: /本次独立审查/ },
+  ]
+  for (const item of cases) await t.test(item.name, async () => {
+    const { f, args, old } = await independentlyReviewedRework()
+    if (item.change) item.change(args, old)
+    if (item.state) await f.reload(async file => {
+      const stored = JSON.parse(await readFile(file, 'utf8')); item.state(stored.plans[0].tasks[0]); await writeFile(file, JSON.stringify(stored))
+    })
+    await assert.rejects(f.execute('delegation_review', args), item.pattern)
+    assert.equal(f.snapshot().completion, null)
+    assert.equal(f.snapshot().tasks[0].status, 'review')
+    assert.equal(f.pending.length, 4)
+  })
+})
+
 test('rework tracks concrete findings and scoped re-review closes them without extending the task', async () => {
   const f = await fixture({ maxParallel: 1, maxAttempts: 2, maxActivations: 4 })
   await f.plan([card('a', { complexity: 'complex' })]); await f.execute('delegation_run')

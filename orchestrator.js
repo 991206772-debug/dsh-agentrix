@@ -2043,12 +2043,20 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       remember(plan, 'task.rework', '主 Agent 要求返工：' + feedback, task)
     } else if (args.verdict === 'accept') {
       if (unresolvedInputs(plan).length) throw new Error('还有未处理的用户补充消息；先同步新增要求或用 acknowledge 说明纯答复，再验收')
-      if (task.protocolVersion && (requiresAudit(task) || task.audit) &&
-          (task.audit?.forAttempt !== task.attempts || task.audit.status !== 'completed' || task.audit.specVerdict !== 'pass' || task.audit.qualityVerdict !== 'pass')) throw new Error('本次执行的独立审查尚未通过，不能验收；请核对审查状态和具体问题')
+      const auditPassed = task.audit?.status === 'completed' && task.audit.forAttempt === task.attempts && task.audit.specVerdict === 'pass' && task.audit.qualityVerdict === 'pass'
+      if (task.protocolVersion && (requiresAudit(task) || task.audit) && !auditPassed) throw new Error('本次执行的独立审查尚未通过，不能验收；请核对审查状态和具体问题')
       const resolutions = args.resolutions ?? [], openIssues = (task.issues ?? []).filter(issue => issue.status === 'open' && issue.severity !== 'minor')
-      if (!Array.isArray(resolutions) || new Set(resolutions.map(item => item.id)).size !== resolutions.length ||
-          resolutions.some(item => task.audit || item.status !== 'ADDRESSED' || !openIssues.some(issue => issue.id === item.id) || !Array.isArray(item.evidence) || !item.evidence.length ||
-            !item.evidence.every(id => task.evidence.some(evidence => evidence.callId === id && evidence.passed && evidence.attempt === task.attempts)))) throw new Error('原问题只能用本次实际验证的证据逐条确认解决，独立审查的问题须由审查者复查')
+      if (!Array.isArray(resolutions) || new Set(resolutions.map(item => item.id)).size !== resolutions.length) throw new Error('resolutions 必须是问题确认数组，问题编号不能重复')
+      for (const resolution of resolutions) {
+        const issue = (task.issues ?? []).find(issue => issue.id === resolution.id)
+        if (!issue) throw new Error('resolutions 包含未知问题编号：' + resolution.id + '；请使用当前任务 issues 中的真实编号')
+        if (resolution.status !== 'ADDRESSED' || !Array.isArray(resolution.evidence) || !resolution.evidence.length ||
+          !resolution.evidence.every(id => task.evidence.some(evidence => evidence.callId === id && evidence.passed && evidence.attempt === task.attempts))) throw new Error('原问题只能标为 ADDRESSED，并引用本次实际验证通过的证据')
+        if (task.audit) {
+          if (!auditPassed || issue.status !== 'addressed' || issue.reviewedAttempt !== task.attempts ||
+            !task.audit.resolutions?.some(item => item.id === issue.id && item.status === 'ADDRESSED')) throw new Error('本次独立审查尚未确认问题 ' + issue.id + ' 已解决；主控不能代替审查者关闭问题。请核对 audit.resolutions 与 issues；已经由本次独审确认的条目可省略重复 resolutions')
+        } else if (!openIssues.includes(issue)) throw new Error('主控只能用本次实际验证证据确认当前未解决的重要问题')
+      }
       if (openIssues.some(issue => !resolutions.some(item => item.id === issue.id))) throw new Error('仍有未解决的重要问题，必须逐条提交本次验证证据')
       if (task.execution?.status === 'DONE_WITH_CONCERNS') requireText(args.concernsResolution, '主控对执行疑点的处理说明', 2000)
       if (!task.checks.every(check => check.result?.passed && check.result.attempt === task.attempts)) throw new Error('主控验证尚未全部通过，不能验收')
@@ -2060,7 +2068,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         requireText(finding.finding, '验收结论', 1000)
         if (!Array.isArray(finding.evidence) || !finding.evidence.length || !finding.evidence.every(id => task.evidence.some(item => item.callId === id && item.passed && item.attempt === task.attempts))) throw new Error('验收证据必须引用本次主控验证实际返回的 callId 或 ref，不能附带说明；当前可用：' + evidenceChoices(task))
       }
-      const closeIssues = () => { for (const resolution of resolutions) {
+      const closeIssues = () => { if (task.audit) return; for (const resolution of resolutions) {
         const issue = task.issues.find(item => item.id === resolution.id)
         issue.status = 'addressed'; issue.resolutionEvidence = clone(resolution.evidence); issue.reviewedAttempt = task.attempts
       } }
@@ -2537,7 +2545,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     delivery: object({ summary: { type: 'string', description: '面向用户的简短交付说明，最多 2000 字。' },
       inlineFiles: array({ type: 'string', description: '用户要求直接阅读的正文文件，只能引用本计划 outputs。' }) }),
     issues: array({ ...object({ criterion: { type: 'integer', description: '旧格式，从 0 开始；优先使用 criterionId。' }, criterionId: { type: 'string', description: '验证结果提供的标准编号，例如 C1。' }, severity: { type: 'string', enum: ['critical', 'important', 'minor'] }, finding: string, evidence: array(string) }), required: ['severity', 'finding', 'evidence'] }),
-    resolutions: array({ ...object({ id: string, status: { type: 'string', enum: ['ADDRESSED'] }, evidence: array(string) }), required: ['id', 'status', 'evidence'] }),
+    resolutions: { ...array({ ...object({ id: string, status: { type: 'string', enum: ['ADDRESSED'] }, evidence: array(string) }), required: ['id', 'status', 'evidence'] }),
+      description: '无独立审查时，引用本次验证证据确认原问题。独立审查通过后通常省略；重复提供仅能确认本次独审已明确 ADDRESSED 的同一问题，不覆盖审查证据。' },
     findings: array({ ...object({ criterion: { type: 'integer', description: '旧格式，从 0 开始；优先使用 criterionId。' }, criterionId: { type: 'string', description: '直接复制 C1、C2 等标准编号，不能自行重新编号。' }, finding: { type: 'string', description: '主控根据实际验证给出的逐条结论；程序不会代填通过。' }, evidence: array({ type: 'string', description: '直接复制本任务本次 delegation_verify 返回的 ref，不添加前缀、文件说明或引号。' }) }), required: ['finding', 'evidence'] }),
   }, ['taskId', 'verdict'], review)
   routeTool('delegation_control', 'steer 同步给原代理；用户补充须关联 inputIds 并提供 additionalCriteria。纯答复用 acknowledge(inputIds,message)，无需 taskId。stop 仅取消；retry 须处理真实原因。', {
