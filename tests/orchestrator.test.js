@@ -3779,6 +3779,55 @@ test('task cards reject missing live-tool required arguments before any worker i
   assert.equal(f.pending.length, 1)
 })
 
+test('one invalid plan reports decision and all live check parameter errors without saving or dispatching', async () => {
+  const f = await fixture()
+  f.ctx.tools.schemas = () => [
+    { name: 'read', parameters: { required: ['file_path'], properties: { file_path: { type: 'string' }, limit: { type: 'integer' } }, additionalProperties: false } },
+    { name: 'pwsh', parameters: { required: ['description', 'command'], properties: { description: { type: 'string' }, command: { type: 'string' } } } },
+  ]
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'implement', source: { kind: 'user' }, content: [{ type: 'text', text: '按讨论结果实施' }] } })
+  const tasks = [card('research', { checks: [{ tool: 'read', arguments: { limit: 400 } }, { tool: 'pwsh', arguments: { command: 'node --version' } }] })]
+  await assert.rejects(f.execute('delegation_plan', { goal: '按方案实施', relation: 'new', start: true, tasks }), error => {
+    for (const field of ['decisionReason', 'file_path', 'description']) assert.ok(error.message.includes(field), error.message)
+    return true
+  })
+  assert.equal(f.snapshot(), undefined)
+  assert.equal(f.engine.decisionFor(f.parent.id), null)
+  assert.equal(f.calls.length, 0)
+  assert.equal(f.pending.length, 0)
+  const fixed = await f.execute('delegation_plan', { goal: '按方案实施', relation: 'new', start: true,
+    decisionReason: '研究任务独立执行，主控保留核对。', tasks: [card('research', { checks: [
+      { tool: 'read', arguments: { file_path: 'result.txt', limit: 400 } },
+      { tool: 'pwsh', arguments: { description: '查询 Node 版本', command: 'node --version' } },
+    ] })] })
+  assert.equal(fixed.plan.tasks[0].status, 'running')
+  assert.equal(f.pending.length, 1)
+})
+
+test('managed runtime version inspection uses a fixed command and an expiring exact permit', async () => {
+  const f = await fixture(); f.parent.session.header.cwd = f.directory
+  await f.plan([card('a', { writes: ['result.txt'] })]); await f.execute('delegation_run')
+  const calls = []
+  f.ctx.tools.execute = async exec => {
+    calls.push(exec)
+    assert.equal(f.engine.allowsVerification(exec), true)
+    assert.equal(f.engine.allowsVerification({ ...exec, arguments: { ...exec.arguments, command: 'Remove-Item result.txt' } }), false)
+    return { isError: false, value: { exitCode: 0 }, content: [{ type: 'text', text: 'node: v22' }] }
+  }
+  assert.match(f.engine.coordinatorWriteBlock({ agent: f.parent, name: 'pwsh', arguments: { command: 'node --version' } }), /runtime_versions/)
+  const result = await f.execute('delegation_inspect', { operation: 'runtime_versions' })
+  assert.equal(result.passed, true)
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].arguments.command, /'node'.*'python'.*'docker'/)
+  assert.match(calls[0].arguments.command, /Get-Command.*-CommandType Application/)
+  assert.match(calls[0].arguments.command, /--version/)
+  assert.doesNotMatch(calls[0].arguments.command, /docker ps|Invoke-Expression/)
+  assert.equal(f.engine.allowsVerification(calls[0]), false)
+  await assert.rejects(f.execute('delegation_inspect', { operation: 'runtime_versions', command: 'Remove-Item result.txt' }), /参数|命令/)
+  await assert.rejects(f.execute('delegation_inspect', { operation: 'runtime_versions', runtime: 'custom-script' }), /参数|命令/)
+  assert.equal(calls.length, 1)
+})
+
 test('supervision deduplicates errors, persists its correction cap and never restarts or releases a child twice', async () => {
   const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
   let call = 0
@@ -3928,5 +3977,24 @@ test('unmanaged child messaging remains visible and is not blocked by managed re
   f.ctx.tools.view = () => ({ restrictableNames: ['read', 'send_message', 'delegation_checkpoint', 'delegation_report'] })
   f.engine.refreshCoordinationTools(child)
   assert.deepEqual(restrictions, [])
+  assert.equal(f.engine.guardChild({ agent: child, name: 'send_message' }), undefined)
+})
+
+test('legacy managed workers retain their original native messaging contract', async () => {
+  const f = await fixture({ scopedTools: true })
+  await f.plan([card('legacy')])
+  await f.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    stored.plans[0].protocolVersion = 1
+    stored.plans[0].tasks[0].protocolVersion = 1
+    await writeFile(file, JSON.stringify(stored))
+  })
+  await f.execute('delegation_run')
+  const child = f.children[0], restrictions = []
+  child.ctx.tools.restrict = ({ deny }) => { restrictions.push([...deny]); return () => {} }
+  f.ctx.tools.view = () => ({ restrictableNames: ['read', 'send_message', 'delegation_checkpoint', 'delegation_report'] })
+  f.engine.refreshCoordinationTools(child)
+  assert.ok(restrictions.every(names => !names.includes('send_message')))
+  assert.equal(f.engine.guardCoordination({ agent: child, name: 'send_message', arguments: { target: 'parent' } }), undefined)
   assert.equal(f.engine.guardChild({ agent: child, name: 'send_message' }), undefined)
 })

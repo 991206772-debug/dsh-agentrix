@@ -16,7 +16,7 @@ auto 未托管普通操作无需先取得判断许可，漏记不会拦截或额
 | --- | --- |
 | `delegation_models` | 与派发共用托管模型授权和解析检查；默认检查后续执行模型，可选 role: reviewer；taskId 查看启动快照，检查通过不代表服务商已响应 |
 | `delegation_decide` | 主控提供 `relation: new/continue/update/question`；新需求或方案变化时提供 `mode: direct/delegate` 和非空 `reason`（最多 500 字）。多条待关联消息须给真实 `messageId` |
-| `delegation_inspect` | `operation: list/git_status`，可指定 `directory`；通过原生工具管线运行固定的只读检查，每次最多显示 200 项 |
+| `delegation_inspect` | `operation: list/git_status/runtime_versions`，可指定 `directory`；通过原生工具管线运行固定的只读检查。目录/Git 每次最多显示 200 项；版本检查固定查询 Node、Python、Docker，返回各项是否可用及版本，不查询容器状态 |
 | `delegation_note` | `kind: task_plan/findings/progress` 和 `content`；保存本会话本需求的专用记录并返回路径，最多 64 KiB |
 | `delegation_plan` | 有待关联消息时 `decisionReason` 必填；从 direct 改为 delegate 用 `relation:update` 并在派发前简短说明理由。`start:true` 一次记录、建计划并派发；省略 start 或填 false 仍仅保存。子工程用 `directory` 明确工程目录 |
 | `delegation_run` | 启动已有未启动计划，或明确处理问题后继续；合并派发后无需重复调用 |
@@ -38,7 +38,7 @@ auto 未托管普通操作无需先取得判断许可，漏记不会拦截或额
 
 当前需求进入托管计划后，主控和执行者的模型工具列表会隐藏 `team_task_create/update`、原生派单及 `wait_agent`；继续调用也不能创建、修改或勾选另一套任务。辅助看板仍可使用，`team_task_get/list`、`list_agents` 等只读观察保留，但观察结果和看板勾选都不能代替 Agentrix 的验收。子代理交报告后按现有事件通知原主控，无需额外等待工具或审批。
 
-模型工具列表同时按角色收缩：主控不显示执行者的报告与阶段记录入口；托管执行者不显示主控的规划、调度、验证、验收及 `send_message` 入口；独立审查者仅显示读取、检索和报告入口。补充确认不必单独回复“收到”，需要记录实际进展时用 `delegation_checkpoint`，最终结果用 `delegation_report`。执行时仍检查身份及角色，隐藏入口不代替工具检查。
+模型工具列表同时按角色收缩：主控不显示执行者的报告与阶段记录入口。当前托管期间，补充使用 `delegation_control({action:'steer',taskId,...})` 发给原执行者；taskId 不是原生 Team 成员名。插件阻止混用原生 `send_message`，并在宿主允许限制的工具中隐藏它；当前 DSH 自身注册的 Team 入口可能仍可见，运行提示会在 Team 身份提示后明确托管沟通规则，误用时在执行前给出正确入口。非托管会话及托管结束后保留原生消息能力。托管执行者不显示主控的规划、调度、验证、验收及可限制的 `send_message` 入口；独立审查者仅显示可限制的读取、检索和报告入口。补充确认不必单独回复“收到”，需要记录实际进展时用 `delegation_checkpoint`，最终结果用 `delegation_report`。执行时仍检查身份及角色，隐藏入口不代替工具检查。
 
 被拒写入、提前验证、错误报告等失败操作记录为计划事件，并通过 `plan.coordinationIssue` 返回具体原因和下一步；同一调用按 `callId` 去重，重复状态查询不消除失败。后续正确操作或对应任务阶段推进后标为已解决。误用工具不会取消原任务、重开代理或消耗纠偏次数。
 

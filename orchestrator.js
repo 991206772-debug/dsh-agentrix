@@ -13,7 +13,7 @@ export const DEFAULT_OPTIONS = Object.freeze({
 })
 export const REVIEWER_MODEL_POLICY = 'dispatcher-snapshot'
 export const COORDINATION_POLICY_VERSION = 7
-const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork'])
+const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork', 'send_message'])
 const COORDINATOR_TOOLS = new Set(['delegation_models', 'delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_wait', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
 const EXECUTOR_TOOLS = new Set(['delegation_checkpoint', 'delegation_report'])
 const ARGUMENT_RECOVERY_LIMIT = 2
@@ -27,7 +27,7 @@ export const OPTION_RANGES = Object.freeze({
   maxActivations: Object.freeze({ min: MIN_ACTIVATIONS, max: MAX_ACTIVATIONS }), taskTimeoutMinutes: Object.freeze({ min: 1, max: 240 }),
 })
 const CHECK_TOOLS = ['read', 'grep', 'glob', 'pwsh', 'bash']
-const MANAGED_READ_GUIDANCE = '当前计划尚有未验收的写入任务，普通 pwsh/bash 暂不可用。读取源码允许使用 read/grep/glob；目录与 Git 检查用 delegation_inspect；报告返回后的正式验证用 delegation_verify；执行中的补充用 delegation_control steer 同步原执行者。'
+const MANAGED_READ_GUIDANCE = '当前计划尚有未验收的写入任务，普通 pwsh/bash 暂不可用。读取源码允许使用 read/grep/glob；目录、Git 与 Node/Python/Docker 版本检查用 delegation_inspect（版本使用 operation:runtime_versions）；报告返回后的正式验证用 delegation_verify；执行中的补充用 delegation_control steer 同步原执行者，不使用原生 send_message。'
 const LIVE = ['starting', 'running']
 const STATUSES = ['queued', ...LIVE, 'review', 'accepted', 'failed', 'blocked', 'cancelled']
 const targetsOf = plan => plan.tasks.flatMap(task => task.audit ? [task, task.audit] : [task])
@@ -987,11 +987,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       undefined, { coordinationIssue: clone(plan.coordinationIssue) })
     backgroundSave()
   }
-  const conflictingTool = name => COORDINATION_CONFLICT_TOOLS.has(name) || (getConfig().delegationTools ?? []).includes(name)
+  const conflictingTool = (name, task) => COORDINATION_CONFLICT_TOOLS.has(name) && (name !== 'send_message' || !task || task.protocolVersion >= 2) || (getConfig().delegationTools ?? []).includes(name)
   function unavailableTool(agent, name) {
     if (getConfig().enabled === false) return false
     const expected = expectedRoutes.get(agent.id)
-    if (expected) return expected.task.role === 'reviewer' ? !REVIEW_TOOLS.has(name) : COORDINATOR_TOOLS.has(name) || conflictingTool(name) || name === 'list_subagent_models' || expected.task.protocolVersion >= 2 && name === 'send_message'
+    if (expected) return expected.task.role === 'reviewer' ? !REVIEW_TOOLS.has(name) : COORDINATOR_TOOLS.has(name) || conflictingTool(name, expected.task) || name === 'list_subagent_models'
     const header = agent.session?.header ?? service('sessions')?.get(agent.id)?.header ?? {}
     if (header.origin === 'subagent' || header.parentSession || header.delegationDepth > 0) return false
     const entry = decisions.get(agent.id)
@@ -1048,11 +1048,20 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (getConfig().enabled !== false && exec.name === 'list_subagent_models' && exec.agent &&
       !exec.agent.session?.header?.parentSession && exec.agent.session?.header?.origin !== 'subagent') return '[DSH Agentrix] 托管任务的模型查询使用 delegation_models，与实际派发共用检查。原生 list_subagent_models 只描述原生派单授权，不能据此判断托管配置模型失效。'
     const context = coordinationContext(exec.agent?.id)
-    if (!context || !conflictingTool(exec.name)) return
-    const message = `[DSH Agentrix] 当前任务由 Agentrix 托管，不能使用 ${exec.name} 另建、完成或等待另一套任务。真实状态以 delegation_status 为准。` +
+    if (!context || !conflictingTool(exec.name, context.task)) return
+    const message = (exec.name === 'send_message'
+      ? '[DSH Agentrix] ' + teamGuidance(exec.agent.id)
+      : `[DSH Agentrix] 当前任务由 Agentrix 托管，不能使用 ${exec.name} 另建、完成或等待另一套任务。真实状态以 delegation_status 为准。`) +
       coordinationNext(context.plan, context.task, context.plan.sessionId !== exec.agent.id)
     recordCoordinationFailure(exec, message, 'COORDINATION_TOOL_CONFLICT')
     return message
+  }
+  function teamGuidance(sessionId) {
+    const context = coordinationContext(sessionId)
+    if (!context) return ''
+    return context.plan.sessionId === sessionId
+      ? '当前任务由 Agentrix 托管，taskId 不是原生 Team 成员名。对本次托管任务，以此沟通规则为准：用 delegation_control({action:"steer",taskId,message}) 向原执行者补充要求，关联用户补充时提供 inputIds，新增验收要求时提供 additionalCriteria；不用 send_message、spawn_teammate 或原生团队看板管理这些任务。'
+      : '当前身份是 Agentrix 托管执行者或审查者。对本次托管任务，以此沟通规则为准：阶段进展用 delegation_checkpoint，最终成果或阻塞用 delegation_report；不用 send_message、delegation_control 或原生团队工具，也不另开代理。'
   }
   function observeCoordinationResult(exec, result) {
     const context = coordinationContext(exec.agent?.id)
@@ -1552,25 +1561,35 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       return { requested: selected, authorization: modelAuthorization(parent, selected), validation: 'not-checked', checkTool: 'delegation_models' }
     } catch (error) { return { requested: null, authorization: null, validation: 'blocked', issue: error.issue ?? { message: messageOf(error) }, checkTool: 'delegation_models' } }
   }
-  function validateChecks(tasks, parent, toolSet) {
-    if (typeof ctx.tools.schemas !== 'function') return
-    const schemas = ctx.tools.schemas(parent, toolSet)
-    for (const task of tasks) for (const check of task.checks) {
+  function checkGuidance(sessionId) {
+    const parent = service('agents')?.get(sessionId)
+    if (!parent || typeof ctx.tools.schemas !== 'function') return ''
+    const contracts = ctx.tools.schemas(parent).filter(tool => CHECK_TOOLS.includes(tool.name) && tool.parameters).map(tool => {
+      const required = tool.parameters.required ?? Object.entries(tool.parameters.properties ?? {}).filter(([, field]) => field?.required === true).map(([name]) => name)
+      return tool.name + ' 必填：' + (required.map(name => name + (tool.parameters.properties?.[name]?.type ? ':' + tool.parameters.properties[name].type : '')).join('、') || '无')
+    })
+    return contracts.length ? 'delegation_plan 的 checks.arguments 使用当前工具定义的原始字段名和类型：' + contracts.join('；') + '。其余参数以对应工具定义为准。' : ''
+  }
+  function validateChecks(tasks, parent, toolSet, errors = []) {
+    const schemas = ctx.tools.schemas?.(parent, toolSet)
+    if (schemas) for (const task of tasks) for (const [index, check] of task.checks.entries()) {
+      const label = `任务 ${task.id} 的检查 ${index + 1} (${check.tool})`
       const schema = schemas.find(item => item.name === check.tool)?.parameters
-      if (!schemas.some(item => item.name === check.tool)) throw new Error(`任务 ${task.id} 的验证工具 ${check.tool} 当前不可用，请先核对实际工具定义`)
+      if (!schemas.some(item => item.name === check.tool)) { errors.push(`${label} 当前不可用，请先核对实际工具定义`); continue }
       if (!schema) continue
       const required = schema.required ?? Object.entries(schema.properties ?? {}).filter(([, field]) => field?.required === true).map(([name]) => name)
-      for (const name of required) if (!Object.hasOwn(check.arguments, name)) throw new Error(`任务 ${task.id} 的 ${check.tool} 验证参数缺少必填字段 ${name}；请按当前工具 schema 修正任务卡`)
+      for (const name of required) if (!Object.hasOwn(check.arguments, name)) errors.push(`${label} 验证参数缺少必填字段 ${name}`)
       for (const [name, value] of Object.entries(check.arguments)) {
         const field = schema.properties?.[name]
-        if (!field && schema.additionalProperties === false) throw new Error(`任务 ${task.id} 的 ${check.tool} 不接受参数 ${name}`)
+        if (!field && schema.additionalProperties === false) errors.push(`${label} 不接受参数 ${name}`)
         if (field && typeof field.type === 'string') {
           const valid = field.type === 'integer' ? Number.isInteger(value) : field.type === 'array' ? Array.isArray(value)
             : field.type === 'object' ? value !== null && typeof value === 'object' && !Array.isArray(value) : typeof value === field.type
-          if (!valid) throw new Error(`任务 ${task.id} 的 ${check.tool} 参数 ${name} 应为 ${field.type}`)
+          if (!valid) errors.push(`${label} 参数 ${name} 应为 ${field.type}`)
         }
       }
     }
+    if (errors.length) throw new Error('任务卡验证未通过；请一次修正以下问题：\n' + errors.map(message => '- ' + message).join('\n'))
   }
   async function planDirectory(args, parent, tasks) {
     const parentDirectory = parent.session?.header?.cwd
@@ -2359,11 +2378,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     } else { reportEvent(); await save() }
     return { status: args.status, taskId: task.id, attempt: task.attempts, reportPath: task.execution.reportPath }
   }, true)
-  routeTool('delegation_inspect', '准备阶段只读检查：list 列出当前目录前 200 项（不递归）；git_status 查看 Git 基线。只接受操作类型与目录，不接受脚本，不占业务操作额度。深层检索使用 glob/grep。', {
-    operation: { type: 'string', enum: ['list', 'git_status'] }, directory: string,
+  routeTool('delegation_inspect', '准备阶段只读检查：list 列出当前目录前 200 项（不递归）；git_status 查看 Git 基线；runtime_versions 查询 Node、Python、Docker 版本并标明不可用项，不查询运行中的容器。只接受操作类型与目录，不接受脚本，不占业务操作额度。深层检索使用 glob/grep。', {
+    operation: { type: 'string', enum: ['list', 'git_status', 'runtime_versions'] }, directory: string,
   }, ['operation'], async (args, exec) => {
     if (Object.keys(args).some(key => !['operation', 'directory'].includes(key))) throw new Error('检查参数只接受 operation 和 directory，不接受命令脚本')
-    if (!['list', 'git_status'].includes(args.operation)) throw new Error('检查操作只能是 list 或 git_status')
+    if (!['list', 'git_status', 'runtime_versions'].includes(args.operation)) throw new Error('检查操作只能是 list、git_status 或 runtime_versions')
     const parent = own(exec), cwd = parent.session?.header?.cwd
     if (args.directory !== undefined) requireText(args.directory, '检查目录', 4000)
     if (!args.directory && !cwd) throw new Error('当前会话未提供目录，请指定 directory')
@@ -2371,9 +2390,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const literal = "'" + directory.replaceAll("'", "''") + "'"
     const command = args.operation === 'list'
       ? `Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath ${literal} -Force | Microsoft.PowerShell.Utility\\Select-Object -First 200 Name,Mode,Length`
-      : `& (Microsoft.PowerShell.Core\\Get-Command git -CommandType Application | Microsoft.PowerShell.Utility\\Select-Object -First 1).Source --no-optional-locks -c core.fsmonitor=false --no-pager -C ${literal} status --short --branch --untracked-files=normal | Microsoft.PowerShell.Utility\\Select-Object -First 200`
+      : args.operation === 'git_status'
+        ? `& (Microsoft.PowerShell.Core\\Get-Command git -CommandType Application | Microsoft.PowerShell.Utility\\Select-Object -First 1).Source --no-optional-locks -c core.fsmonitor=false --no-pager -C ${literal} status --short --branch --untracked-files=normal | Microsoft.PowerShell.Utility\\Select-Object -First 200`
+        : `$runtimeVersions = foreach ($runtimeName in @('node','python','docker')) { try { $runtimeApp = Microsoft.PowerShell.Core\\Get-Command $runtimeName -CommandType Application -ErrorAction Stop | Microsoft.PowerShell.Utility\\Select-Object -First 1; $runtimeVersion = & $runtimeApp.Source --version 2>&1; [pscustomobject]@{ runtime = $runtimeName; available = ($LASTEXITCODE -eq 0); version = ($runtimeVersion -join '\n') } } catch { [pscustomobject]@{ runtime = $runtimeName; available = $false; version = $_.Exception.Message } } }; $runtimeVersions | Microsoft.PowerShell.Utility\\ConvertTo-Json -Depth 3`
     const parameters = ctx.tools.schemas?.(parent)?.find(tool => tool.name === 'pwsh')?.parameters
-    const nativeArgs = { command, ...(!parameters || parameters.properties?.description ? { description: '读取目录或 Git 状态，记录任务基线' } : {}) }
+    const nativeArgs = { command, ...(!parameters || parameters.properties?.description ? { description: '只读检查目录、Git 状态或运行工具版本' } : {}) }
     const { result, callId } = await executePermitted(parent, 'pwsh', nativeArgs, exec)
     return { operation: args.operation, directory, limit: 200, callId, passed: !result.isError && result.value?.exitCode === 0,
       exitCode: result.value?.exitCode ?? null, output: brief(textOf(result.content), 16000) }
@@ -2428,7 +2449,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       reviewReason: { type: 'string', description: '指定 reviewPolicy 时必填，说明风险和所选审查方式的必要性；最多 1000 字。' },
       criteria: { ...array(string), description: '只包含用户要求和必要的正确性验证；主控的实施或写作建议不自动成为硬性验收标准。' },
       checks: { ...array({ ...object({ tool: { type: 'string', enum: CHECK_TOOLS }, arguments: { type: 'object', additionalProperties: true } }), required: ['tool', 'arguments'] }),
-        description: '合并可一起执行的固定检查；相关产物与要求未变化且已成功时复用结果，不重复校准同一指标。' } }),
+        description: 'arguments 必须使用对应原生工具定义的字段名、类型和全部必填项。合并可一起执行的固定检查；相关产物与要求未变化且已成功时复用结果，不重复校准同一指标。' } }),
       required: ['id', 'title', 'instructions', 'scope', 'outputs', 'writes', 'complexity', 'criteria', 'checks'] }),
   }, ['goal', 'tasks'], async (args, exec) => {
     const parent = own(exec), previous = plans.get(parent.id)
@@ -2445,10 +2466,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     if (previous?.cancellation?.cleanup && previous.cancellation.cleanup.status !== 'completed') throw new Error('原计划资源清理未完成；处理原因后再次 delegation_cancel 清理，不能覆盖原计划')
     if (previous && !['accepted', 'cancelled'].includes(planStatus(previous))) throw new Error('当前计划尚未验收；请监督、返工或取消后再建新计划')
-    if (pendingMessages(parent.id).length && args.decisionReason === undefined) throw new Error('建立计划前须明确消息关联，decisionReason 必填；一并提供真实 messageId 和 relation。若从 direct 改为 delegate，请用 relation:update 并说明理由；continue 只沿用原执行方式')
+    const errors = pendingMessages(parent.id).length && args.decisionReason === undefined
+      ? ['建立计划前须明确消息关联，decisionReason 必填；一并提供真实 messageId 和 relation。若从 direct 改为 delegate，请用 relation:update 并说明理由；continue 只沿用原执行方式'] : []
     const validated = validatePlan(args)
     const cwd = await planDirectory(args, parent, validated.tasks)
-    validateChecks(validated.tasks, parent, exec.toolSet)
+    validateChecks(validated.tasks, parent, exec.toolSet, errors)
     if (args.decisionReason !== undefined) await recordDecision({ mode: 'delegate', reason: args.decisionReason, relation: args.relation, messageId: args.messageId }, exec)
     if (!previous && plans.size >= MAX_PLANS) {
       const oldest = [...plans.values()].filter(plan => ['accepted', 'cancelled'].includes(planStatus(plan)) &&
@@ -2645,7 +2667,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   })
   return {
     ready, snapshot, observe, allowsVerification, decisionFor, decisionCurrent, decisionGuidance, recoverDecision, sourceOf, revisionOf,
-    refreshCoordinationTools, guardCoordination, coordinatorWriteBlock, recordCoordinationFailure, modelRoutingState,
+    refreshCoordinationTools, guardCoordination, coordinatorWriteBlock, recordCoordinationFailure, modelRoutingState, checkGuidance, teamGuidance,
     isToolHiddenByPolicy(sessionId, name) {
       return ['delegation_verify', 'delegation_review'].includes(name) && Boolean(coordinationRestrictions.get(sessionId)?.names.includes(name))
     },

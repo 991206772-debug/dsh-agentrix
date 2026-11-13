@@ -135,7 +135,7 @@ test('a new direct request can write unrelated files while the previous plan kee
 
 test('host guards and request tools share managed coordination policy, including denied writes', async () => {
   const h = await host(); await h.state()
-  const tools = ['read', 'list_agents', 'team_task_list', 'team_task_create', 'team_task_update', 'wait_agent'].map(name => ({ name }))
+  const tools = ['read', 'list_agents', 'team_task_list', 'team_task_create', 'team_task_update', 'wait_agent', 'send_message'].map(name => ({ name }))
   let denied = new Set()
   h.ctx.tools.view = () => ({ restrictableNames: new Set(tools.map(tool => tool.name)) })
   h.agent.ctx = { tools: { restrict({ deny }) { denied = new Set(deny); return () => { denied.clear() } } } }
@@ -145,12 +145,13 @@ test('host guards and request tools share managed coordination policy, including
       tasks: [{ id: 'a', title: '实现页面', instructions: '只修改工具文件', scope: '隔离工具', outputs: ['tool.html'], writes: ['tool.html'],
         dependsOn: [], complexity: 'routine', criteria: ['文件可读取'], checks: [{ tool: 'read', arguments: { file_path: 'tool.html' } }] }] },
     { agent: h.agent, callId: 'plan-coordination' })
-    assert.deepEqual([...denied], ['team_task_create', 'team_task_update', 'wait_agent'])
+    assert.deepEqual([...denied], ['send_message', 'team_task_create', 'team_task_update', 'wait_agent'])
     const request = Object.freeze({ sessionId: 'root', provider: 'local', model: 'coordinator', tools: Object.freeze(tools.filter(tool => !denied.has(tool.name))) })
     let dispatched
     h.stream(request, () => { dispatched = request.tools })
     assert.deepEqual(dispatched.map(tool => tool.name), ['read', 'list_agents', 'team_task_list'])
-    assert.equal(tools.length, 6, 'scoped restrictions do not mutate the host tool registry')
+    assert.equal(tools.length, 7, 'scoped restrictions do not mutate the host tool registry')
+    assert.match(h.call('send_message', 'wrong-message-channel', h.agent, { target: 'a', message: '补充原任务' }), /delegation_control[\s\S]*steer/)
     assert.match(h.call('team_task_update', 'board-complete', h.agent, { action: 'complete' }), /Agentrix/)
     assert.match(h.call('write', 'denied-write', h.agent, { file_path: 'tool.html' }), /尚未验收/)
     const response = await new Promise(resolve => h.routes.get('/dsh-delegation-first/api/state')({ method: 'GET', url: '/dsh-delegation-first/api/state?sessionId=root' },
@@ -160,6 +161,92 @@ test('host guards and request tools share managed coordination policy, including
     assert.equal(response.plans[0].completion, null)
     assert.equal(h.call('team_task_list'), undefined)
     assert.equal(h.call('team_task_create', 'unrelated', { id: 'other' }), undefined)
+  } finally { await h.close() }
+})
+
+test('native messaging remains available outside a managed plan and returns after off or cancellation', async () => {
+  delete process.env.DSH_DELEGATION_FIRST
+  const h = await host(); await h.state()
+  const tools = ['read', 'send_message'].map(name => ({ name }))
+  let denied = new Set()
+  const service = h.ctx.get
+  h.ctx.get = name => name === 'agents' ? { list: () => [h.agent], get: id => id === h.agent.id ? h.agent : undefined } : service(name)
+  h.ctx.tools.view = () => ({ restrictableNames: new Set(tools.map(tool => tool.name)) })
+  h.agent.ctx = { tools: { restrict({ deny }) { denied = new Set(deny); return () => { denied.clear() } } } }
+  const message = () => h.call('send_message', 'native-message', h.agent, { target: 'real-native-peer', message: '沟通原生任务' })
+  try {
+    assert.equal(message(), undefined, 'no managed plan must not disable native messaging')
+    h.turn('委派核对文件')
+    await h.definitions.get('delegation_plan').execute({ goal: '核对文件', relation: 'new', decisionReason: '执行者核对，主控验收。',
+      tasks: [{ id: 'a', title: '核对文件', instructions: '读取 fixture.txt', scope: 'fixture.txt', outputs: ['fixture.txt'], writes: [],
+        complexity: 'routine', criteria: ['文件存在'], checks: [{ tool: 'read', arguments: { file_path: 'fixture.txt' } }] }] },
+    { agent: h.agent, callId: 'messaging-plan' })
+    assert.ok(denied.has('send_message'))
+    assert.match(message(), /delegation_control[\s\S]*steer/)
+    assert.equal(h.call('send_message', 'unmanaged-native-child', { id: 'worker' }, { target: 'real-native-peer', message: '原生沟通' }), undefined,
+      'a native child outside the managed executor roster keeps its messaging contract')
+    assert.equal((await h.request('POST', { mode: 'off' })).status, 200)
+    assert.equal(message(), undefined)
+    assert.ok(!denied.has('send_message'), 'turning the plugin off releases agent-scoped restrictions')
+    assert.equal((await h.request('POST', { mode: 'auto' })).status, 200)
+    assert.ok(denied.has('send_message'))
+    h.turn('取消当前计划', 'cancel-messaging-plan')
+    await h.definitions.get('delegation_cancel').execute({ reason: '用户取消当前计划', messageId: 'cancel-messaging-plan' },
+      { agent: h.agent, callId: 'cancel-messaging-plan', signal: new AbortController().signal })
+    assert.equal(message(), undefined)
+    assert.ok(!denied.has('send_message'), 'cancelled plans release native messaging')
+  } finally { await h.close() }
+})
+
+test('the initial coordinator prompt exposes current native check parameter requirements', async () => {
+  const h = await host(); await h.state()
+  const sections = []
+  let readRequired = 'file_path'
+  h.ctx.tools.schemas = () => [
+    { name: 'read', parameters: { type: 'object', properties: { [readRequired]: { type: 'string' } }, required: [readRequired] } },
+    { name: 'pwsh', parameters: { type: 'object', properties: { command: { type: 'string' }, description: { type: 'string' } }, required: ['command', 'description'] } },
+    ...[...h.definitions.keys()].map(name => ({ name })),
+  ]
+  h.agent.ctx = { systemPrompt: { section(value) { sections.push(value); return () => {} } } }
+  try {
+    h.emit('agent/created', { agent: h.agent })
+    h.turn('请委派核对实际文件')
+    const prompt = () => sections.map(section => typeof section.text === 'function' ? section.text() : section.text).join('\n')
+    assert.match(prompt(), /read[\s\S]*file_path/)
+    assert.match(prompt(), /pwsh[\s\S]*command/)
+    assert.match(prompt(), /pwsh[\s\S]*description/)
+    readRequired = 'current_file_path'
+    assert.match(prompt(), /current_file_path/, 'requirements must come from the current host schema rather than fixed read/pwsh examples')
+    assert.equal((await h.state()).source, null, 'publishing tool guidance does not create or classify a plan')
+  } finally { await h.close() }
+})
+
+test('managed messaging guidance follows native Team identity and disappears after cancellation', async () => {
+  const h = await host(); await h.state()
+  const contexts = []
+  h.agent.ctx = { systemPrompt: {
+    section() { return () => {} },
+    getContextOrder(name) { assert.equal(name, 'TEAM_IDENTITY'); return 60 },
+    context(value) { contexts.push(value); return () => {} },
+  } }
+  try {
+    h.emit('agent/created', { agent: h.agent })
+    const guidance = contexts.find(context => context.name === 'dsh-delegation-first:coordination')
+    assert.ok(guidance)
+    assert.equal(guidance.required, true)
+    assert.ok(guidance.order > 60, 'the current managed contract is presented after native Team identity')
+    assert.equal(guidance.text(), '')
+    h.turn('委派只读调研')
+    await h.definitions.get('delegation_plan').execute({ goal: '调研文件', relation: 'new', decisionReason: '执行者调研并提交报告。',
+      tasks: [{ id: 'research', title: '调研文件', instructions: '读取 fixture.txt', scope: 'fixture.txt', outputs: ['fixture.txt'], writes: [],
+        complexity: 'routine', criteria: ['事实准确'], checks: [{ tool: 'read', arguments: { file_path: 'fixture.txt' } }] }] },
+    { agent: h.agent, callId: 'messaging-guidance-plan' })
+    assert.match(guidance.text(), /delegation_control[\s\S]*steer/)
+    assert.match(guidance.text(), /send_message/)
+    h.turn('取消当前计划', 'cancel-messaging-guidance')
+    await h.definitions.get('delegation_cancel').execute({ reason: '用户取消当前计划', messageId: 'cancel-messaging-guidance' },
+      { agent: h.agent, callId: 'cancel-messaging-guidance', signal: new AbortController().signal })
+    assert.equal(guidance.text(), '', 'completed managed coordination must not replace future native Team messaging guidance')
   } finally { await h.close() }
 })
 
