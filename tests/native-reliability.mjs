@@ -8,7 +8,7 @@ const { apply, RUNTIME_BUILD } = await import(process.env.AGENTRIX_PACKAGE_ROOT
   ? pathToFileURL(path.join(process.env.AGENTRIX_PACKAGE_ROOT, 'index.js')).href : new URL('../index.js', import.meta.url).href)
 
 const scenario = process.argv[2] ?? 'direct'
-assert.ok(['direct', 'separate-error', 'acceptance-save', 'cancel-cleanup', 'delivery-persistence', 'audited-resolutions'].includes(scenario))
+assert.ok(['direct', 'separate-error', 'acceptance-save', 'cancel-cleanup', 'delivery-persistence', 'audited-resolutions', 'project-directory'].includes(scenario))
 if (!process.env.DSH_MODULE_ROOT) throw new Error('DSH_MODULE_ROOT is required')
 const native = name => import(pathToFileURL(path.join(process.env.DSH_MODULE_ROOT, name, 'lib/index.js')).href)
 const { Context } = await native('cordis')
@@ -22,16 +22,23 @@ const ctx = new Context(), routes = new Map(), phases = new Map(), events = [], 
 const workerGate = Promise.withResolvers()
 const activations = new Map()
 let cleanupFixed = false
-const output = path.join(directory, 'owned.txt'), independent = path.join(directory, 'independent.txt')
+const projectDirectory = scenario === 'project-directory' ? path.join(directory, 'project') : directory
+const output = path.join(projectDirectory, 'owned.txt'), independent = path.join(directory, 'independent.txt')
 let parent, handle, sequence = 0, requestCount = 0, fault = false, runsFile, closing = false
 ctx.provide('webServer', { register(route) { routes.set(route.path, route.handler); return () => routes.delete(route.path) } })
-ctx.provide('workingDirectory', { get: () => directory, async set() {} })
+ctx.provide('workingDirectory', { get: () => directory, async ensure() { return directory }, async set() {} })
 for (const [module, name] of [['dsh-session-projection', 'SessionProjectionRegistry'], ['dsh-session', 'SessionStore'],
   ['dsh-agent', 'AgentRegistry'], ['dsh-system-prompt', 'SystemPrompt'], ['dsh-llm', 'LlmRuntime'],
   ['dsh-agent-loop', 'AgentLoop'], ['dsh-subagent', 'SubagentRuntime']]) ctx.plugin((await native(module))[name])
 ctx.plugin(ToolRuntime)
 if (scenario === 'delivery-persistence') ctx.plugin(await native('dsh-session-persistence-jsonl'), { root: path.join(directory, 'sessions'), compression: 'none' })
 ctx.plugin(await native('dsh-subagent-spawn-in-process'))
+if (scenario === 'project-directory') {
+  ctx.plugin((await native('dsh-subprocess-local')).default)
+  ctx.plugin((await native('dsh-pwsh-local')).default, { cwd: directory })
+  ctx.plugin(await native('dsh-shell-env'))
+  ctx.plugin(await native('dsh-tool-pwsh'), { enableRunInBackground: false })
+}
 async function until(predicate, label) {
   for (let index = 0; index < 800; index++) { if (await predicate()) return; await new Promise(resolve => setTimeout(resolve, 10)) }
   throw new Error('Timed out: ' + label)
@@ -62,6 +69,11 @@ class Adapter extends LlmAdapter {
         ...(task.attempts > 1 ? { resolutions: task.reworkIds.map(id => ({ id, status: 'ADDRESSED', evidence: ['owned.txt:1 独审复核通过'] })) } : {}) })
     } else if (request.sessionId !== 'root') {
       assert.equal(request.model, 'worker')
+      if (scenario === 'project-directory') {
+        assert.ok(!request.tools.some(item => item.name === 'send_message'), 'a managed worker cannot see its prohibited messaging tool')
+        assert.ok(request.tools.some(item => item.name === 'delegation_checkpoint'))
+        assert.ok(request.tools.some(item => item.name === 'delegation_report'))
+      }
       if (phase === 0) block = tool('read', { file_path: output })
       else {
         if (scenario === 'separate-error') await workerGate.promise
@@ -100,12 +112,16 @@ class Adapter extends LlmAdapter {
       reviewReason: scenario === 'audited-resolutions' ? '原生回放核对独立复查与重复确认的边界。' : '仅核对隔离文件，由主控实际验证。', criteria: ['内容包含 verified'],
       checks: [{ tool: 'read', arguments: { file_path: output } }],
       }
+      if (scenario === 'project-directory') Object.assign(task, { writes: ['owned.txt'], outputs: ['owned.txt'],
+        checks: [{ tool: 'read', arguments: { file_path: 'owned.txt' } }, { tool: 'pwsh', arguments: { command: "Get-Content -LiteralPath './owned.txt' -Raw", description: '读取工程目录中的实际交付物' } }] })
       block = tool('delegation_plan', { relation: 'new', start: true, goal: '核对隔离文件', decisionReason: '执行者读取独立文件，主控验证验收。',
+        ...(scenario === 'project-directory' ? { directory: projectDirectory } : {}),
         tasks: scenario === 'cancel-cleanup' ? [{ ...task, writes: [] }, { ...task, id: 'b', writes: [] }] : [task] })
     }
     else if (task.status === 'running') block = tool('delegation_wait')
     else if (task.status === 'review' && !task.checks[0].result) block = tool('delegation_verify', { taskId: 'a' })
     else if (task.status === 'review') {
+      if (scenario === 'project-directory') assert.ok(task.checks.every(check => check.result?.passed), JSON.stringify(task.checks))
       if (scenario === 'audited-resolutions' && task.audit?.status !== 'completed') block = tool('delegation_wait')
       else if (scenario === 'audited-resolutions' && task.audit.specVerdict === 'fail') block = tool('delegation_review', {
         taskId: 'a', verdict: 'rework', issueIds: task.issues.filter(issue => issue.status === 'open').map(issue => issue.id) })
@@ -133,6 +149,9 @@ const requestState = () => request('state')
 try {
   await until(() => ctx.get('agentLoop') && ctx.get('subagents'), 'native services')
   ctx.tools.setExecutor(new NativeToolExecutor(ctx))
+  if (scenario === 'project-directory') ctx.tools.register(defineTool({ name: 'send_message', description: 'Native messaging visibility probe', parameters: {},
+    output: { schema: { type: 'object', additionalProperties: true }, render: () => [] },
+    async execute() { throw new Error('managed workers must not call ordinary messaging') } }))
   ctx.llm.registerAdapter(['scripted'], new Adapter())
   for (const name of ['read', 'edit']) ctx.tools.register(defineTool({ name, description: 'Isolated reliability fixture',
     parameters: { file_path: { type: 'string', required: true }, ...name === 'edit' ? { old_string: { type: 'string' }, new_string: { type: 'string' } } : {} },
@@ -164,6 +183,7 @@ try {
     return receipt
   }
   ctx.on('session/event', (session, event) => events.push({ sessionId: session.id, ...event }), { global: true })
+  await mkdir(projectDirectory, { recursive: true })
   await writeFile(output, 'verified'); await writeFile(independent, 'verified')
   apply(ctx)
   await until(() => routes.has('/dsh-delegation-first/api/state'), 'plugin routes')
@@ -202,6 +222,23 @@ try {
     assert.equal(activations.size, 2)
     assert.ok([...releases.values()].every(count => count === 1))
     assert.ok([...activations.keys()].every(id => !ctx.agents.get(id)), 'native child registries are empty after drain retry')
+  } else if (scenario === 'project-directory') {
+    const plan = result.plans[0]
+    assert.ok(plan, JSON.stringify(events.filter(event => ['tool/result', 'turn/end'].includes(event.type))))
+    assert.equal(plan.cwd, projectDirectory)
+    assert.equal(parent.session.header.cwd, directory)
+    assert.deepEqual(plan.tasks[0].writes, [output])
+    assert.equal([...activations.values()][0].request.cwd, projectDirectory)
+    assert.equal(plan.completion.outcome, 'completed', JSON.stringify({ checks: plan.tasks[0].checks, task: plan.tasks[0].error, issue: plan.tasks[0].issue,
+      errors: events.filter(event => event.type === 'tool/result' && event.data.message?.isError).map(event => event.data.message.content) }))
+    assert.equal(plan.delivery.files[0].path, output)
+    assert.equal(plan.tasks[0].checks[0].arguments.file_path, output)
+    assert.equal(plan.tasks[0].checks[1].arguments.workdir, projectDirectory)
+    assert.equal(plan.tasks[0].checks[1].result.exitCode, 0)
+    assert.match(plan.tasks[0].checks[1].result.summary, /verified/)
+    assert.equal(activations.size, 1)
+    assert.ok([...releases.values()].every(count => count === 1))
+    assert.ok(!events.some(event => event.type === 'tool/result' && event.data.message?.isError))
   } else if (scenario === 'audited-resolutions') {
     const task = result.plans[0].tasks[0]
     assert.equal(result.plans[0].completion.outcome, 'completed')

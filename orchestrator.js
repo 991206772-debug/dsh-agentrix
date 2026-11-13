@@ -989,7 +989,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   function unavailableTool(agent, name) {
     if (getConfig().enabled === false) return false
     const expected = expectedRoutes.get(agent.id)
-    if (expected) return expected.task.role === 'reviewer' ? !REVIEW_TOOLS.has(name) : COORDINATOR_TOOLS.has(name) || conflictingTool(name) || name === 'list_subagent_models'
+    if (expected) return expected.task.role === 'reviewer' ? !REVIEW_TOOLS.has(name) : COORDINATOR_TOOLS.has(name) || conflictingTool(name) || name === 'list_subagent_models' || expected.task.protocolVersion >= 2 && name === 'send_message'
     const header = agent.session?.header ?? service('sessions')?.get(agent.id)?.header ?? {}
     if (header.origin === 'subagent' || header.parentSession || header.delegationDepth > 0) return false
     const entry = decisions.get(agent.id)
@@ -1291,7 +1291,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       ...plan.tasks.filter(item => task.dependsOn.includes(item.id)).map(item => `已验收前置任务 ${item.id}：${item.execution ? item.execution.summary + '；完整报告：' + item.execution.reportPath : brief(item.report)}`),
       task.feedback ? `主控返工要求：${task.feedback}` : '',
       task.reworkIds?.length ? '只修复以下问题及其直接回归，不扩展任务：\n' + JSON.stringify(task.issues.filter(issue => task.reworkIds.includes(issue.id))) : '',
-      '短任务只提交最终报告。较长任务在调查转实现、自检结束或需要主控裁决时，用 delegation_checkpoint({requestReview:true,...}) 记录当前成果、剩余问题、下一步和成功工具 callId；主控核对不要求你另开代理或等待用户点击继续。记录不代表验收。读取用 read/grep/glob，read 参数使用 file_path；管理入口仅供主控。',
+      '短任务只提交最终报告，单纯确认收到补充不需要工具调用；有实际阶段成果或需裁决时使用 delegation_checkpoint，不使用 send_message。较长任务在调查转实现、自检结束或需要主控裁决时，用 delegation_checkpoint({requestReview:true,...}) 记录当前成果、剩余问题、下一步和成功工具 callId；主控核对不要求你另开代理或等待用户点击继续。记录不代表验收。读取用 read/grep/glob，read 参数使用 file_path；管理入口仅供主控。',
       '同类工具错误重复时按主控纠正继续。调用次数、运行时间和 Token 仅提醒或统计，不停止、不换代理；输出截断在原代理续接。使用已有产物和上下文完成任务，避免重复调查和重复执行。',
       '结束前必须调用 delegation_report：status 为 DONE、DONE_WITH_CONCERNS、NEEDS_CONTEXT 或 BLOCKED；summary 为短结论，report 保存完整交付路径、逐条证据、测试命令及结果。后两种状态必须提供 reason，说明缺什么或为什么阻塞；有疑点须列 concerns。报告由插件归档，不要自行创建档案目录。工具确认后自动结束，不用 send_message 交成果，不再修改交付物或另写总结。不要把自称完成当成验收。',
     ].filter(Boolean).join('\n')
@@ -1569,6 +1569,39 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         }
       }
     }
+  }
+  async function planDirectory(args, parent, tasks) {
+    const parentDirectory = parent.session?.header?.cwd
+    if (args.directory === undefined) {
+      if (parentDirectory) for (const task of tasks) {
+        if (![...task.writes, ...task.outputs].some(file => !path.isAbsolute(file))) continue
+        for (const check of task.checks) if (['pwsh', 'bash'].includes(check.tool) && typeof check.arguments.workdir === 'string' &&
+          normalizedPath(path.resolve(parentDirectory, check.arguments.workdir)) !== normalizedPath(parentDirectory)) {
+          throw new Error(`任务 ${task.id} 的相对路径基于父会话目录 ${parentDirectory}，检查 workdir 却是 ${check.arguments.workdir}；请用 directory 明确工程目录，或将 writes/outputs 全部写成绝对路径`)
+        }
+      }
+      return parentDirectory
+    }
+    const supplied = requireText(args.directory, '工程目录 directory', 4000)
+    if (!path.isAbsolute(supplied) && !parentDirectory) throw new Error('相对 directory 需要父会话目录；请提供绝对工程目录')
+    let directory
+    try {
+      directory = await realpath(path.resolve(parentDirectory ?? process.cwd(), supplied))
+      if (!(await lstat(directory)).isDirectory()) throw new Error('not a directory')
+    } catch { throw new Error('directory 必须是已存在且可读取的工程目录：' + supplied) }
+    const schemas = ctx.tools.schemas?.(parent)
+    for (const task of tasks) for (const check of task.checks) {
+      const parameters = schemas?.find(item => item.name === check.tool)?.parameters
+      if (['pwsh', 'bash'].includes(check.tool)) {
+        if (parameters && !parameters.properties?.workdir) throw new Error(`验证工具 ${check.tool} 不支持 workdir，不能保证 directory 内执行；请改用支持工作目录的验证工具`)
+        check.arguments.workdir = path.resolve(directory, check.arguments.workdir ?? '.')
+      } else {
+        const keys = ['file_path', 'path'].filter(key => typeof check.arguments[key] === 'string')
+        for (const key of keys) check.arguments[key] = path.resolve(directory, check.arguments[key])
+        if (!keys.length && ['grep', 'glob'].includes(check.tool)) check.arguments.path = directory
+      }
+    }
+    return directory
   }
   async function preflight(plan, parent, signal, retryTask) {
     validateChecks(plan.tasks.filter(task => task === retryTask || task.status === 'queued'), parent)
@@ -2378,12 +2411,16 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     try { await write } finally { if (noteWrites.get(target) === write) noteWrites.delete(target) }
     return { path: target, sessionId: parent.id, requestId: source?.messageId ?? null, kind: args.kind }
   })
-  routeTool('delegation_plan', '主控提交可验证的任务拆分。通常一并提供 decisionReason 和 start:true，保存决定、计划并直接按配置派发。同类工作合批，有独立价值才拆分；审查按风险用 reviewPolicy/reviewReason 单独说明，不按执行复杂度增加流程。省略审查方式仍沿用 complex 独立审查的旧约定；省略 start 或 false 仅保存。', {
-    goal: string, relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
+  routeTool('delegation_plan', '主控提交可验证的任务拆分。有待关联消息时 decisionReason 必填；从 direct 改为 delegate 使用 relation:update，并在派发前简短说明变化理由。提供 start:true 可保存决定、计划并按配置派发。子工程用 directory 明确根目录。同类工作合批，有独立价值才拆分；审查按风险用 reviewPolicy/reviewReason 单独说明，不按执行复杂度增加流程。省略审查方式仍沿用 complex 独立审查的旧约定；省略 start 或 false 仅保存。', {
+    goal: string, relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'], description: 'new 确认新需求；continue 沿用原执行方式和计划；范围、方案或 direct/delegate 方式变化用 update 并说明理由；question 只关联提问。' },
+    messageId: { ...string, description: '本会话真实用户消息编号；多条待关联消息时必填，不能伪造。' },
+    directory: { type: 'string', description: '工程根目录，省略沿用父会话目录；子工程须显式指定，相对值基于父会话目录。统一用于相对 writes/outputs、子代理工作目录和主控检查；继续已有计划不能更换目录。' },
     start: { type: 'boolean', description: 'true 表示建计划后立即校验模型、权限与预算并派发；省略或 false 仅建立计划。' },
-    decisionReason: { type: 'string', description: '说明相对主控直接完成的委派收益与准备、汇报、验收开销，写清独立执行量、隔离或并行价值，不能只复述角色分工。非空，最多 500 字；可一并记录 relation，不填写时需在 run 前记录。' }, tasks: array({ ...object({ id: string, title: string,
+    decisionReason: { type: 'string', description: '有待关联消息时必填，即使只保存计划也必须提供。说明相对主控直接完成的委派收益与准备、汇报、验收开销，写清独立执行量、隔离或并行价值，不能只复述角色分工。非空，最多 500 字。无待关联消息时可先保存，但 start:true/run 前必须已有当前 delegate 判断。' }, tasks: array({ ...object({ id: string, title: string,
       instructions: { type: 'string', description: '明确目标、已定方案与已核实事实，区分必读和按需参考资料、用户硬要求和可调整建议；不把主控偏好升级为篇幅、格式或问题数量门槛。' }, scope: string,
-      outputs: array(string), writes: array(string), dependsOn: array(string), complexity: { type: 'string', enum: ['routine', 'complex'], description: '只说明执行难度，不决定是否委派或执行模型。routine：方案明确，可沿既有材料执行；complex：仍有跨资料推理或设计取舍的未决难点。' },
+      outputs: { ...array(string), description: '交付文件；相对路径基于计划 directory，省略 directory 时基于父会话目录，不能只在 instructions 中说明子工程。' },
+      writes: { ...array(string), description: '允许修改的路径；与 outputs 使用同一 directory。跨目录文件用绝对路径，只读任务传 []。' },
+      dependsOn: array(string), complexity: { type: 'string', enum: ['routine', 'complex'], description: '只说明执行难度，不决定是否委派或执行模型。routine：方案明确，可沿既有材料执行；complex：仍有跨资料推理或设计取舍的未决难点。' },
       complexityReason: { type: 'string', description: '说明实际未决难点或普通执行依据；篇幅长、要发布或重要不足以单独判为复杂；主控已解决的判断不重复算执行难度。' },
       reviewPolicy: { type: 'string', enum: ['coordinator', 'independent'], description: '新任务显式填写，并提供 reviewReason。coordinator：主控实际验证并验收；independent：额外独立审查。按错误后果选择，权限、数据破坏、并发等高风险用 independent；复杂度或发布要求本身不代表高风险。' },
       reviewReason: { type: 'string', description: '指定 reviewPolicy 时必填，说明风险和所选审查方式的必要性；最多 1000 字。' },
@@ -2396,14 +2433,19 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (args.start !== undefined && typeof args.start !== 'boolean') throw new Error('start 必须为 true 或 false')
     if (storageError) throw new Error(`任务保存或恢复异常，请先处理：${storageError}`)
     if (args.relation === 'continue' && previous && planStatus(previous) !== 'accepted' && (!previous.cancelled || previous.cancelledBy === 'host' && !previous.cancellation)) {
+      if (args.directory !== undefined) {
+        const directory = await planDirectory(args, parent, [])
+        if (!previous.cwd || normalizedPath(directory) !== normalizedPath(previous.cwd)) throw new Error('继续已有计划不能更换工程目录；请沿用原目录和任务卡')
+      }
       if (args.decisionReason !== undefined) await recordDecision({ mode: 'delegate', reason: args.decisionReason, relation: 'continue', messageId: args.messageId }, exec)
       if (args.start && !previous.autoDispatch && decisionCurrent(parent.id) && decisionFor(parent.id)?.mode === 'delegate') return runPlan({}, exec)
       return { plan: snapshotPlan(previous) }
     }
     if (previous?.cancellation?.cleanup && previous.cancellation.cleanup.status !== 'completed') throw new Error('原计划资源清理未完成；处理原因后再次 delegation_cancel 清理，不能覆盖原计划')
     if (previous && !['accepted', 'cancelled'].includes(planStatus(previous))) throw new Error('当前计划尚未验收；请监督、返工或取消后再建新计划')
-    if (pendingMessages(parent.id).length && args.decisionReason === undefined) throw new Error('建立计划前须明确消息关联；可在本次 delegation_plan 一并提供 relation/messageId/decisionReason，或先用 delegation_decide 确认')
+    if (pendingMessages(parent.id).length && args.decisionReason === undefined) throw new Error('建立计划前须明确消息关联，decisionReason 必填；一并提供真实 messageId 和 relation。若从 direct 改为 delegate，请用 relation:update 并说明理由；continue 只沿用原执行方式')
     const validated = validatePlan(args)
+    const cwd = await planDirectory(args, parent, validated.tasks)
     validateChecks(validated.tasks, parent, exec.toolSet)
     if (args.decisionReason !== undefined) await recordDecision({ mode: 'delegate', reason: args.decisionReason, relation: args.relation, messageId: args.messageId }, exec)
     if (!previous && plans.size >= MAX_PLANS) {
@@ -2412,7 +2454,6 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (!oldest) throw new Error(`已有 ${MAX_PLANS} 个未完成计划，请先完成或取消`)
       plans.delete(oldest.sessionId)
     }
-    const cwd = parent.session?.header?.cwd
     if (cwd) for (const task of validated.tasks) task.writes = task.writes.map(value => path.resolve(cwd, value))
     const source = sourceOf(parent.id)
     const routing = getRoute(parent.id)

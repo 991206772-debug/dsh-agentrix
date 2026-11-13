@@ -18,7 +18,7 @@ auto 未托管普通操作无需先取得判断许可，漏记不会拦截或额
 | `delegation_decide` | 主控提供 `relation: new/continue/update/question`；新需求或方案变化时提供 `mode: direct/delegate` 和非空 `reason`（最多 500 字）。多条待关联消息须给真实 `messageId` |
 | `delegation_inspect` | `operation: list/git_status`，可指定 `directory`；通过原生工具管线运行固定的只读检查，每次最多显示 200 项 |
 | `delegation_note` | `kind: task_plan/findings/progress` 和 `content`；保存本会话本需求的专用记录并返回路径，最多 64 KiB |
-| `delegation_plan` | 新委派推荐携带 `relation/messageId/decisionReason/start:true`，一次记录、建计划并派发；省略 start 或填 false 仍仅保存 |
+| `delegation_plan` | 有待关联消息时 `decisionReason` 必填；从 direct 改为 delegate 用 `relation:update` 并在派发前简短说明理由。`start:true` 一次记录、建计划并派发；省略 start 或填 false 仍仅保存。子工程用 `directory` 明确工程目录 |
 | `delegation_run` | 启动已有未启动计划，或明确处理问题后继续；合并派发后无需重复调用 |
 | `delegation_wait` | 等待现有任务的报告、故障或用户新消息；原代理继续运行，不轮询模型、不消耗纠偏次数 |
 | `delegation_status` | 无计划也可查询当前消息；默认摘要；taskId、detail:full 返回单任务完整报告和证据；messageId、detail:full 返回本会话消息原文，不能混用任务参数 |
@@ -38,13 +38,15 @@ auto 未托管普通操作无需先取得判断许可，漏记不会拦截或额
 
 当前需求进入托管计划后，主控和执行者的模型工具列表会隐藏 `team_task_create/update`、原生派单及 `wait_agent`；继续调用也不能创建、修改或勾选另一套任务。辅助看板仍可使用，`team_task_get/list`、`list_agents` 等只读观察保留，但观察结果和看板勾选都不能代替 Agentrix 的验收。子代理交报告后按现有事件通知原主控，无需额外等待工具或审批。
 
-模型工具列表同时按角色收缩：主控不显示执行者的报告与阶段记录入口；托管执行者不显示主控的规划、调度、验证和验收入口；独立审查者仅显示读取、检索和报告入口。执行时仍检查身份及角色，隐藏入口不代替工具检查。
+模型工具列表同时按角色收缩：主控不显示执行者的报告与阶段记录入口；托管执行者不显示主控的规划、调度、验证、验收及 `send_message` 入口；独立审查者仅显示读取、检索和报告入口。补充确认不必单独回复“收到”，需要记录实际进展时用 `delegation_checkpoint`，最终结果用 `delegation_report`。执行时仍检查身份及角色，隐藏入口不代替工具检查。
 
 被拒写入、提前验证、错误报告等失败操作记录为计划事件，并通过 `plan.coordinationIssue` 返回具体原因和下一步；同一调用按 `callId` 去重，重复状态查询不消除失败。后续正确操作或对应任务阶段推进后标为已解决。误用工具不会取消原任务、重开代理或消耗纠偏次数。
 
 `delegation_note` 的文件位于插件数据目录中的 `<运行状态文件名>.notes/<会话摘要>/<需求摘要>/`，只保存 `task_plan.md`、`findings.md` 和 `progress.md`。目录由插件确定，不接受业务路径；各层目录与文件均检查链接，写入采用临时文件替换。换需求使用新的目录，承接原需求继续使用原目录，不增加独立档案中心。
 
 ### 任务卡示例
+
+`delegation_plan` 的可选顶层 `directory` 指定已存在的工程根目录，相对值按父会话目录解析；省略时沿用父会话目录。子工程不能只在 `instructions` 中声明位置。`writes`、相对 `outputs`、子代理与检查使用同一计划目录；显式指定时，文件检查路径转为绝对路径，搜索缺省限定该目录，命令检查使用原生 `workdir` 参数。相对产物与检查目录冲突会在派发前拒绝。`continue` 复用旧卡，不更换目录，旧记录也不会自动重写。
 
 以下是主 Agent 调用 `delegation_plan` 的参数。实际任务必须先读相关文件，再填写真实路径和命令。
 

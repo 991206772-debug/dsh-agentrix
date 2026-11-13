@@ -103,7 +103,9 @@ auto 模式下，未托管的读取、修改和命令可直接执行，不会因
 
 需求详情显示当前进程的执行策略及运行标识；`coordinationPolicyVersion:7` 与 `executionPolicyVersion:1` 表示已加载本轮策略，源码更新不代表当前进程已生效。运行标识用于区分加载逻辑，不是 Git 提交号或安装包校验值。等待宿主自然重载，不打断已有任务。
 
-任务修改范围用于调度与冲突检查，不是文件系统沙箱。执行模型的能力和价格由用户选择；插件不根据名称猜测能力，也不静默替换不可用模型。配置检查不发送生成请求，不能预先判断服务商额度或网络状态。
+任务修改范围用于调度与冲突检查，不是文件系统沙箱。子工程派单用 `delegation_plan.directory` 指定工程根目录，相对产物、保护路径、子代理工作目录和主控检查按同一目录解析；省略时沿用父会话目录。存在相对产物但检查 `workdir` 指向其他目录时，必须先明确 `directory`，避免保护和交付指向错误位置。已有计划不会因源码更新而自动更换目录。
+
+执行模型的能力和价格由用户选择；插件不根据名称猜测能力，也不静默替换不可用模型。配置检查不发送生成请求，不能预先判断服务商额度或网络状态。
 
 详细工具、状态、报告、验收与 HTTP 接口见 [使用约定](docs/usage.md)。
 
@@ -124,6 +126,7 @@ npm pack --dry-run
 - `tests/native-reliability.mjs`：上述原生运行时的直接执行、跨需求失败隔离和验收保存失败恢复回放，分别使用 `direct`、`separate-error`、`acceptance-save` 参数。
 - `tests/native-reliability.mjs cancel-cleanup`：两个原生子代理运行中注入释放与备用清理故障，核对全部收到取消、原任务可补清理且没有替代启动。
 - `tests/native-reliability.mjs delivery-persistence`：原生交付记录实际写入 JSONL，关闭后从同一目录恢复，核对交付仅保存一次且不新增模型请求。
+- `tests/native-reliability.mjs project-directory`：父会话位于上层目录时，在指定子工程派单，使用安装版原生 PowerShell 实际读取产物，核对保护、验证和最终交付路径一致，执行者不显示被禁止的普通消息入口。
 - `tests/package-upgrade.mjs <基线提交>`：临时目录内安装基线 tgz、升级当前 tgz、回退基线，校验全部安装文件并对实际安装包运行原生回放；需设置 `DSH_EXECUTABLE` 和 `DSH_MODULE_ROOT`。此项不操作真实 Profile，也不代替真实服务商验证。
 - `node tests/state-upgrade.mjs`：使用旧版与当前编排模块，在同一隔离目录验证 v1 到 v2 迁移、长原文和多会话保留、分片损坏保护、完整备份恢复及旧代码配合升级前备份回退。数据全部为测试生成，不读取真实历史会话。
 - `tests/live-acceptance.mjs <场景>`：用安装版运行时和真实模型自行完成任务。场景包括 `direct`、`auto-simple`、`auto-followup`、`auto-readonly`、`parallel-supplement`、`failure-recovery`、`rework`、`cancel-resume`，分别检查小改、连续调整、只读答复、并行补充、失败恢复、独立审查与返工、取消后同目录重载恢复。任务给模型自然语言需求，工具调用顺序由模型决定。

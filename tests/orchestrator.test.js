@@ -21,6 +21,61 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('nested project directory binds write protection, verification and delivery to the same files', async () => {
+  const f = await fixture(), project = path.join(f.directory, 'project')
+  await mkdir(project); f.parent.session.header.cwd = f.directory
+  const verified = []
+  const execute = f.ctx.tools.execute.bind(f.ctx.tools)
+  f.ctx.tools.execute = exec => { verified.push(exec.arguments); return execute(exec) }
+  const result = await f.execute('delegation_plan', { directory: 'project', start: true, goal: '实现已确认的页面',
+    decisionReason: '方案已确定，由执行者实现和自测，主控验证。', tasks: [card('ui', { writes: ['client.js'], outputs: ['client.js'],
+      checks: [{ tool: 'read', arguments: { file_path: 'client.js' } }, { tool: 'pwsh', arguments: { command: 'node --test' } }] })] })
+  assert.equal(result.plan.cwd, project)
+  assert.deepEqual(result.plan.tasks[0].writes, [path.join(project, 'client.js')])
+  assert.equal(f.calls[0].request.cwd, project)
+  assert.equal(f.parent.session.header.cwd, f.directory, 'verification must not change the coordinator session directory')
+  assert.match(f.engine.coordinatorWriteBlock({ agent: f.parent, name: 'edit', arguments: { file_path: path.join(project, 'client.js') } }), /重叠/)
+  assert.equal(f.engine.coordinatorWriteBlock({ agent: f.parent, name: 'edit', arguments: { file_path: 'unrelated.js' } }), undefined)
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'ui' })
+  assert.equal(verified[0].file_path, path.join(project, 'client.js'))
+  assert.equal(verified[1].workdir, project)
+  await f.execute('delegation_review', { taskId: 'ui', verdict: 'accept', findings: [{ criterion: 0, finding: '已核对', evidence: proof.results.map(item => item.ref) }] })
+  assert.equal((await buildDelivery(f.snapshot(), f.snapshot().completion)).files[0].path, path.join(project, 'client.js'))
+})
+
+test('relative task paths with a conflicting check directory are rejected before recording or dispatch', async () => {
+  const f = await fixture(); f.parent.session.header.cwd = f.directory
+  await assert.rejects(f.execute('delegation_plan', { start: true, goal: '实现子工程', decisionReason: '方案已定，执行者实现。',
+    tasks: [card('ui', { writes: ['client.js'], outputs: ['client.js'], checks: [{ tool: 'pwsh', arguments: { command: 'node --test', workdir: path.join(f.directory, 'project') } }] })] }), /directory.*目录|目录.*directory/)
+  assert.equal(f.calls.length, 0)
+  assert.equal(f.snapshot(), undefined)
+  assert.equal(f.engine.decisionFor(f.parent.id), null)
+})
+
+test('an explicit project directory scopes searches and cannot move a continued plan', async () => {
+  const f = await fixture(), project = path.join(f.directory, 'project')
+  await mkdir(project); f.parent.session.header.cwd = f.directory
+  const result = await f.execute('delegation_plan', { directory: project, goal: '查阅子工程', decisionReason: '独立查阅子工程。', tasks: [card('a', {
+    checks: [{ tool: 'grep', arguments: { pattern: 'verified' } }, { tool: 'glob', arguments: { pattern: '*.js' } }] })] })
+  assert.deepEqual(result.plan.tasks[0].checks.map(check => check.arguments.path), [project, project])
+  await assert.rejects(f.execute('delegation_plan', { relation: 'continue', directory: f.directory, goal: '继续', tasks: [card('ignored')] }), /目录.*不能|不能.*目录/)
+  assert.equal(f.snapshot().cwd, project)
+})
+
+test('plan tool describes message binding and mode transitions before the first call', async () => {
+  const f = await fixture(), properties = f.definition('delegation_plan').parameters.properties
+  assert.match(properties.relation.description, /continue.*沿用.*update/)
+  assert.match(properties.decisionReason.description, /待关联.*必填/)
+  assert.match(properties.directory.description, /父会话.*子工程/)
+  await f.execute('delegation_decide', { mode: 'direct', reason: '先由主控设计。' })
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'implement', source: { kind: 'user' }, content: [{ type: 'text', text: '按方案开始实现' }] } })
+  await assert.rejects(f.execute('delegation_plan', { relation: 'continue', goal: '实现', tasks: [card('a')] }), /decisionReason.*update/)
+  const result = await f.execute('delegation_plan', { relation: 'update', messageId: 'implement', decisionReason: '设计已定，执行者实现，主控验收。', start: true, goal: '实现', tasks: [card('a')] })
+  assert.equal(result.plan.decision.mode, 'delegate')
+  assert.equal(f.calls.length, 1)
+})
+
 const malformedArguments = (tool = 'delegation_plan', raw = '{"checks":[{"arguments":{"command":"echo 1","tool":"pwsh"}]}') => {
   let detail
   try { JSON.parse(raw) } catch (error) { detail = error.message }
@@ -743,7 +798,8 @@ test('failed result notifications survive reload, stop after two attempts and ne
   f.parent.status = 'idle'
   let sends = 0
   f.parent.steer = () => { sends++; throw new Error('inbox unavailable') }
-  await f.complete(0, { stopReason: 'completed', output: [] }); await tick()
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  await waitFor(() => f.snapshot().tasks[0].resultNotification?.attempts === 1 && f.snapshot().tasks[0].resultNotification.status === 'failed')
   const id = f.snapshot().tasks[0].resultNotification.messageId
   assert.equal(f.snapshot().tasks[0].resultNotification.attempts, 1)
   await f.reload()
@@ -2784,6 +2840,7 @@ test('acceptance can retry after its preparation save fails, without a stale con
   const f = await fixture()
   await f.plan([card('a')]); await f.execute('delegation_run')
   await f.complete(0, { stopReason: 'completed', output: [] })
+  await waitFor(() => f.snapshot().tasks[0].resultNotification?.status === 'delivered')
   const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
   const args = { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '核对实际产物', evidence: [proof.callId] }] }
   const saved = await readFile(f.file, 'utf8')
@@ -3819,4 +3876,32 @@ test('elapsed reminders preserve the worker until explicit cancellation cleans i
   await f.cancel({ reason: '用户明确取消' })
   assert.equal(f.pending[0].receipt.disposeCount, 1)
   assert.equal(f.calls.length, 1)
+})
+
+test('managed workers hide ordinary messaging while retaining checkpoint and report tools', async () => {
+  const f = await fixture({ scopedTools: true, autoConclude: true })
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  const child = f.children[0], restrictions = []
+  child.ctx.tools.restrict = ({ deny }) => { restrictions.push([...deny]); return () => {} }
+  f.ctx.tools.view = () => ({ restrictableNames: ['read', 'send_message', 'delegation_checkpoint', 'delegation_report', 'delegation_plan'] })
+  f.engine.refreshCoordinationTools(child)
+  assert.equal(restrictions.length, 1)
+  assert.ok(restrictions[0].includes('send_message'), 'a messaging tool that is always rejected must not be offered to a managed worker')
+  assert.ok(!restrictions[0].includes('delegation_checkpoint'))
+  assert.ok(!restrictions[0].includes('delegation_report'))
+  f.engine.observe({ agent: child, name: 'read', callId: 'worker-current-proof' }, { isError: false, content: [] })
+  await f.checkpoint(0, { phase: 'investigation', summary: '已确认补充要求，沿原范围继续。', nextStep: '完成指定产物并提交报告。', evidence: ['worker-current-proof'] })
+  assert.equal(f.snapshot().tasks[0].supervision.checkpoint.summary, '已确认补充要求，沿原范围继续。')
+  await f.report(0, { status: 'DONE', summary: '已完成指定任务', report: '产物与实际检查结果已记录，等待主控验收。' })
+  await waitFor(() => f.snapshot().tasks[0].status === 'review')
+})
+
+test('unmanaged child messaging remains visible and is not blocked by managed reporting rules', async () => {
+  const f = await fixture({ scopedTools: true }), restrictions = []
+  const child = { id: 'native-unmanaged-child', session: { header: { origin: 'subagent', parentSession: f.parent.id } },
+    ctx: { tools: { restrict({ deny }) { restrictions.push([...deny]); return () => {} } } } }
+  f.ctx.tools.view = () => ({ restrictableNames: ['read', 'send_message', 'delegation_checkpoint', 'delegation_report'] })
+  f.engine.refreshCoordinationTools(child)
+  assert.deepEqual(restrictions, [])
+  assert.equal(f.engine.guardChild({ agent: child, name: 'send_message' }), undefined)
 })
