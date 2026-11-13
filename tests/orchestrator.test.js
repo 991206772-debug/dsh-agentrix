@@ -1036,6 +1036,67 @@ test('the worker receives the exact planned verification tools and arguments wit
   assert.equal(f.snapshot().tasks[0].execution, null)
 })
 
+test('checkpoint evidence feedback identifies the wrong type and real call ids so the same worker can correct it', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  f.engine.observe({ agent: f.children[0], name: 'read', callId: 'actual-read-proof' }, { isError: false, content: [] })
+  const schema = f.definition('delegation_checkpoint').parameters.properties.evidence
+  assert.match(schema.description, /callId/)
+  const args = { phase: 'verification', summary: '已核对实际文件', nextStep: '继续自检后报告', evidence: [{ tool: 'read', result: '文件正确' }] }
+  await assert.rejects(f.checkpoint(0, args), error => {
+    assert.match(error.message, /evidence\[0\].*字符串/)
+    assert.match(error.message, /callId/)
+    assert.ok(error.message.includes('actual-read-proof'))
+    assert.doesNotMatch(error.message, /阶段证据 必须是 1~1000/)
+    return true
+  })
+  await assert.rejects(f.checkpoint(0, { ...args, evidence: ['cargo test 成功'] }), /callId.*actual-read-proof|actual-read-proof.*callId/s)
+  await f.checkpoint(0, { ...args, evidence: ['actual-read-proof'] })
+  assert.equal(f.snapshot().tasks[0].supervision.checkpointRecovery, undefined)
+  assert.deepEqual(f.snapshot().tasks[0].supervision.checkpoint.evidence, ['actual-read-proof'])
+  for (const [evidence, error] of [[[], /1~8/], [[''], /不能为空/], [['x'.repeat(1001)], /超过 1000/]]) {
+    await assert.rejects(f.checkpoint(0, { ...args, evidence }), error)
+    await f.checkpoint(0, { ...args, evidence: ['actual-read-proof'] })
+    assert.equal(f.snapshot().tasks[0].supervision.checkpointRecovery, undefined, 'a corrected checkpoint resets consecutive evidence errors')
+  }
+  assert.equal(f.snapshot().tasks[0].attempts, 1)
+  assert.equal(f.pending.length, 1)
+})
+
+test('three consecutive checkpoint evidence errors suspend only checkpoints and notify the original coordinator once', async () => {
+  const f = await fixture({ scopedTools: true }); await f.plan([card('a')]); await f.execute('delegation_run')
+  const child = f.children[0], restrictions = []
+  child.ctx.tools.restrict = ({ deny }) => { restrictions.push([...deny]); return () => {} }
+  f.ctx.tools.view = () => ({ restrictableNames: ['read', 'write', 'delegation_checkpoint', 'delegation_report'] })
+  f.engine.observe({ agent: child, name: 'read', callId: 'valid-proof' }, { isError: false, content: [] })
+  f.engine.observe({ agent: child, name: 'read', callId: 'failed-proof' }, { isError: true, content: [] })
+  const args = { phase: 'verification', summary: '阶段进展', nextStep: '继续原任务' }
+  for (const evidence of [[{ tool: 'read' }], ['cargo test 成功'], ['failed-proof']]) await assert.rejects(f.checkpoint(0, { ...args, evidence }), /evidence|证据|checkpoint/)
+  const task = f.snapshot().tasks[0]
+  assert.equal(task.supervision.checkpointRecovery.failures, 3)
+  assert.equal(task.supervision.checkpointRecovery.suspended, true)
+  assert.ok(restrictions.at(-1).includes('delegation_checkpoint'))
+  assert.ok(!restrictions.at(-1).includes('delegation_report'))
+  assert.ok(!restrictions.at(-1).includes('write'))
+  assert.match(f.engine.guardChild({ agent: child, name: 'delegation_checkpoint' }), /暂.*delegation_report/)
+  assert.equal(f.engine.guardChild({ agent: child, name: 'write' }), undefined)
+  await assert.rejects(f.checkpoint(0, { ...args, evidence: ['valid-proof'] }), /暂.*delegation_report/)
+  assert.equal(f.snapshot().tasks[0].supervision.checkpointRecovery.failures, 3)
+  await waitFor(() => f.parent.injected.some(message => message.source.kind === 'delegation-supervision'))
+  assert.equal(f.parent.injected.filter(message => message.source.kind === 'delegation-supervision').length, 1)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.snapshot().tasks[0].supervision.used, 0)
+  assert.equal(f.pending[0].receipt.disposed, undefined)
+  const saved = JSON.parse(await readFile(f.file, 'utf8')).plans[0].tasks[0]
+  assert.equal(saved.supervision.checkpointRecovery.suspended, true, 'the recovery limit is persisted rather than reset by status reads')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+  assert.equal(f.snapshot().tasks[0].attempts, 1)
+  const proof = await f.execute('delegation_verify', { taskId: 'a' })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'rework', issues: [{ criterion: 0, severity: 'important', finding: '按实际验证证据修正交付物', evidence: [proof.results[0].callId] }] })
+  assert.equal(f.snapshot().tasks[0].attempts, 2)
+  assert.equal(f.snapshot().tasks[0].supervision.checkpointRecovery, undefined, 'an explicitly authorized new attempt gets a new checkpoint recovery window')
+})
+
 test('checkpoints retain early successful evidence without exposing the full index or accepting foreign and stale calls', async () => {
   const f = await fixture()
   await f.plan([card('a'), card('b')]); await f.execute('delegation_run')
@@ -3568,6 +3629,32 @@ test('a human supplement wakes the waiting coordinator and survives retargeting 
   assert.equal(f.pending.length, 1)
   assert.equal(f.pending[0].receipt.disposed, undefined)
   assert.equal(f.parent.injected.length, 0, 'the original queued message is consumed by the host, not injected twice')
+})
+
+test('a supplement without new criteria gives exact acknowledgement guidance without sending or changing the worker', async () => {
+  const f = await fixture(); await f.plan([card('backend')]); await f.execute('delegation_run')
+  const original = f.snapshot().tasks[0], message = { id: 'frontend-only-update', source: { kind: 'user' }, content: '角色头像已更新，后端无需改动。' }
+  f.emit('session/event', f.parent, { type: 'user/message', data: message })
+  await f.execute('delegation_decide', { relation: 'update', messageId: message.id, mode: 'direct', reason: '前端更新由主控处理，后端任务范围不变。' })
+  await assert.rejects(f.execute('delegation_control', { taskId: 'backend', action: 'steer', inputIds: [message.id], message: '此次前端更新与后端无关，无需改代码。' }), /additionalCriteria/)
+  const issue = f.snapshot().coordinationIssue
+  assert.match(issue.nextAction, /additionalCriteria/)
+  assert.match(issue.nextAction, /acknowledge/)
+  assert.ok(issue.nextAction.includes(JSON.stringify([message.id])), 'the recovery uses the actual selected input ids')
+  assert.doesNotMatch(issue.nextAction, /等待原执行者.*正式报告/)
+  assert.equal(f.calls.length, 1, 'no message reaches the native sender before criteria or acknowledgement are supplied')
+  assert.equal(f.snapshot().inputs[0].status, 'received')
+  assert.deepEqual(f.snapshot().tasks[0].criteria, original.criteria)
+  await f.execute('delegation_control', { action: 'acknowledge', inputIds: [message.id], message: '前端已由主控处理，不改变后端要求。' })
+  assert.equal(f.snapshot().inputs[0].status, 'resolved')
+  assert.deepEqual(f.snapshot().tasks[0].criteria, original.criteria)
+  assert.equal(f.snapshot().tasks[0].childId, original.childId)
+  assert.equal(f.snapshot().tasks[0].attempts, 1)
+  assert.equal(f.pending.length, 1)
+  assert.equal(f.calls.length, 1)
+  const definition = f.definition('delegation_control')
+  assert.match(definition.parameters.properties.additionalCriteria.description, /steer.*inputIds.*必填/)
+  assert.match(definition.parameters.properties.action.description, /acknowledge/)
 })
 
 test('supplements are explicitly forwarded with acceptance criteria or acknowledged before acceptance', async () => {

@@ -8,7 +8,8 @@ const { apply, RUNTIME_BUILD } = await import(process.env.AGENTRIX_PACKAGE_ROOT
   ? pathToFileURL(path.join(process.env.AGENTRIX_PACKAGE_ROOT, 'index.js')).href : new URL('../index.js', import.meta.url).href)
 
 const scenario = process.argv[2] ?? 'direct'
-assert.ok(['direct', 'separate-error', 'acceptance-save', 'cancel-cleanup', 'delivery-persistence', 'audited-resolutions', 'project-directory'].includes(scenario))
+assert.ok(['direct', 'separate-error', 'acceptance-save', 'cancel-cleanup', 'delivery-persistence', 'audited-resolutions', 'project-directory', 'checkpoint-recovery', 'checkpoint-loop'].includes(scenario))
+const checkpointScenario = scenario.startsWith('checkpoint-')
 if (!process.env.DSH_MODULE_ROOT) throw new Error('DSH_MODULE_ROOT is required')
 const native = name => import(pathToFileURL(path.join(process.env.DSH_MODULE_ROOT, name, 'lib/index.js')).href)
 const { Context } = await native('cordis')
@@ -25,6 +26,7 @@ let cleanupFixed = false
 let projectInspected = false, projectVersionsInspected = false, projectWorkerReadEntered = false, projectCoordinatorRead = false, projectWorkerSawSupplement = false
 let projectCoordinatorBuilt = false, projectSupplementMessageId, projectDirectDecisionSubmitted = false
 let projectMisrouteGuarded = false, nativeTeamMessages = 0
+let checkpointReadCallId, checkpointFeedbackSeen = false, checkpointLimited = false, checkpointAdvisoryHandled = false
 const projectSupplement = '补充要求：继续原任务，并读取 independent.txt 确认内容仍为 verified。'
 const projectDirectory = scenario === 'project-directory' ? path.join(directory, 'project') : directory
 const output = path.join(projectDirectory, 'owned.txt'), independent = path.join(directory, 'independent.txt')
@@ -98,10 +100,51 @@ class Adapter extends LlmAdapter {
       }
       if (phase === 0) block = tool('read', { file_path: output })
       else if (scenario === 'project-directory' && phase === 1) block = tool('read', { file_path: independent })
+      else if (checkpointScenario && (phase === 1 || scenario === 'checkpoint-loop' && phase < 4)) {
+        const read = events.find(event => event.sessionId === request.sessionId && event.type === 'tool/call' && event.data.name === 'read')
+        assert.ok(read?.data.callId, 'checkpoint evidence originates from a real installed tool call')
+        checkpointReadCallId = read.data.callId
+        if (phase > 1) {
+          const failure = events.findLast(event => event.sessionId === request.sessionId && event.type === 'tool/result' && event.data.message?.isError)
+          const feedback = (failure?.data.message.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')
+          assert.ok(feedback.includes(checkpointReadCallId), 'checkpoint rejection provides actual usable tool call IDs')
+          assert.ok(feedback.includes(JSON.stringify({ evidence: [checkpointReadCallId] })), 'checkpoint rejection includes a valid JSON argument example')
+          assert.match(feedback, /callId/)
+          checkpointFeedbackSeen = true
+        }
+        assert.ok(request.tools.some(item => item.name === 'delegation_checkpoint'))
+        assert.ok(request.tools.some(item => item.name === 'delegation_report'))
+        block = tool('delegation_checkpoint', { phase: 'verification', summary: '已读取隔离文件', nextStep: '按实际读取结果提交正式报告',
+          evidence: phase === 1 ? [{ tool: 'read', result: 'verified' }] : phase === 2 ? ['read succeeded'] : ['missing-call'] })
+      } else if (scenario === 'checkpoint-recovery' && phase === 2) {
+        const failure = events.findLast(event => event.sessionId === request.sessionId && event.type === 'tool/result' && event.data.message?.isError)
+        const feedback = (failure?.data.message.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')
+        assert.ok(feedback.includes(checkpointReadCallId), 'checkpoint rejection provides the actual successful call ID')
+        assert.ok(feedback.includes(JSON.stringify({ evidence: [checkpointReadCallId] })), 'the worker can copy the correct evidence array from the rejection')
+        assert.match(feedback, /callId/)
+        checkpointFeedbackSeen = true
+        block = tool('delegation_checkpoint', { phase: 'verification', summary: '隔离文件实际包含 verified', nextStep: '提交正式报告', evidence: [checkpointReadCallId] })
+      }
       else {
+        if (checkpointScenario) {
+          assert.ok(request.tools.some(item => item.name === 'delegation_report'))
+          if (scenario === 'checkpoint-loop') {
+            assert.ok(!request.tools.some(item => item.name === 'delegation_checkpoint'), 'three invalid checkpoints remove only the optional checkpoint tool')
+            assert.equal(task.supervision.checkpointRecovery.failures, 3)
+            await until(() => events.some(event => event.sessionId === 'root' && event.type === 'user/message' && event.data.source?.kind === 'delegation-supervision'),
+              'the checkpoint limit advisory reaches the coordinator without stopping the worker')
+            if (phase === 4) await until(() => {
+              const steer = events.find(event => event.sessionId === 'root' && event.type === 'tool/call' && event.data.name === 'delegation_control')
+              return steer && events.some(event => event.sessionId === 'root' && event.type === 'tool/result' && event.data.message?.toolCallId === steer.data.callId && !event.data.message.isError)
+            }, 'the coordinator steers the same worker before the final report')
+            else assert.ok(JSON.stringify(request.messages).includes('阶段记录暂不可用'), 'the existing worker consumes the coordinator correction before reporting')
+            checkpointLimited = true
+          } else assert.deepEqual(task.supervision.checkpoint.evidence, [checkpointReadCallId])
+        }
         if (scenario === 'separate-error') await workerGate.promise
         if (closing) { yield { type: 'finish', reason: { kind: 'stop' } }; return }
-        block = tool('delegation_report', { status: 'DONE', summary: '隔离产物已读取', report: 'owned.txt 含 verified，等待主控验证。' })
+        block = scenario === 'checkpoint-loop' && phase === 4 ? tool('read', { file_path: output })
+          : tool('delegation_report', { status: 'DONE', summary: '隔离产物已读取', report: 'owned.txt 含 verified，等待主控验证。' })
       }
     } else if (scenario === 'direct') {
       if (phase === 0) block = tool('edit', { file_path: independent, old_string: 'verified', new_string: 'updated' })
@@ -172,6 +215,9 @@ class Adapter extends LlmAdapter {
     } else if (scenario === 'project-directory' && plan.inputs?.some(input => input.status === 'forwarded') && !projectCoordinatorRead) {
       projectCoordinatorRead = true
       block = tool('read', { file_path: independent })
+    } else if (scenario === 'checkpoint-loop' && task.supervision?.pending?.code === 'CHECKPOINT_ARGUMENTS' && !checkpointAdvisoryHandled) {
+      checkpointAdvisoryHandled = true
+      block = tool('delegation_control', { action: 'steer', taskId: 'a', message: '继续原任务；阶段记录暂不可用，核对已有读取后直接提交正式报告，不新开代理。' })
     } else if (task.status === 'running') block = tool('delegation_wait')
     else if (task.status === 'review' && !task.checks[0].result) block = tool('delegation_verify', { taskId: 'a' })
     else if (task.status === 'review') {
@@ -290,7 +336,7 @@ try {
   try {
     await until(() => events.some(event => event.sessionId === 'root' && event.type === 'turn/end') && parent.status === 'idle', 'coordinator settled')
   } catch (error) {
-    if (scenario !== 'project-directory') throw error
+    if (scenario !== 'project-directory' && !checkpointScenario) throw error
     throw new Error(error.message + '\n' + JSON.stringify({ phases: [...phases], events: events.slice(-15), state: await requestState() }))
   }
   const result = await requestState()
@@ -314,6 +360,26 @@ try {
     assert.equal(activations.size, 2)
     assert.ok([...releases.values()].every(count => count === 1))
     assert.ok([...activations.keys()].every(id => !ctx.agents.get(id)), 'native child registries are empty after drain retry')
+  } else if (checkpointScenario) {
+    const plan = result.plans[0], task = plan.tasks[0]
+    assert.equal(plan.completion?.outcome, 'completed', JSON.stringify({ issue: plan.coordinationIssue,
+      failures: events.filter(event => event.type === 'turn/end' && event.data.reason?.kind === 'error').map(event => ({ sessionId: event.sessionId, reason: event.data.reason })),
+      tools: events.filter(event => event.type === 'tool/call' || event.type === 'tool/result' && event.data.message?.isError).slice(-20).map(event => ({ sessionId: event.sessionId, type: event.type, name: event.data.name,
+        ...(event.data.message?.isError ? { error: event.data.message.content } : {}) })) }))
+    assert.ok(checkpointFeedbackSeen)
+    assert.equal(task.attempts, 1)
+    assert.equal(activations.size, 1)
+    assert.ok([...releases.values()].every(count => count === 1))
+    const checkpointCalls = events.filter(event => event.sessionId === task.childId && event.type === 'tool/call' && event.data.name === 'delegation_checkpoint')
+    const checkpointErrors = events.filter(event => event.sessionId === task.childId && event.type === 'tool/result' && event.data.message?.isError)
+    assert.equal(checkpointCalls.length, scenario === 'checkpoint-loop' ? 3 : 2)
+    assert.equal(checkpointErrors.length, scenario === 'checkpoint-loop' ? 3 : 1)
+    if (scenario === 'checkpoint-loop') {
+      assert.ok(checkpointLimited && checkpointAdvisoryHandled); assert.equal(task.supervision.checkpoint, null)
+      assert.equal(events.filter(event => event.sessionId === 'root' && event.type === 'user/message' && event.data.source?.kind === 'delegation-supervision').length, 1,
+        'the coordinator receives one advisory while the original worker can still submit its report')
+    }
+    else assert.deepEqual(task.supervision.checkpoint.evidence, [checkpointReadCallId])
   } else if (scenario === 'project-directory') {
     const plan = result.plans[0]
     assert.ok(plan, JSON.stringify(events.filter(event => ['tool/result', 'turn/end'].includes(event.type))))

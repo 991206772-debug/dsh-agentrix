@@ -66,3 +66,5 @@ DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED —— 一句话。
 ## 持续工作与阶段记录
 
 短任务只交最终报告；长任务在调查转实现、自检结束或需要裁决时，用 `delegation_checkpoint({phase,summary,nextStep,evidence,requestReview:true})` 请求核对，说明成果、剩余问题与成功工具 callId。同一阶段每次执行只通知一次；没有 requestReview 时保持原有只记录行为。通知不要求暂停、新开代理或等待用户继续，也不代替报告与验收。持续输出不等于需求在推进，长期没有新证据会提醒主控核对。次数、Token 与运行时长仅提醒或统计，不要求到点收尾；继续使用现有上下文与产物，按主控纠正处理，用户取消优先。
+
+`evidence` 必须是 1~8 个当前子任务本次执行成功工具的 callId 字符串，例如 `{"evidence":["call_从实际成功调用复制的编号"]}`。不要填对象、命令或“cargo test 成功”之类说明，也不要填后台 jobId。错误会给出格式和本次可用编号；按证据相关性选择后纠正，不原样重试。连续三次证据错误后 checkpoint 暂停，仍继续正常工作，完成后提交 `delegation_report`；有疑点或无法核查的事实如实报告，不编造编号、不新开代理。

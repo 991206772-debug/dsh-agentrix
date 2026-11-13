@@ -27,6 +27,7 @@ export const OPTION_RANGES = Object.freeze({
   maxActivations: Object.freeze({ min: MIN_ACTIVATIONS, max: MAX_ACTIVATIONS }), taskTimeoutMinutes: Object.freeze({ min: 1, max: 240 }),
 })
 const CHECK_TOOLS = ['read', 'grep', 'glob', 'pwsh', 'bash']
+const CHECKPOINT_SUSPENDED_GUIDANCE = '阶段证据连续校验失败，本次执行暂不再使用 delegation_checkpoint。继续原任务，完成后用 delegation_report 提交正式结果；有疑点列 concerns，缺资料或无法完成则报告 NEEDS_CONTEXT/BLOCKED 和原因。不要反复重试阶段记录，也不要另开代理。'
 const MANAGED_READ_GUIDANCE = '当前计划尚有未验收的写入任务，普通 pwsh/bash 暂不可用。主控在独立范围施工用 delegation_execute，明确 workdir 和 writes，不能与任务产物重叠。读取源码允许使用 read/grep/glob；目录、Git 与 Node/Python/Docker 版本检查用 delegation_inspect（版本使用 operation:runtime_versions）；正式验证用 delegation_verify；补充用 delegation_control steer 同步原执行者。'
 const LIVE = ['starting', 'running']
 const STATUSES = ['queued', ...LIVE, 'review', 'accepted', 'failed', 'blocked', 'cancelled']
@@ -99,6 +100,7 @@ function modelServiceIssue(error, role, route = {}) {
 function compactSupervision(state) {
   return { pending: state.pending ? { ...state.pending, reason: brief(state.pending.reason, 600) } : null,
     checkpoint: state.checkpoint ? { ...state.checkpoint, summary: brief(state.checkpoint.summary, 300), nextStep: brief(state.checkpoint.nextStep, 300) } : null,
+    ...(state.checkpointRecovery ? { checkpointRecovery: { failures: state.checkpointRecovery.failures, suspended: state.checkpointRecovery.suspended } } : {}),
     lastProgress: state.lastProgress ?? null }
 }
 function compactTask(task) {
@@ -568,7 +570,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   }
   function additionalCriteria(task, args, inputs) {
     const criteria = strings(args.additionalCriteria ?? [], '新增验收标准', true)
-    if (inputs.length && !criteria.length) throw new Error('同步补充要求必须通过 additionalCriteria 提供新增验收标准；纯答复使用 acknowledge')
+    if (inputs.length && !criteria.length) {
+      const error = new Error('同步补充要求必须通过 additionalCriteria 提供新增验收标准；纯答复使用 acknowledge')
+      if (args.action === 'steer') error.inputRecovery = `本次补充仍未处理。若确有新增执行要求，请保留 inputIds:${JSON.stringify(inputs.map(input => input.id))}，在 steer 中补齐非空 additionalCriteria 后再发送；若仅告知、无影响或已由主控处理，请用 delegation_control({action:"acknowledge",inputIds:${JSON.stringify(inputs.map(input => input.id))},message:"说明本次补充已如何处理及为何不影响原任务"})。不要省略关联、直接等待或提前验收。`
+      throw error
+    }
     if (task.criteria.length + criteria.length > 20) throw new Error('验收标准超过 20 项，请收敛重复要求')
     return criteria
   }
@@ -1003,6 +1009,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   function unavailableTool(agent, name) {
     if (getConfig().enabled === false) return false
     const expected = expectedRoutes.get(agent.id)
+    if (expected && name === 'delegation_checkpoint' && expected.task.supervision?.checkpointRecovery?.suspended) return true
     if (expected) return expected.task.role === 'reviewer' ? !REVIEW_TOOLS.has(name) : COORDINATOR_TOOLS.has(name) || conflictingTool(name, expected.task) || name === 'list_subagent_models'
     const header = agent.session?.header ?? service('sessions')?.get(agent.id)?.header ?? {}
     if (header.origin === 'subagent' || header.parentSession || header.delegationDepth > 0) return false
@@ -1318,7 +1325,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       ...plan.tasks.filter(item => task.dependsOn.includes(item.id)).map(item => `已验收前置任务 ${item.id}：${item.execution ? item.execution.summary + '；完整报告：' + item.execution.reportPath : brief(item.report)}`),
       task.feedback ? `主控返工要求：${task.feedback}` : '',
       task.reworkIds?.length ? '只修复以下问题及其直接回归，不扩展任务：\n' + JSON.stringify(task.issues.filter(issue => task.reworkIds.includes(issue.id))) : '',
-      '短任务只提交最终报告，单纯确认收到补充不需要工具调用；有实际阶段成果或需裁决时使用 delegation_checkpoint，不使用 send_message。较长任务在调查转实现、自检结束或需要主控裁决时，用 delegation_checkpoint({requestReview:true,...}) 记录当前成果、剩余问题、下一步和成功工具 callId；主控核对不要求你另开代理或等待用户点击继续。记录不代表验收。读取用 read/grep/glob，read 参数使用 file_path；管理入口仅供主控。',
+      '短任务只提交最终报告，单纯确认收到补充不需要工具调用；有实际阶段成果或需裁决时使用 delegation_checkpoint，不使用 send_message。较长任务在调查转实现、自检结束或需要主控裁决时，用 delegation_checkpoint({requestReview:true,...}) 记录当前成果、剩余问题和下一步。evidence 必须是 1~8 个当前本次成功工具 callId 的字符串数组，不是对象、测试结果说明或 jobId；从实际工具调用复制支持结论的编号。错误反馈给出格式与本次可用编号，修正后再提交；连续三次证据错误将暂停 checkpoint，继续原任务并用 delegation_report 报告，不反复试错。主控核对不要求你另开代理或等待用户点击继续。记录不代表验收。读取用 read/grep/glob，read 参数使用 file_path；管理入口仅供主控。',
       '同类工具错误重复时按主控纠正继续。调用次数、运行时间和 Token 仅提醒或统计，不停止、不换代理；输出截断在原代理续接。使用已有产物和上下文完成任务，避免重复调查和重复执行。',
       '结束前必须调用 delegation_report：status 为 DONE、DONE_WITH_CONCERNS、NEEDS_CONTEXT 或 BLOCKED；summary 为短结论，report 保存完整交付路径、逐条证据、测试命令及结果。后两种状态必须提供 reason，说明缺什么或为什么阻塞；有疑点须列 concerns。报告由插件归档，不要自行创建档案目录。工具确认后自动结束，不用 send_message 交成果，不再修改交付物或另写总结。不要把自称完成当成验收。',
     ].filter(Boolean).join('\n')
@@ -2319,23 +2326,51 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
     mode: { type: 'string', enum: ['direct', 'delegate'] }, reason: { type: 'string', description: '新需求或方案变化时说明已有上下文、委派收益与准备、汇报、验收开销的取舍，不能只复述角色分工；最多 500 字。继续和进度询问沿用原判断。' },
   }, [], recordDecision)
-  routeTool('delegation_checkpoint', '长调查、阶段转换或阻塞时记录结论、下一步和本次成功工具证据。需主控判断是否继续、纠偏或收尾时用 requestReview:true，同一阶段只通知一次。短任务直接交报告；阶段结论待核实，不能代替验收。', {
-    phase: { type: 'string', enum: ['investigation', 'implementation', 'verification'] }, summary: string, nextStep: string, evidence: array(string),
+  routeTool('delegation_checkpoint', '长调查、阶段转换或阻塞时记录结论、下一步和本次成功工具证据。evidence 只能填写当前子任务本次执行成功工具的 callId 字符串数组，不填对象、测试说明或后台 jobId。需主控判断时用 requestReview:true。短任务直接交报告；阶段结论不能代替验收。', {
+    phase: { type: 'string', enum: ['investigation', 'implementation', 'verification'] }, summary: string, nextStep: string,
+    evidence: { ...array({ type: 'string', description: '支持阶段结论的成功工具 callId，原样从本次工具调用复制；不是命令、路径、jobId 或结果描述。' }),
+      description: '1~8 个当前子任务本次执行成功工具的 callId 字符串，每个非空且不超过 1000 字符；示例 {"evidence":["call_实际成功调用编号"]}。不接受 [{"tool":"pwsh","result":"成功"}] 或 ["cargo test 成功"]。' },
     requestReview: { type: 'boolean', description: '可选；true 请求原主控核对本阶段的成果与剩余问题，不停止子代理、不代表验收。' },
   }, ['phase', 'summary', 'nextStep', 'evidence'], async (args, exec) => {
     const expected = expectedRoutes.get(exec.agent?.id)
     if (!expected) throw new Error('只有当前托管子代理可以提交阶段记录')
     const { plan, task, handle } = expected
     if (handle.controller.signal.aborted || task.execution || !LIVE.includes(task.status)) throw new Error('任务已结束或正在提交最终报告')
+    if (task.supervision.checkpointRecovery?.suspended) throw Object.assign(new Error(CHECKPOINT_SUSPENDED_GUIDANCE), { inputRecovery: CHECKPOINT_SUSPENDED_GUIDANCE })
     if (!['investigation', 'implementation', 'verification'].includes(args.phase)) throw new Error('阶段无效')
     if (args.requestReview !== undefined && typeof args.requestReview !== 'boolean') throw new Error('requestReview 必须为布尔值')
     const summary = requireText(args.summary, '阶段结论', 2000), nextStep = requireText(args.nextStep, '下一步', 1000)
-    const evidence = strings(args.evidence, '阶段证据')
-    if (evidence.length > 8 || evidence.some(id => {
-      const item = Object.hasOwn(task.supervision.evidenceIndex ?? {}, id) ? task.supervision.evidenceIndex[id]
-        : task.supervision.evidence.find(item => item.callId === id)
-      return !item || item.failed
-    })) throw new Error('阶段证据必须来自当前子任务本次执行成功返回的工具')
+    const state = task.supervision, index = state.evidenceIndex ?? Object.fromEntries(state.evidence.map(item => [item.callId, item]))
+    const available = Object.values(index).filter(item => !item.failed && typeof item.callId === 'string').slice(-8).map(item => item.callId)
+    let problem
+    if (!Array.isArray(args.evidence)) problem = 'evidence 必须是 callId 字符串数组，不是对象或单个字符串'
+    else if (args.evidence.length < 1 || args.evidence.length > 8) problem = '阶段证据 evidence 必须包含 1~8 个 callId'
+    else for (const [position, value] of args.evidence.entries()) {
+      if (typeof value !== 'string') problem = `evidence[${position}] 必须是 callId 字符串，不能填写对象或其他类型`
+      else if (!value.trim()) problem = `evidence[${position}] 的 callId 不能为空`
+      else if (value.length > 1000) problem = `evidence[${position}] 的 callId 超过 1000 字符；请填写工具编号，不是长段结果说明`
+      else if (!Object.hasOwn(index, value.trim())) problem = `evidence[${position}] 不是当前子任务本次执行的工具 callId；说明文字、jobId、外部编号和旧执行编号都不能作为阶段证据`
+      else if (index[value.trim()].failed) problem = `evidence[${position}] 引用的工具调用失败，不能作为成功的阶段证据`
+      if (problem) break
+    }
+    if (problem) {
+      const previous = state.checkpointRecovery
+      const failures = (previous?.failures ?? 0) + (exec.callId && previous?.lastCallId === exec.callId ? 0 : 1)
+      state.checkpointRecovery = { failures, suspended: failures >= SUPERVISION_POLICY.repeatedErrorLimit, lastCallId: exec.callId ?? null }
+      const guide = state.checkpointRecovery.suspended ? CHECKPOINT_SUSPENDED_GUIDANCE
+        : 'evidence 请原样复制能支持结论的成功工具 callId；正确格式：' + JSON.stringify({ evidence: [available[0] ?? 'call_从本次成功工具复制编号'] }) +
+          '。本次可用编号：' + JSON.stringify(available) + (available.length ? '。不要把测试结果说明当成编号，也不要原样重试错误参数。' : '。当前没有成功工具证据；先实际读取或验证，仍无法核查时通过正式报告说明，不要编造编号。')
+      if (state.checkpointRecovery.suspended) {
+        const pending = state.pending
+        if (pending?.advisory) state.pending = null
+        requestSupervision(plan, task, handle, { code: 'CHECKPOINT_ARGUMENTS', advisory: true, reviewKey: 'checkpoint-arguments',
+          reason: `阶段记录证据连续 ${failures} 次校验失败，仅暂停 checkpoint，原执行者继续读写与正式报告；无需取消、重试任务或新开代理。` + (pending?.advisory ? '此前提醒：' + pending.reason : ''), evidence: available })
+      }
+      await save()
+      throw Object.assign(new Error(problem + '。' + guide), { inputRecovery: guide })
+    }
+    const evidence = args.evidence.map(value => value.trim())
+    delete state.checkpointRecovery
     task.supervision.checkpoint = { phase: args.phase, summary, nextStep, evidence, at: Date.now(), verified: false }
     task.supervision.lastProgressAt = task.supervision.checkpoint.at
     task.supervision.lastActivityAt = task.supervision.checkpoint.at
@@ -2687,9 +2722,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       description: '无独立审查时，引用本次验证证据确认原问题。独立审查通过后通常省略；重复提供仅能确认本次独审已明确 ADDRESSED 的同一问题，不覆盖审查证据。' },
     findings: array({ ...object({ criterion: { type: 'integer', description: '旧格式，从 0 开始；优先使用 criterionId。' }, criterionId: { type: 'string', description: '直接复制 C1、C2 等标准编号，不能自行重新编号。' }, finding: { type: 'string', description: '主控根据实际验证给出的逐条结论；程序不会代填通过。' }, evidence: array({ type: 'string', description: '直接复制本任务本次 delegation_verify 返回的 ref，不添加前缀、文件说明或引号。' }) }), required: ['finding', 'evidence'] }),
   }, ['taskId', 'verdict'], review)
-  routeTool('delegation_control', 'steer 同步给原代理；用户补充须关联 inputIds 并提供 additionalCriteria。纯答复用 acknowledge(inputIds,message)，无需 taskId。stop 仅取消；retry 须处理真实原因。', {
-    taskId: string, action: { type: 'string', enum: ['steer', 'stop', 'retry', 'acknowledge'] }, message: string, reason: string,
-    inputIds: array(string), additionalCriteria: array(string),
+  routeTool('delegation_control', 'steer 同步给原代理；用户补充须关联 inputIds 并提供 additionalCriteria。新增执行要求示例：{action:"steer",taskId,inputIds,additionalCriteria,message}；仅告知、无影响或已由主控处理示例：{action:"acknowledge",inputIds,message}，不发信、不改变原验收标准，也无需 taskId。stop 仅取消；retry 须处理真实原因。', {
+    taskId: string, action: { type: 'string', enum: ['steer', 'stop', 'retry', 'acknowledge'], description: 'steer 发送实际执行要求；仅告知、无影响或已由主控处理时用 acknowledge 记录处理说明，不要求原执行者重复处理。' }, message: string, reason: string,
+    inputIds: array(string), additionalCriteria: { ...array(string), description: 'steer 携带 inputIds 时必填非空数组，写出真实新增验收标准；没有新增要求时改用 acknowledge，不能为通过校验编造标准。' },
   }, ['action'], control)
   routeTool('delegation_cancel', '用户明确取消整计划时提供 reason 和本会话新增真实用户消息的 messageId；自己推测模型不可用不能代替用户取消。已取消计划资源清理未完成时，可空参数重试清理，保留原取消来源，不启动新代理。单任务失败只处理该任务；中断后用 delegation_run 继续原计划。', { reason: string, messageId: string }, [], async (args, exec) => {
     const { plan, parent } = ownPlan(exec)
@@ -2757,6 +2792,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (task?.protocolVersion >= 2 && task.execution) return task.execution.commitState === 'committed'
         ? '[DSH Agentrix] 报告已提交，子回合正在结束，不能继续执行工具。' : '[DSH Agentrix] 报告正在确认，不能继续执行工具。'
       if (!expected) return undefined
+      if (exec.name === 'delegation_checkpoint' && task.supervision?.checkpointRecovery?.suspended) return '[DSH Agentrix] ' + CHECKPOINT_SUSPENDED_GUIDANCE
       if (exec.name === 'list_subagent_models') return '[DSH Agentrix] 执行者沿用已校验的启动模型，不用原生模型查询重新判断或切换；模型问题通过 delegation_report 报告主控。'
       if (task.protocolVersion >= 2 && exec.name === 'send_message') return '[DSH Agentrix] 托管任务必须通过 delegation_report 提交正式报告；普通消息不能代替报告。'
       if (COORDINATOR_TOOLS.has(exec.name)) return '[DSH Agentrix] 此入口仅供主控。子代理读取使用 read/grep/glob，阶段进度使用 delegation_checkpoint，最终结果使用 delegation_report。'
