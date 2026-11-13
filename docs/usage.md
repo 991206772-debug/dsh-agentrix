@@ -4,6 +4,8 @@
 
 auto 模式先由主控比较委派收益与准备、汇报、验收的开销：已掌握上下文的小改或连续调整优先 direct，有独立执行量、隔离或并行价值时 delegate。选择理由要说明具体取舍；普通任务也可委派，不按字数、文件数或操作次数强制分流。执行复杂度看实际未决难点，新任务显式填写审查方式与理由，按错误后果选择是否增加独立审查；“要发布”本身不是复杂或高风险的充分依据。现有字段、兼容默认与 strict/fixed/off 规则保持不变。
 
+auto 未托管普通操作无需先取得判断许可，漏记不会拦截或额外请求模型。主控仍应记录真实取舍，缺失显示“未记录”。托管保护仅针对未验收任务声明的 `writes` 范围，无重叠文件可直接修改；当前需求有受保护产物时，任意 shell 仍受限，验证和目录/Git 检查分别使用 `delegation_verify`、`delegation_inspect`。strict/fixed 继续保留判断许可和额度要求，原生自动派单仍不能绕过配置模型与验收。
+
 工具结果的 `nextAction` 指明下一步。等待时简短告知用户，再调用 `delegation_wait` 或结束回复等待通知；验收后的依赖任务自动启动，无需重复 `run`。主控验证返回 C1、C2 等标准对照与短证据 `ref`；验收时逐条提交 `criterionId`、`finding`、`evidence:[ref]`，程序校验其归属和有效性，不代写通过结论。旧数字 `criterion` 和原始 `callId` 继续兼容。执行者报告参数不包含独立审查字段。
 
 ## 主 Agent 的工具
@@ -19,7 +21,7 @@ auto 模式先由主控比较委派收益与准备、汇报、验收的开销：
 | `delegation_plan` | 新委派推荐携带 `relation/messageId/decisionReason/start:true`，一次记录、建计划并派发；省略 start 或填 false 仍仅保存 |
 | `delegation_run` | 启动已有未启动计划，或明确处理问题后继续；合并派发后无需重复调用 |
 | `delegation_wait` | 等待现有任务的报告、故障或用户新消息；原代理继续运行，不轮询模型、不消耗纠偏次数 |
-| `delegation_status` | 无计划也可查询当前消息；默认计划摘要，可选 taskId，detail: summary/full；full 必须指定任务，只返回该任务完整报告和证据 |
+| `delegation_status` | 无计划也可查询当前消息；默认摘要；taskId、detail:full 返回单任务完整报告和证据；messageId、detail:full 返回本会话消息原文，不能混用任务参数 |
 | `delegation_checkpoint` | 长调查、阶段转换或阻塞时记录结论及成功工具证据；可选 requestReview:true 请原主控核对，同一阶段每次执行只通知一次；短任务直接交报告 |
 | `delegation_control` | `steer` 纠偏、`stop` 取消且必须提供原因、`retry` 有依据地重试；正常返回无需 stop |
 | `delegation_verify` | 默认一次顺序执行任务全部检查，返回逐项证据；可用 checkIndex 单项重验，保留正式验收 |
@@ -153,6 +155,14 @@ delegation_verify({taskId: 'login-tests', checkIndex: 1})
 - 侧栏提醒每 15 秒读取本地配置，并订阅共享模型目录；不读取任务历史或轮询模型服务，卸载插件后停止。页面保存后立即更新提醒。
 
 配置保存到 `<DSH_HOME>/delegation-first/<profile>.json`，任务保存到同目录的 `<profile>.runs.json`。未设置 `DSH_PROFILE` 时使用 `default`；已有 v1 配置保留模式和预算，其余字段取默认值。文件通过临时文件加重命名写入，任务写入串行并合并中间更新。恢复失败会展示错误并保留原文件。
+
+运行状态不超过 8 MiB 时保留 v1 格式；超过后使用 v2 清单，完整会话分片保存到 `<profile>.runs.json.state/<SHA256>.json`。读取兼容旧文件，包括超过 16 MiB 的旧状态；保存先提交分片，再替换清单，最后清理已替代分片。分片缺失、校验失败或会话不匹配时停止恢复并保留原数据，不能当成首次空状态覆盖。备份必须包含清单和分片目录；恢复不会只保留最近 100 个会话的判断记录。
+
+用户消息完整保存、关联和转发；工具默认输出中的长消息只显示 400 字摘要，包含 `truncated` 和 `readOriginal`。用 `delegation_status({messageId:'实际编号',detail:'full'})` 读取本会话原文；不能读取其他会话，不能与 taskId/checkIndex/offset/limit 混用。默认摘要不代表持久化或传给原执行者的内容被截断。
+
+主控的新直接需求或尚未分类消息发生普通错误时，不会停止已有委派；明确宿主取消仍优先。验收准备保存失败会撤销当前临时确认，存储恢复后可在原任务重试。子代理释放与宿主清理均失败时，任务记录为未确认清理，禁止替代执行；明确 stop 并说明清理原因，确认原子任务已释放后才能 retry，不反复调用失败的 dispose。
+
+`/api/state` 提供 `coordinationPolicyVersion:7`、`executionPolicyVersion:1`、`storagePolicyVersion:2`、`runtimeBuild` 和 `runtimeLoadedAt`。前三项标识当前进程策略；后两项是加载逻辑标识和加载时间，运行标识不是 Git 提交号或完整包校验。页面按返回值判断是否已加载新版，源码修改后等待自然重载。
 
 ## 执行记录与会话导出
 

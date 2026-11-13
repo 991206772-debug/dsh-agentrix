@@ -16,7 +16,8 @@ after(async () => {
   await rm(home, { recursive: true, force: true })
 })
 
-export async function host() {
+export async function host(mode) {
+  if (mode) process.env.DSH_DELEGATION_FIRST = mode
   const listeners = new Map(), routes = new Map(), definitions = new Map(), cleanups = []
   const calls = new Map()
   let guard
@@ -154,7 +155,7 @@ test('host guards and request tools share managed coordination policy, including
     assert.match(h.call('write', 'denied-write', h.agent, { file_path: 'tool.html' }), /尚未验收/)
     const response = await new Promise(resolve => h.routes.get('/dsh-delegation-first/api/state')({ method: 'GET', url: '/dsh-delegation-first/api/state?sessionId=root' },
       { writeHead() {}, end(text) { resolve(JSON.parse(text)) } }))
-    assert.equal(response.coordinationPolicyVersion, 6)
+    assert.equal(response.coordinationPolicyVersion, 7)
     assert.equal(response.plans[0].coordinationIssue.callId, 'denied-write')
     assert.equal(response.plans[0].completion, null)
     assert.equal(h.call('team_task_list'), undefined)
@@ -245,9 +246,57 @@ test('a new plan must bind the actual request before it is saved, with inline co
   } finally { await h.close() }
 })
 
-test('business execution requires an explicit decision; ordinary assistant text never supplies the reason', async () => {
-  process.env.DSH_HOME = path.join(home, 'explicit-decision')
+test('auto permits native direct work without a recorded decision and never invents a reason or an extra model turn', async () => {
+  const h = await host(); await h.state(); h.turn('只修改已定位的一处文案')
+  try {
+    assert.equal(h.call('read', 'read'), undefined)
+    assert.equal(h.call('pwsh', 'inspect', h.agent, { command: 'Get-ChildItem' }), undefined)
+    assert.equal(h.call('edit', 'edit', h.agent, { file_path: 'note.md' }), undefined)
+    assert.equal(h.call('pwsh', 'verify', h.agent, { command: 'node --check sample.js' }), undefined)
+    await h.stopping()
+    const state = await h.state()
+    assert.equal(state.decision, null)
+    assert.equal(state.turnStats.denied, 0)
+    assert.equal(state.execution.toolCalls, 4)
+    assert.equal(h.injections.length, 0)
+    assert.match(h.call('subagent'), /delegation_plan/, 'native dispatch cannot bypass configured child models')
+  } finally { await h.close() }
+})
+
+test('managed work protects its declared files without blocking unrelated direct edits', async () => {
+  const h = await host(); await h.state(); h.turn('实现当前功能')
+  try {
+    await h.definitions.get('delegation_plan').execute({ goal: '实现功能', decisionReason: '执行者负责独立实现，主控验收。',
+      tasks: [{ id: 'owned', title: '实现模块', instructions: '修改 owned.js', scope: 'owned.js', outputs: ['owned.js'], writes: ['owned.js'],
+        complexity: 'routine', criteria: ['模块符合要求'], checks: [{ tool: 'read', arguments: { file_path: 'owned.js' } }] }] }, { agent: h.agent })
+    assert.equal(h.call('edit', 'independent', h.agent, { file_path: 'notes.md' }), undefined)
+    assert.match(h.call('edit', 'overlap', h.agent, { file_path: 'owned.js' }), /产物|重叠/)
+    assert.match(h.call('pwsh', 'unknown-write', h.agent, { command: 'arbitrary command' }), /验证|产物|写入/)
+    assert.match(h.call('subagent'), /delegation_plan|托管/)
+  } finally { await h.close() }
+})
+
+test('state exposes the loaded execution policy and a stable runtime build identity', async () => {
   const h = await host(); await h.state()
+  try {
+    const state = async () => {
+      let value
+      await h.routes.get('/dsh-delegation-first/api/state')({ method: 'GET' }, { writeHead() {}, end(text) { value = JSON.parse(text) } })
+      return value
+    }
+    const first = await state(), second = await state()
+    assert.equal(first.executionPolicyVersion, 1)
+    assert.equal(first.storagePolicyVersion, 2)
+    assert.match(first.runtimeBuild, /^[a-f0-9]{12}$/)
+    assert.equal(first.runtimeBuild, second.runtimeBuild)
+    assert.equal(first.runtimeLoadedAt, second.runtimeLoadedAt)
+    assert.ok(first.runtimeLoadedAt <= Date.now())
+  } finally { await h.close() }
+})
+
+test('explicit modes require a recorded decision; ordinary assistant text never supplies the reason', async () => {
+  process.env.DSH_HOME = path.join(home, 'explicit-decision')
+  const h = await host('20'); await h.state()
   h.agent.options = { provider: 'local', model: 'coordinator-high' }
   try {
     h.turn('修复文章中的错别字')
@@ -269,7 +318,7 @@ test('business execution requires an explicit decision; ordinary assistant text 
 
 test('model-confirmed relationships survive reload and only an explicit new request clears old scope', async () => {
   process.env.DSH_HOME = path.join(home, 'decision-scope')
-  let h = await host(); await h.state()
+  let h = await host('20'); await h.state()
   const decide = args => h.definitions.get('delegation_decide').execute(args, { agent: h.agent, callId: 'decision', signal: new AbortController().signal })
   try {
     h.turn('修改文章中的一处错字')
@@ -296,7 +345,7 @@ test('model-confirmed relationships survive reload and only an explicit new requ
 })
 
 test('the first missing-decision denial immediately guides the same coordinator before another model request', async () => {
-  const h = await host(); await h.state()
+  const h = await host('20'); await h.state()
   try {
     h.turn('将当前文档转为 PDF', 'pdf-request')
     const denial = h.call('pwsh', 'convert')
@@ -322,7 +371,7 @@ test('the first missing-decision denial immediately guides the same coordinator 
 
 test('a missing decision resumes the original coordinator once, with the limit surviving reload and cancellation', async () => {
   process.env.DSH_HOME = path.join(home, 'decision-recovery')
-  let h = await host(); await h.state()
+  let h = await host('20'); await h.state()
   try {
     h.turn('只读核对当前文档')
     h.call('read', 'inspection')
@@ -345,7 +394,7 @@ test('a missing decision resumes the original coordinator once, with the limit s
 })
 
 test('immediate decision correction respects cancellation and retains its reminder limit after reload', async () => {
-  let h = await host(); await h.state()
+  let h = await host('20'); await h.state()
   try {
     h.turn('处理指定文档', 'original')
     const abort = new AbortController(), denial = h.call('pwsh', 'cancelled', h.agent, {}, abort.signal)
@@ -363,7 +412,7 @@ test('immediate decision correction respects cancellation and retains its remind
 })
 
 test('decision correction lists every real pending message and never authorizes only the latest message', async () => {
-  const h = await host(); await h.state()
+  const h = await host('20'); await h.state()
   const decide = args => h.definitions.get('delegation_decide').execute(args, { agent: h.agent })
   try {
     h.turn('转换现有文档', 'document')
@@ -384,7 +433,7 @@ test('decision correction lists every real pending message and never authorizes 
 })
 
 test('a pending or failed decision save never permits business execution, even without native delegation tools', async () => {
-  const h = await host(); await h.state(); h.turn('修复指定文档的错字')
+  const h = await host('20'); await h.state(); h.turn('修复指定文档的错字')
   const configuration = (await h.request('GET')).payload
   const runsFile = configuration.file.replace(/\.json$/, '.runs.json')
   try {
@@ -900,7 +949,7 @@ test('large read-only context does not alter difficulty or block later direct wo
 })
 
 test('model-provided identifiers must refer to actual messages in the current session', async () => {
-  const h = await host(); await h.state(); h.turn('修复指定文档')
+  const h = await host('20'); await h.state(); h.turn('修复指定文档')
   try {
     await assert.rejects(h.definitions.get('delegation_decide').execute({ relation: 'new', messageId: 'invented', mode: 'direct', reason: '修改后读取并验证。' }, { agent: h.agent }), /真实用户消息/)
     assert.equal((await h.state()).source, null)

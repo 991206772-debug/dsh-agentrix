@@ -428,7 +428,9 @@ try {
   await state()
   let configStatus
   await routes.get('/dsh-delegation-first/api/config')({ method: 'POST', async *[Symbol.asyncIterator]() {
-    yield Buffer.from(JSON.stringify({ models: { worker: { provider: 'scripted', model: 'low-worker' }, reviewer: { provider: 'scripted', model: 'high-reviewer' } } }))
+    // Missing-decision recovery applies only to modes with an explicit operation gate.
+    yield Buffer.from(JSON.stringify({ ...(decisionRecovery ? { mode: 'fixed', threshold: 20 } : {}),
+      models: { worker: { provider: 'scripted', model: 'low-worker' }, reviewer: { provider: 'scripted', model: 'high-reviewer' } } }))
   } }, { writeHead(status) { configStatus = status }, end() {} })
   assert.equal(configStatus, 200)
   ctx.on('session/event', (session, event) => events.push({ id: session.id, type: event.type, reason: event.data?.reason,
@@ -457,7 +459,7 @@ try {
     await until(() => parentWaiting || events.some(event => event.id === 'root' && event.type === 'turn/end'), 'coordinator claimed delivery while the worker is still running')
     assert.ok(parentWaiting, JSON.stringify({ requests, events }))
     const running = (await state()).plans[0]
-    assert.equal((await state()).coordinationPolicyVersion, 6)
+    assert.equal((await state()).coordinationPolicyVersion, 7)
     assert.equal(running.status, 'running')
     assert.equal(running.completion, null)
     assert.equal(running.tasks[0].execution, null)

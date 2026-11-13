@@ -701,7 +701,7 @@ window.__ModuleLoader__.load({
       'direct.backendMissing': 'Agentrix 插件服务不可用', 'direct.backendHint': '请检查插件是否启用；进度恢复前无法确认当前执行情况。',
       'direct.stale': '进度暂时无法更新，以下为最近记录',
       'coordination.incomplete': '尚未完成', 'coordination.coordinator': '主控操作未执行', 'coordination.worker': '协作操作未执行',
-      'coordination.active': '协作执行策略已生效（v6）', 'coordination.pending': '协作执行策略等待加载',
+      'coordination.active': '原生优先执行策略已生效（v7）', 'coordination.pending': '协作执行策略等待加载', 'runtime.build': '运行逻辑标识',
       'plans.outputTruncated': '验证摘要已截断，完整结果已保存', 'plans.outputPath': '完整验证结果', 'plans.concerns': '执行疑点（验收前需处理）',
     })
     Object.assign(en, {
@@ -730,7 +730,7 @@ window.__ModuleLoader__.load({
       'direct.backendMissing': 'Agentrix plugin service unavailable', 'direct.backendHint': 'Check that the plugin is enabled. Current execution cannot be confirmed until progress is available.',
       'direct.stale': 'Progress could not be refreshed; the last record is shown',
       'coordination.incomplete': 'Not completed', 'coordination.coordinator': 'Coordinator operation did not succeed', 'coordination.worker': 'Coordination operation did not succeed',
-      'coordination.active': 'Coordination policy active (v6)', 'coordination.pending': 'Coordination policy awaiting reload',
+      'coordination.active': 'Native-first execution policy active (v7)', 'coordination.pending': 'Coordination policy awaiting reload', 'runtime.build': 'Loaded runtime identity',
       'plans.outputTruncated': 'Verification preview truncated; full output saved', 'plans.outputPath': 'Full verification output', 'plans.concerns': 'Worker concerns (resolve before acceptance)',
     })
 
@@ -2777,7 +2777,8 @@ window.__ModuleLoader__.load({
             plan || session || route ? h(BoardDecision, { t, session, plan, status, running }) : null,
             h(UsageDetails, { t, usage: state?.requestUsage?.find(entry => entry.sessionId === sessionId && (!request?.messageId || entry.requestId === request.messageId)) ?? plan?.usage }),
             state ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-policy': state.runtimePolicyVersion ?? 'unknown' }, t(state.runtimePolicyVersion >= 2 ? 'runtime.active' : 'runtime.pending')) : null,
-            state ? h('p', { className: 'ddf-board-inline-notice', 'data-coordination-policy': state.coordinationPolicyVersion ?? 'unknown' }, t(state.coordinationPolicyVersion >= 6 ? 'coordination.active' : 'coordination.pending')) : null,
+            state ? h('p', { className: 'ddf-board-inline-notice', 'data-coordination-policy': state.coordinationPolicyVersion ?? 'unknown' }, t(state.coordinationPolicyVersion >= 7 && state.executionPolicyVersion >= 1 ? 'coordination.active' : 'coordination.pending')) : null,
+            state?.runtimeBuild ? h('p', { className: 'ddf-board-inline-notice', 'data-runtime-build': state.runtimeBuild }, t('runtime.build') + '：' + state.runtimeBuild) : null,
             plan?.routingWarnings?.length ? h('p', { className: 'ddf-board-inline-notice' }, fill(t('plans.routeWarnings'), { warnings: plan.routingWarnings.join('；') })) : null,
             plan ? h('details', { className: 'ddf-board-diagnostics' }, h('summary', null, t('view.source')), h(PlanDetails, { t, plan, sessionId, hidden: false })) : null,
             previous ? h('details', { className: 'ddf-board-diagnostics', 'data-previous-request': previous.source?.messageId || 'unknown' },

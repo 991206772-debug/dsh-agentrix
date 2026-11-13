@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
 import { createOrchestrator, OPTION_RANGES, orchestrationOptions, REVIEWER_MODEL_POLICY, COORDINATION_POLICY_VERSION, validateModelRoute } from './orchestrator.js'
+import { createRuntimeStore } from './runtime-store.js'
 
 export const inject = ['tools']
 
@@ -36,12 +37,12 @@ const MAX_BODY_BYTES = 64 * 1024
 const DISCIPLINE = [
   "## Agentrix",
   "auto比较委派收益与准备、汇报、验收开销；小改/共享上下文优先direct，有独立执行量、隔离或并行价值才delegate；普通也可委派。",
-  "先读；direct用delegation_decide，委派用delegation_plan({start:true,...})；要求分必需/建议，说明取舍，合批。",
+  "先读；auto未托管可直接做，delegation_decide记真实理由；委派用delegation_plan({start:true,...})。要求分必需/建议，合批。",
   "委派后主控规划验收、worker执行。complexity看未决难点；显式填reviewPolicy/reviewReason按风险审查。审查用分发者模型，delegation_models查模型。",
   "delegation_verify后delegation_review按criterionId/ref验收。标准限用户要求及必要验证；重要问题返工，minor记录，复查不扩围。",
   "relation:new/continue/update/question。补充先答复；变更用inputIds/additionalCriteria steer原代理，答复acknowledge。报进度，修改失败须修复并核对原产物。",
-  "有进展不停、不换代理；按nextAction用delegation_wait等通知。交report，长调查/阻塞记checkpoint。",
-  "stop取消须原因。验收delivery填summary/inlineFiles，正文限outputs；交付后结束。",
+  "有进展不停、不换代理；按nextAction等通知。交report，长调查/阻塞记checkpoint。",
+  "stop仅取消且须原因。验收delivery填summary/inlineFiles，正文限outputs；交付后结束。",
 ].join('\n')
 
 /** Automatic routing is advisory; explicit modes retain their operation gates. */
@@ -304,6 +305,7 @@ function evaluate(name, state, config) {
 // ---------------------------------------------------------------------------
 
 export function apply(ctx) {
+  const runtimeLoadedAt = Date.now()
   const file = configFile()
   /** An environment value pins the file; the panel then shows it as locked. */
   const pinned = envPinned()
@@ -521,7 +523,7 @@ export function apply(ctx) {
       return undefined
     }
     if (verdict.allow) {
-      if (current.enabled && current.gatedTools.includes(name)) {
+      if (current.enabled && current.mode !== 'auto' && current.gatedTools.includes(name)) {
         const decision = orchestration.decisionFor(role.agentId)
         if (!orchestration.decisionCurrent(role.agentId) || decision.mode !== 'direct') {
           state.denied++; state.turnDenied++
@@ -613,7 +615,7 @@ export function apply(ctx) {
     await ready
     if (!current.enabled || signal?.aborted || roleOf({ agent })?.worker !== false || orchestration.hasPending(agent.id)) return
     const state = states.get(agent.id), execution = state?.execution
-    if ((execution?.toolCalls > 0 || state?.last?.kind === 'decision') && typeof agent.inject === 'function' && await orchestration.recoverDecision(agent.id)) {
+    if (current.mode !== 'auto' && (execution?.toolCalls > 0 || state?.last?.kind === 'decision') && typeof agent.inject === 'function' && await orchestration.recoverDecision(agent.id)) {
       agent.inject({ id: randomUUID(), role: 'user', source: { kind: 'delegation-decision-recovery' }, content: [{ type: 'text', text:
         orchestration.decisionGuidance(agent.id) }] })
       return
@@ -760,6 +762,10 @@ export function apply(ctx) {
       limits: orchestrationOptions(current),
       supervisionPolicy: orchestration.supervisionPolicy,
       runtimePolicyVersion: orchestration.supervisionPolicy.version,
+      executionPolicyVersion: 1,
+      storagePolicyVersion: 2,
+      runtimeBuild: RUNTIME_BUILD,
+      runtimeLoadedAt,
       coordinatorProgressVersion: 1,
       decisionProtocolVersion: 2,
       coordinationPolicyVersion: COORDINATION_POLICY_VERSION,
@@ -1168,7 +1174,8 @@ export function apply(ctx) {
             const messages = orchestration.pendingMessages(agentId)
             const pending = messages.length && !summary ? '待关联用户消息（仅事实，尚未归属需求）：' + messages.map(message => message.messageId + '：' + message.text.slice(0, 180)).join('；') + '。新委派用 delegation_plan({relation,decisionReason,start:true,...}) 同时关联并派发；直接执行或多条消息分别关联才用 delegation_decide，不能按字数猜测。' : ''
             const choice = orchestration.decisionCurrent(agentId) ? '本需求已记录执行方式：' + decision.mode + '。范围未变无需重复记录。'
-              : '本需求尚未记录判断或范围已补充；新委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run；直接执行先记录 direct。'
+              : current.mode === 'auto' ? '当前判断尚未记录；auto 普通操作可直接执行，主控用 delegation_decide 补充真实理由。委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run。'
+                : '本需求尚未记录判断或范围已补充；新委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run；直接执行先记录 direct。'
             return [DISCIPLINE, pending, choice, missing, unresolved, summary].filter(Boolean).join('\n\n')
           } catch {
             return DISCIPLINE
@@ -1247,3 +1254,7 @@ export function apply(ctx) {
     return orchestration.dispose()
   }, 'dsh-delegation-first: gate')
 }
+
+// Identifies the loaded host/orchestration/storage logic, independently of the release package version.
+export const RUNTIME_BUILD = createHash('sha256').update([apply, createOrchestrator, createRuntimeStore, policyFor, evaluate]
+  .map(fn => fn.toString().replaceAll('\r\n', '\n')).join('\n') + DISCIPLINE).digest('hex').slice(0, 12)

@@ -18,7 +18,7 @@ test('release package contains its installable bundle, documentation and storefr
   assert.equal(packed.status, 0, packed.stderr || packed.error?.message)
   const [manifest] = JSON.parse(packed.stdout)
   const files = new Set(manifest.files.map(file => file.path))
-  for (const file of ['index.js', 'orchestrator.js', 'supervision.js', 'usage.js', 'completion.js', 'task-records.js', 'client.js',
+  for (const file of ['index.js', 'orchestrator.js', 'runtime-store.js', 'supervision.js', 'usage.js', 'completion.js', 'task-records.js', 'client.js',
     'cordis.patch.yml', 'README.md', 'LICENSE', 'docs/usage.md', 'icon.svg', 'assets/icon.png', 'screenshots.json']) {
     assert.ok(files.has(file), `missing release file: ${file}`)
   }

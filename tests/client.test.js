@@ -255,14 +255,16 @@ test('acceptance shows explicit review policy and reason separately from executi
 })
 
 test('acceptance distinguishes the current coordination policy from a host still running the previous policy', async () => {
-  for (const version of [5, 6]) {
+  for (const version of [6, 7]) {
     const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
-      sessionId: 'session-current', plans: [], sessions: [], coordinationPolicyVersion: version }) }) })
+      sessionId: 'session-current', plans: [], sessions: [], coordinationPolicyVersion: version,
+      executionPolicyVersion: version === 7 ? 1 : undefined, runtimeBuild: version === 7 ? 'abcdef123456' : undefined }) }) })
     const view = f.mountView('session-current')
     try {
       await view.flush()
-      assert.match(view.text(), version === 6 ? /协作执行策略已生效（v6）/ : /协作执行策略等待加载/)
-      if (version === 5) assert.doesNotMatch(view.text(), /协作执行策略已生效/)
+      assert.match(view.text(), version === 7 ? /原生优先执行策略已生效（v7）/ : /协作执行策略等待加载/)
+      if (version === 6) assert.doesNotMatch(view.text(), /原生优先执行策略已生效/)
+      else assert.match(view.text(), /abcdef123456/)
     } finally { view.close(); f.close() }
   }
 })

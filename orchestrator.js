@@ -1,17 +1,18 @@
-import { lstat, mkdir, open, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { createTaskRecords } from './task-records.js'
 import { buildCompletion, completionText, incompleteReason, RECOVERY_LIMIT, deliveryOptions, buildDelivery, deliveryText } from './completion.js'
 import { startSupervision, observeTool, observeUsage, observeRequest, SUPERVISION_POLICY } from './supervision.js'
 import { createUsageLedger } from './usage.js'
+import { createRuntimeStore } from './runtime-store.js'
 
 export const DEFAULT_OPTIONS = Object.freeze({
   maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120,
   models: { worker: null, reviewer: null },
 })
 export const REVIEWER_MODEL_POLICY = 'dispatcher-snapshot'
-export const COORDINATION_POLICY_VERSION = 6
+export const COORDINATION_POLICY_VERSION = 7
 const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork'])
 const COORDINATOR_TOOLS = new Set(['delegation_models', 'delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_wait', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
 const EXECUTOR_TOOLS = new Set(['delegation_checkpoint', 'delegation_report'])
@@ -118,8 +119,11 @@ function compactTask(task) {
 }
 function compactResult(value) {
   const result = { ...value }
+  if (value.context) result.context = compactContext(value.context)
+  if (value.source) result.source = compactMessage(value.source)
+  if (value.pendingMessages) result.pendingMessages = value.pendingMessages.map(compactMessage)
   if (value.plan) result.plan = { sessionId: value.plan.sessionId, goal: brief(value.plan.goal, 300), status: value.plan.status,
-    decision: value.plan.decision, nextAction: value.plan.nextAction, pendingMessages: value.plan.pendingMessages,
+    decision: value.plan.decision, nextAction: value.plan.nextAction, pendingMessages: value.plan.pendingMessages?.map(compactMessage),
     activationBudget: value.plan.activationBudget, dispatchWait: value.plan.dispatchWait,
     interruption: value.plan.interruption,
     coordinatorIssue: value.plan.coordinatorIssue, coordinationIssue: value.plan.coordinationIssue, messageResolution: value.plan.messageResolution,
@@ -129,6 +133,15 @@ function compactResult(value) {
   if (value.task) result.task = compactTask(value.task)
   if (value.audit) result.audit = compactTask(value.audit)
   return result
+}
+function compactMessage(message) {
+  return message && typeof message.text === 'string' && message.text.length > 400
+    ? { ...message, text: message.text.slice(0, 400), truncated: true,
+      readOriginal: `delegation_status({messageId:"${message.messageId}",detail:"full"})` } : message
+}
+function compactContext(context) {
+  return { ...context, source: compactMessage(context.source), revision: compactMessage(context.revision),
+    pendingMessages: (context.pendingMessages ?? []).map(compactMessage) }
 }
 
 export async function validateModelRoute(llm, route, tier, signal) {
@@ -296,6 +309,7 @@ function routeWarnings(route, tasks) {
 /** DSH owns Agent lifetimes and tool execution. This module owns task state and acceptance. */
 export function createOrchestrator({ ctx, file, getConfig, getSource = () => null, getRevision = getSource, getRoute = () => null, onRequestResolved = () => {}, onDelegated = () => {} }) {
   const usageLedger = createUsageLedger()
+  const runtimeStore = createRuntimeStore(file)
   const decisions = new Map(), decisionWrites = new Set()
   const coordinatorUsage = new Map()
   const plans = new Map(), live = new Map(), permits = new Map(), expectedRoutes = new Map(), disposers = []
@@ -335,7 +349,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (existing.withdrawn && !existing.resolution) { existing.withdrawn = false; existing.target = target; waitingParents.get(sessionId)?.wake.resolve(); backgroundSave() }
       return
     }
-    entry.messages.push({ messageId: String(message.id), text: text.slice(0, 4000), at: Date.now(), target })
+    entry.messages.push({ messageId: String(message.id), text, at: Date.now(), target })
     waitingParents.get(sessionId)?.wake.resolve()
     backgroundSave()
   }
@@ -794,16 +808,19 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const source = sourceOf(plan.sessionId)
     return !source?.messageId || source.messageId === plan.source?.messageId
   }
+  function coordinatorEventMatchesPlan(plan, event) {
+    return isCurrentPlan(plan) && (!pendingMessages(plan.sessionId).length || event.type === 'turn/end' && event.data?.reason?.kind === 'aborted')
+  }
   function coordinatorWriteBlock(exec) {
     const plan = pendingPlan(exec.agent.id)
     if (!plan) return
-    if (isCurrentPlan(plan) && plan.interruption && !plan.interruption.resumedAt) return '[DSH Agentrix] 原计划执行已中断，任务与成果仍保留。用户已要求继续时用 delegation_run 恢复原任务并继续验收，无需新建任务卡。'
-    if (isCurrentPlan(plan)) return '[DSH Agentrix] 当前计划尚未验收。请监督或返工任务；主控验证通过 delegation_verify 执行，避免与子 Agent 重复修改。'
     const target = exec.arguments?.file_path ?? exec.arguments?.path ?? exec.arguments?.notebook_path
+    const protectedTasks = plan.tasks.filter(task => !['accepted', 'cancelled'].includes(task.status) && task.writes.length)
+    if (isCurrentPlan(plan) && protectedTasks.length && ['pwsh', 'bash'].includes(exec.name)) return '[DSH Agentrix] 当前托管产物仍受写入保护，不能确认任意命令的写入范围。主控验证用 delegation_verify，目录与 Git 检查用 delegation_inspect；无重叠文件可直接修改。'
     if (typeof target !== 'string' || !target.trim()) return
     const writes = [path.resolve(exec.agent.session?.header?.cwd ?? plan.cwd ?? process.cwd(), target)]
-    const conflict = plan.tasks.find(task => !['accepted', 'cancelled'].includes(task.status) && overlaps({ writes }, task))
-    if (conflict) return `[DSH Agentrix] 另一项需求的任务 ${conflict.id} 尚未验收，当前写入与原需求产物重叠：${target}。请同步给原执行者，或等待原任务验收后修改。`
+    const conflict = protectedTasks.find(task => overlaps({ writes }, task))
+    if (conflict) return `[DSH Agentrix] ${isCurrentPlan(plan) ? '当前需求' : '另一项需求'}的任务 ${conflict.id} 尚未验收，当前写入与原需求产物重叠：${target}。请同步给原执行者，或等待原任务验收后修改。`
   }
   function coordinationContext(sessionId) {
     if (closed || getConfig().enabled === false) return null
@@ -854,7 +871,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const header = agent.session?.header ?? service('sessions')?.get(agent.id)?.header ?? {}
     if (header.origin === 'subagent' || header.parentSession || header.delegationDepth > 0) return false
     const entry = decisions.get(agent.id)
-    if (!decisionCurrent(agent.id) && entry?.recoveryUsed >= 1 && entry.recoveryKey === decisionRecoveryKey(agent.id) &&
+    if (getConfig().mode !== 'auto' && !decisionCurrent(agent.id) && entry?.recoveryUsed >= 1 && entry.recoveryKey === decisionRecoveryKey(agent.id) &&
       (getConfig().gatedTools ?? []).includes(name)) return true
     if (name === 'list_subagent_models') return true
     const plan = plans.get(agent.id)
@@ -938,10 +955,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
           dirty = false
           const batch = [...pendingRecords.entries()].map(([id, entry]) =>
             ({ id, entry, plan: snapshotPlan(entry.plan, true), events: entry.events.slice() }))
-          await mkdir(path.dirname(file), { recursive: true })
-          const temporary = `${file}.tmp`
-          await writeFile(temporary, JSON.stringify({ version: 1, plans: [...plans.values()].map(plan => snapshotPlan(plan, true)), requestUsage: usageLedger.snapshot(), decisions: [...decisions.values()] }), 'utf8')
-          await rename(temporary, file)
+          await runtimeStore.write({ version: 1, plans: [...plans.values()].map(plan => snapshotPlan(plan, true)), requestUsage: usageLedger.snapshot(), decisions: [...decisions.values()] })
           for (const item of batch) {
             try {
               await records.write(item.plan, item.events)
@@ -971,12 +985,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   }
   const ready = (async () => {
     try {
-      const info = await stat(file)
-      if (info.size > 16 * 1024 * 1024) throw new Error('任务文件超过 16 MiB，请检查备份')
-      const stored = JSON.parse(await readFile(file, 'utf8'))
+      const stored = await runtimeStore.read()
       if (stored.version !== 1 || !Array.isArray(stored.plans) || stored.plans.length > MAX_PLANS) throw new Error('任务文件格式不支持')
       usageLedger.restore(stored.requestUsage)
-      for (const entry of (stored.decisions ?? []).slice(-100)) {
+      for (const entry of stored.decisions ?? []) {
         if (typeof entry.sessionId === 'string' && (entry.source?.messageId || Array.isArray(entry.messages)) &&
           (!entry.decision || ['direct', 'delegate'].includes(entry.decision.mode) && typeof entry.decision.reason === 'string')) decisions.set(entry.sessionId, entry)
       }
@@ -1277,28 +1289,33 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   }
   async function releaseChild(handle, task) {
     truncatedOutputs.delete(task.childId)
-    if (handle.releasePromise && handle.releasedReceipt === handle.receipt) return handle.releasePromise
+    if (handle.releasePromise && handle.releasedReceipt === handle.receipt && !handle.releaseFailed) return handle.releasePromise
+    const retryDrain = handle.releaseFailed && handle.releasedReceipt === handle.receipt
     handle.releasedReceipt = handle.receipt
+    handle.releaseFailed = false
     handle.releasePromise = (async () => {
       if (!handle.receipt) {
         task.release = { status: 'none', at: Date.now() }
         return null
       }
+      const drain = async () => {
+        const parent = handle.parent ?? service('agents')?.get(handle.planSessionId)
+        if (!parent || !task.childId || typeof service('subagents')?.drainChildren !== 'function') throw new Error('无法确认旧子任务已释放')
+        await service('subagents').drainChildren(parent, [task.childId])
+      }
       try {
-        await handle.receipt?.dispose()
-        task.release = { status: 'released', at: Date.now() }
+        if (retryDrain) await drain()
+        else await handle.receipt.dispose()
+        task.release = { status: retryDrain ? 'drained' : 'released', at: Date.now() }
         return null
       } catch (error) {
-        const parent = handle.parent ?? service('agents')?.get(handle.planSessionId)
-        try {
-          if (!parent || !task.childId || typeof service('subagents')?.drainChildren !== 'function') throw error
-          await service('subagents').drainChildren(parent, [task.childId])
-          task.release = { status: 'drained', at: Date.now() }
-          return null
-        } catch (drainError) {
-          task.release = { status: 'failed', at: Date.now(), error: messageOf(drainError) }
-          return drainError
-        }
+        if (!retryDrain) try {
+          await drain(); task.release = { status: 'drained', at: Date.now() }; return null
+        } catch (drainError) { error = drainError }
+        handle.releaseFailed = true
+        task.recovered = true
+        task.release = { status: 'failed', at: Date.now(), error: messageOf(error) }
+        return error
       }
     })()
     return handle.releasePromise
@@ -1662,7 +1679,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         if (alert) requestSupervision(expected.plan, expected.task, expected.handle, alert)
         backgroundSave()
       }
-      if (!closed && !parentPlan?.cancelled && parentPlan?.coordinatorIssue && !parentPlan.coordinatorIssue.resolvedAt) {
+      if (!closed && !parentPlan?.cancelled && parentPlan?.coordinatorIssue && !parentPlan.coordinatorIssue.resolvedAt && coordinatorEventMatchesPlan(parentPlan, event)) {
         parentPlan.coordinatorIssue.resolvedAt = Date.now()
         parentPlan.wakeSuppressed = false
         invalidateCompletion(parentPlan)
@@ -1670,7 +1687,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         backgroundSave()
       }
     }
-    if (!closed && parentPlan?.protocolVersion >= 2 && !parentPlan.cancelled && planStatus(parentPlan) !== 'accepted' && event?.type === 'turn/end' && ['aborted', 'error'].includes(event.data?.reason?.kind)) {
+    if (!closed && parentPlan?.protocolVersion >= 2 && !parentPlan.cancelled && coordinatorEventMatchesPlan(parentPlan, event) && planStatus(parentPlan) !== 'accepted' && event?.type === 'turn/end' && ['aborted', 'error'].includes(event.data?.reason?.kind)) {
       const aborted = event.data.reason.kind === 'aborted'
       const issue = !aborted && modelServiceIssue(event.data.reason.error, 'coordinator', usageTarget(session.id))
       if (issue) parentPlan.coordinatorIssue = issue
@@ -1918,7 +1935,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         if (typeof exec.concludeTurn !== 'function') throw new Error('DSH 未提供 concludeTurn，不能保证验收后自动结束')
         invalidateCompletion(plan)
         task.pendingAcceptance = acceptedReview
-        await save()
+        try { await save() }
+        catch (error) { if (task.pendingAcceptance === acceptedReview) delete task.pendingAcceptance; throw error }
         const proposed = { ...plan, tasks: plan.tasks.map(item => item.pendingAcceptance ? { ...item, status: 'accepted', review: item.pendingAcceptance } : item) }
         const completion = buildCompletion(proposed)
         stagedResults.set(exec, {
@@ -2022,6 +2040,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
           handle.done.resolve()
         } else if (target.recovered && target.childId) {
           await service('subagents').drainChildren(parent, [target.childId])
+          target.release = { status: 'drained', at: Date.now() }
         }
         target.recovered = false
       }
@@ -2052,8 +2071,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const routeTool = (name, description, properties, required, execute, child = false) => {
     const definition = { name, description, parameters: { ...object(properties), required },
       output: { schema: { type: 'object', additionalProperties: true }, render: (args, value) => [{ type: 'text', text: value.completion
-        ? [completionText(value.completion), value.continuation, ...(value.nextAction?.type !== 'finished' ? [JSON.stringify({ context: value.context, nextAction: value.nextAction })] : [])].filter(Boolean).join('\n')
-        : JSON.stringify(args.detail === 'full' ? value : compactResult(value)) }] },
+        ? [completionText(value.completion), value.continuation, ...(value.nextAction?.type !== 'finished' ? [JSON.stringify({ context: value.context && compactContext(value.context), nextAction: value.nextAction })] : [])].filter(Boolean).join('\n')
+        : JSON.stringify(args.detail === 'full' ? { ...value, ...(value.context ? { context: compactContext(value.context) } : {}) } : compactResult(value)) }] },
       async execute(args, exec) {
         try {
           await ready; if (committing.size) await Promise.all(committing); if (!child) own(exec)
@@ -2314,12 +2333,18 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return { plan: snapshot().find(item => item.sessionId === plan.sessionId) }
   }
   routeTool('delegation_run', '启动已经建立但未启动的计划，或在明确处理问题后继续原计划。新委派优先用 delegation_plan 的 start:true 一次完成。按依赖和全局并发限制派单；dispatchWait 时等通知，不反复调用。失败不自动重试，仍执行原模型、预算和恢复校验。', {}, [], runPlan)
-  routeTool('delegation_status', '查询当前会话消息与计划摘要，无计划也可调用。context 提供当前需求、待关联消息正文和真实 messageId；旧计划回执仅作历史背景，按顶层 nextAction 继续，无需扫描历史会话文件。detail=full 必须指定 taskId；checkIndex 可分段读取验证原文，offset 从 0 开始，limit 默认 4000、最多 8000，按 nextOffset 继续。', {
-    taskId: string, detail: { type: 'string', enum: ['summary', 'full'] }, checkIndex: { type: 'integer' }, offset: { type: 'integer' }, limit: { type: 'integer' },
+  routeTool('delegation_status', '查询当前会话消息与计划摘要，无计划也可调用。context 返回消息摘要和真实 messageId；长消息以 messageId、detail:full 读取本会话完整原文，不能混用任务参数。旧计划回执仅作历史背景，按顶层 nextAction 继续。taskId、detail:full 读取一个任务详情；checkIndex 可分段读取验证原文，offset 从 0 开始，limit 默认 4000、最多 8000，按 nextOffset 继续。', {
+    taskId: string, messageId: string, detail: { type: 'string', enum: ['summary', 'full'] }, checkIndex: { type: 'integer' }, offset: { type: 'integer' }, limit: { type: 'integer' },
   }, [], async (args, exec) => {
     const parent = own(exec), plan = plans.get(parent.id)
     if (args.detail !== undefined && !['summary', 'full'].includes(args.detail)) throw new Error('detail 只能是 summary 或 full')
-    if (args.detail === 'full' && !args.taskId) throw new Error('完整详情必须指定 taskId，只读取一个任务')
+    if (args.messageId) {
+      if (args.taskId || args.checkIndex !== undefined || args.offset !== undefined || args.limit !== undefined) throw new Error('消息原文查询不能混用任务或验证输出参数')
+      const message = decisions.get(parent.id)?.messages?.find(message => message.messageId === args.messageId && !message.withdrawn)
+      if (!message) throw new Error('消息编号不存在于当前会话，不能读取其他会话消息')
+      return { message: args.detail === 'full' ? clone(message) : compactMessage(clone(message)) }
+    }
+    if (args.detail === 'full' && !args.taskId) throw new Error('完整详情必须指定 taskId 或 messageId，只读取一个任务或消息')
     if (!plan) {
       if (args.taskId || args.checkIndex !== undefined) throw new Error('请先调用 delegation_plan 创建任务计划，消息关联可直接查看 delegation_status({})')
       if (args.offset !== undefined || args.limit !== undefined) throw new Error('offset 和 limit 必须与 checkIndex 一起使用')

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, symlink, unlink, writeFile } from '
 import os from 'node:os'
 import path from 'node:path'
 import { createOrchestrator, DEFAULT_OPTIONS } from '../orchestrator.js'
-import { buildDelivery } from '../completion.js'
+import { buildCompletion, buildDelivery } from '../completion.js'
 
 const cleanup = []
 afterEach(async () => { while (cleanup.length) await cleanup.pop()() })
@@ -917,6 +917,66 @@ test('verification follows host cancellation without adding a plugin execution d
   assert.equal(received, controller.signal, 'the host signal must be forwarded without a hidden 60-second deadline')
   controller.abort()
   assert.equal(received.aborted, true)
+})
+
+test('failure of a separate direct request never interrupts the previous managed request', async () => {
+  const f = await fixture()
+  await f.plan([card('old')]); await f.execute('delegation_run')
+  const before = f.snapshot(), original = f.pending[0]
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'new-direct', source: { kind: 'user' }, content: '另外核对独立文档，原任务继续。' } })
+  await f.execute('delegation_decide', { messageId: 'new-direct', relation: 'new', mode: 'direct', reason: '独立需求只核对另一份文档，不改原产物。' })
+  await f.emit('session/event', f.parent, { type: 'turn/end', data: { turn: 2, reason: { kind: 'error', error: new Error('new direct request failed') } } })
+  const after = f.snapshot()
+  assert.equal(after.tasks[0].status, 'running')
+  assert.equal(after.tasks[0].childId, before.tasks[0].childId)
+  assert.equal(f.calls[0].signal.aborted, false)
+  assert.equal(original.receipt.disposeCount, undefined)
+  assert.equal(after.completion, null)
+  assert.equal(after.coordinatorIssue, undefined)
+})
+
+test('long user supplements preserve their tail in status, forwarding and reload', async () => {
+  const f = await fixture()
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  const tail = '末尾硬要求：保留原始文件，禁止修改数据库'
+  const text = '甲'.repeat(4200) + tail
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'long-input', source: { kind: 'user' }, content: text } })
+  assert.equal(f.engine.pendingMessages('parent')[0].text.length, text.length)
+  assert.ok(f.engine.pendingMessages('parent')[0].text.endsWith(tail))
+  await f.execute('delegation_decide', { messageId: 'long-input', relation: 'update', mode: 'delegate', reason: '沿用原执行者并纳入完整补充。' })
+  await f.execute('delegation_control', { taskId: 'a', action: 'steer', inputIds: ['long-input'], additionalCriteria: [tail], message: '按完整补充继续。' })
+  assert.ok(f.calls.at(-1)[2][0].text.includes(text))
+  await f.reload()
+  assert.equal(f.engine.requestContext('parent').messages.find(message => message.messageId === 'long-input').text.length, text.length)
+  assert.ok(f.engine.requestContext('parent').messages.find(message => message.messageId === 'long-input').text.endsWith(tail))
+})
+
+test('an unclassified supplemental message cannot make its coordinator failure stop an existing worker', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'unclassified', source: { kind: 'user' }, content: '另外核对一份文档' } })
+  await f.emit('session/event', f.parent, { type: 'turn/end', data: { reason: { kind: 'error', error: new Error('new input failed before classification') } } })
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.calls[0].signal.aborted, false)
+})
+
+test('long message summaries stay bounded while their exact original is available only to the owning coordinator', async () => {
+  const f = await fixture()
+  await f.plan([card('a')])
+  const text = '补充'.repeat(5000) + '末尾要求'
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'long-original', source: { kind: 'user' }, content: text } })
+  const value = await f.execute('delegation_status')
+  const output = JSON.parse(f.render('delegation_status', {}, value))
+  assert.ok(output.context.pendingMessages[0].text.length <= 400)
+  assert.equal(output.context.pendingMessages[0].truncated, true)
+  assert.ok(output.plan.pendingMessages[0].text.length <= 400)
+  assert.equal(output.plan.pendingMessages[0].truncated, true)
+  assert.match(output.context.pendingMessages[0].readOriginal, /long-original/)
+  const receiptOutput = f.render('delegation_status', {}, { ...value, completion: buildCompletion(f.snapshot(), '等待主控确认补充') })
+  assert.equal(receiptOutput.includes(text), false, 'receipt responses also keep message originals out of the default model context')
+  assert.match(receiptOutput, /readOriginal/)
+  const full = await f.execute('delegation_status', { messageId: 'long-original', detail: 'full' })
+  assert.equal(full.message.text, text)
+  await assert.rejects(f.execute('delegation_status', { messageId: 'foreign-message', detail: 'full' }), /消息/)
 })
 
 test('a model-confirmed new request never cancels or rewrites the existing worker plan', async () => {
@@ -2053,6 +2113,26 @@ test('a committed report interrupted before native settlement resumes at accepta
   assert.equal(f.pending[0].receipt.disposeCount, 1)
 })
 
+test('failed child cleanup cannot be bypassed by retry and successful explicit draining permits recovery', async () => {
+  const f = await fixture()
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  let disposals = 0
+  f.pending[0].receipt.dispose = async () => { disposals++; throw new Error('dispose failed') }
+  f.ctx.subagents.drainChildren = async () => { throw new Error('drain failed') }
+  f.pending[0].reject(new Error('child request failed'))
+  await waitFor(() => f.snapshot().tasks[0].status === 'failed')
+  await tick()
+  assert.equal(f.snapshot().tasks[0].release.status, 'failed')
+  await assert.rejects(f.execute('delegation_control', { taskId: 'a', action: 'retry', message: '服务已恢复。' }), /清理|stop/)
+  assert.equal(f.pending.length, 1)
+  f.ctx.subagents.drainChildren = async () => {}
+  await f.execute('delegation_control', { taskId: 'a', action: 'stop', reason: '清理旧执行后恢复原任务。' })
+  assert.equal(f.snapshot().tasks[0].release.status, 'drained')
+  await f.execute('delegation_control', { taskId: 'a', action: 'retry', message: '服务和旧执行清理已恢复。' })
+  assert.equal(f.pending.length, 2)
+  assert.equal(disposals, 1, 'failed disposal is not repeated; explicit draining confirms release')
+})
+
 test('failed interruption cleanup cannot start a replacement until the old child is drained', async () => {
   const f = await fixture()
   await f.plan([card('a')]); await f.execute('delegation_run')
@@ -2365,6 +2445,56 @@ test('optional archive failures do not prevent dispatch or lose persisted accept
   const stored = JSON.parse(await readFile(f.file, 'utf8')).plans[0]
   assert.equal(stored.tasks[0].status, 'accepted')
   assert.ok(stored.tasks[0].review.findings[0].evidence.length)
+})
+
+test('acceptance can retry after its preparation save fails, without a stale confirmation lock', async () => {
+  const f = await fixture()
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'a', checkIndex: 0 })
+  const args = { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '核对实际产物', evidence: [proof.callId] }] }
+  const saved = await readFile(f.file, 'utf8')
+  await unlink(f.file); await mkdir(f.file)
+  await assert.rejects(f.execute('delegation_review', args))
+  await rm(f.file, { recursive: true }); await writeFile(f.file, saved)
+  assert.equal(f.snapshot().tasks[0].pendingAcceptance, undefined)
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+  await f.execute('delegation_review', args)
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+})
+
+test('large legacy runtime state migrates without losing messages and reloads from a bounded manifest', async () => {
+  const f = await fixture()
+  await f.plan([card('a')])
+  await f.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    stored.decisions[0].messages = Array.from({ length: 1500 }, (_, index) => ({ messageId: 'history-' + index,
+      text: '界'.repeat(4000) + '-tail-' + index, at: index, resolution: { relation: 'continue', requestId: 'request-1' } }))
+    const content = JSON.stringify(stored)
+    assert.ok(Buffer.byteLength(content) > 16 * 1024 * 1024)
+    await writeFile(file, content)
+  })
+  assert.equal(f.engine.storageError, null)
+  assert.equal(f.engine.requestContext('parent').messages.length, 1500)
+  assert.ok(f.engine.requestContext('parent').messages.at(-1).text.endsWith('-tail-1499'))
+  assert.ok((await stat(f.file)).size < 1024 * 1024, 'the active manifest must not contain the full history')
+  await f.reload()
+  assert.equal(f.engine.storageError, null)
+  assert.ok(f.engine.requestContext('parent').messages.at(-1).text.endsWith('-tail-1499'))
+})
+
+test('runtime reload preserves recorded messages for more than one hundred sessions', async () => {
+  const f = await fixture(); await f.plan([card('a')])
+  await f.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    stored.decisions.unshift(...Array.from({ length: 101 }, (_, index) => ({ sessionId: 'history-' + index,
+      messages: [{ messageId: 'message-' + index, text: '保留会话原文 ' + index }] })))
+    await writeFile(file, JSON.stringify(stored))
+  })
+  assert.equal(f.engine.requestContext('history-0')?.messages[0]?.text, '保留会话原文 0')
+  await f.reload()
+  assert.equal(f.engine.requestContext('history-100')?.messages[0]?.text, '保留会话原文 100')
 })
 
 test('failure to persist required runtime state still prevents child startup', async () => {
