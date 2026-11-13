@@ -21,6 +21,31 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('managed read guidance precedes shell attempts and a supplement steers the same worker', async () => {
+  const f = await fixture(); await f.plan([card('ui', { writes: ['client.js'], outputs: ['client.js'] })]); await f.execute('delegation_run')
+  const childId = f.snapshot().tasks[0].childId
+  assert.match(f.engine.summary(f.parent.id), /read\/grep\/glob/)
+  const denial = f.engine.coordinatorWriteBlock({ agent: f.parent, name: 'pwsh', arguments: { command: 'Select-String client.js alignment' } })
+  assert.match(denial, /read\/grep\/glob/)
+  assert.match(denial, /delegation_control.*steer/)
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'layout-update', source: { kind: 'user' }, content: [{ type: 'text', text: '补充折叠和对齐要求' }] } })
+  await f.execute('delegation_decide', { relation: 'update', messageId: 'layout-update', mode: 'delegate', reason: '由原执行者继续修正同一页面。' })
+  await f.execute('delegation_control', { action: 'steer', taskId: 'ui', inputIds: ['layout-update'], message: '按补充要求修正原页面。', additionalCriteria: ['任务卡可折叠且左右对齐'] })
+  assert.equal(f.snapshot().tasks[0].childId, childId)
+  assert.equal(f.pending.length, 1)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.ok(f.snapshot().tasks[0].criteria.includes('任务卡可折叠且左右对齐'))
+})
+
+test('ordinary command failures on a readonly plan do not claim shell write protection', async () => {
+  const f = await fixture(); await f.plan([card('readonly')])
+  const exec = { agent: f.parent, name: 'pwsh', callId: 'command-failed', arguments: { command: 'invalid command' } }
+  assert.equal(f.engine.coordinatorWriteBlock(exec), undefined)
+  f.engine.recordCoordinationFailure(exec, 'command not found')
+  assert.doesNotMatch(f.snapshot().coordinationIssue.nextAction, /普通 pwsh\/bash 暂不可用/)
+  assert.doesNotMatch(f.engine.summary(f.parent.id), /普通 pwsh\/bash 暂不可用/)
+})
+
 test('nested project directory binds write protection, verification and delivery to the same files', async () => {
   const f = await fixture(), project = path.join(f.directory, 'project')
   await mkdir(project); f.parent.session.header.cwd = f.directory

@@ -27,6 +27,7 @@ export const OPTION_RANGES = Object.freeze({
   maxActivations: Object.freeze({ min: MIN_ACTIVATIONS, max: MAX_ACTIVATIONS }), taskTimeoutMinutes: Object.freeze({ min: 1, max: 240 }),
 })
 const CHECK_TOOLS = ['read', 'grep', 'glob', 'pwsh', 'bash']
+const MANAGED_READ_GUIDANCE = '当前计划尚有未验收的写入任务，普通 pwsh/bash 暂不可用。读取源码允许使用 read/grep/glob；目录与 Git 检查用 delegation_inspect；报告返回后的正式验证用 delegation_verify；执行中的补充用 delegation_control steer 同步原执行者。'
 const LIVE = ['starting', 'running']
 const STATUSES = ['queued', ...LIVE, 'review', 'accepted', 'failed', 'blocked', 'cancelled']
 const targetsOf = plan => plan.tasks.flatMap(task => task.audit ? [task, task.audit] : [task])
@@ -938,7 +939,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (!plan) return
     const target = exec.arguments?.file_path ?? exec.arguments?.path ?? exec.arguments?.notebook_path
     const protectedTasks = plan.tasks.filter(task => !['accepted', 'cancelled'].includes(task.status) && task.writes.length)
-    if (isCurrentPlan(plan) && protectedTasks.length && ['pwsh', 'bash'].includes(exec.name)) return '[DSH Agentrix] 当前托管产物仍受写入保护，不能确认任意命令的写入范围。主控验证用 delegation_verify，目录与 Git 检查用 delegation_inspect；无重叠文件可直接修改。'
+    if (isCurrentPlan(plan) && protectedTasks.length && ['pwsh', 'bash'].includes(exec.name)) return '[DSH Agentrix] 本次普通 Shell 命令未执行。' + MANAGED_READ_GUIDANCE
     if (typeof target !== 'string' || !target.trim()) return
     const writes = [path.resolve(exec.agent.session?.header?.cwd ?? plan.cwd ?? process.cwd(), target)]
     const conflict = protectedTasks.find(task => overlaps({ writes }, task))
@@ -979,7 +980,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (coordinationFailures.size > 1024) coordinationFailures.delete(coordinationFailures.values().next().value)
     const task = context.task ?? plan.tasks.find(item => item.id === exec.arguments?.taskId) ?? (plan.tasks.length === 1 ? plan.tasks[0] : null)
     plan.coordinationIssue = { code, tool: exec.name, callId: exec.callId ?? null, agentId: exec.agent.id, role: worker ? modelRole(task) : 'coordinator',
-      ...(task ? { taskId: task.id } : {}), message: brief(message, 1000), nextAction: coordinationNext(plan, task, worker), at: Date.now(),
+      ...(task ? { taskId: task.id } : {}), message: brief(message, 1000),
+      nextAction: !worker && ['pwsh', 'bash'].includes(exec.name) && !allowsVerification(exec) && coordinatorWriteBlock(exec) ? MANAGED_READ_GUIDANCE : coordinationNext(plan, task, worker), at: Date.now(),
       stage: coordinationStage(plan, task?.id) }
     remember(plan, 'plan.coordination_failed', (worker ? '执行者操作未执行：' : '主控操作未执行：') + exec.name + '；' + brief(message, 500),
       undefined, { coordinationIssue: clone(plan.coordinationIssue) })
@@ -2703,8 +2705,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         ? `协作操作未成功：${plan.coordinationIssue.tool}；${plan.coordinationIssue.message}\n下一步：${plan.coordinationIssue.nextAction}` : ''
       const interruption = plan.interruption && !plan.interruption.resumedAt
         ? '执行已中断，原任务和证据保留；用户明确继续后用 delegation_run 恢复，不必新建计划。已返回报告继续验证验收，服务错误仍需单独处理后重试。' : ''
+      const reading = !plan.completion && !plan.cancelled && plan.tasks.some(task => !['accepted', 'cancelled'].includes(task.status) && task.writes.length) ? MANAGED_READ_GUIDANCE : ''
       return [`当前计划：${brief(plan.goal, 200)}\n状态：${planStatus(plan)}；${plan.tasks.map(task => `${task.id}=${task.status}${task.audit ? '（独立审查=' + task.audit.status + '）' : ''}`).join('，')}。启动预算：${budget.used}/${budget.limit}，剩余 ${budget.remaining}（含独立审查）。调用 delegation_status 获取证据并继续监督；最终交付结论以程序回执为准，最后一次验收后自动结束，不用 stop 清理。`, plan.completion ? completionText(plan.completion) : '尚未完成。报告由原执行者提交，主控等待通知后验证验收；团队看板和 list_agents 不是托管任务的完成依据。', coordination, issue ? issue.message + '。' + issue.action : '', pending, waiting, paused,
-        interruption, association, failures.length ? `失败原因：\n${failures.join('\n')}` : ''].filter(Boolean).join('\n')
+        interruption, association, reading, failures.length ? `失败原因：\n${failures.join('\n')}` : ''].filter(Boolean).join('\n')
     },
     hasPending: sessionId => { const plan = pendingPlan(sessionId); return Boolean(plan && isCurrentPlan(plan)) },
     async dispose() {

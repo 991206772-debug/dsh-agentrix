@@ -22,6 +22,8 @@ const ctx = new Context(), routes = new Map(), phases = new Map(), events = [], 
 const workerGate = Promise.withResolvers()
 const activations = new Map()
 let cleanupFixed = false
+let projectInspected = false, projectWorkerReadEntered = false, projectCoordinatorRead = false, projectWorkerSawSupplement = false
+const projectSupplement = '补充要求：继续原任务，并读取 independent.txt 确认内容仍为 verified。'
 const projectDirectory = scenario === 'project-directory' ? path.join(directory, 'project') : directory
 const output = path.join(projectDirectory, 'owned.txt'), independent = path.join(directory, 'independent.txt')
 let parent, handle, sequence = 0, requestCount = 0, fault = false, runsFile, closing = false
@@ -73,8 +75,13 @@ class Adapter extends LlmAdapter {
         assert.ok(!request.tools.some(item => item.name === 'send_message'), 'a managed worker cannot see its prohibited messaging tool')
         assert.ok(request.tools.some(item => item.name === 'delegation_checkpoint'))
         assert.ok(request.tools.some(item => item.name === 'delegation_report'))
+        if (phase === 1) {
+          assert.ok(JSON.stringify(request.messages).includes(projectSupplement), 'the original worker receives the real mid-flight supplement')
+          projectWorkerSawSupplement = true
+        }
       }
       if (phase === 0) block = tool('read', { file_path: output })
+      else if (scenario === 'project-directory' && phase === 1) block = tool('read', { file_path: independent })
       else {
         if (scenario === 'separate-error') await workerGate.promise
         if (closing) { yield { type: 'finish', reason: { kind: 'stop' } }; return }
@@ -113,12 +120,26 @@ class Adapter extends LlmAdapter {
       checks: [{ tool: 'read', arguments: { file_path: output } }],
       }
       if (scenario === 'project-directory') Object.assign(task, { writes: ['owned.txt'], outputs: ['owned.txt'],
-        checks: [{ tool: 'read', arguments: { file_path: 'owned.txt' } }, { tool: 'pwsh', arguments: { command: "Get-Content -LiteralPath './owned.txt' -Raw", description: '读取工程目录中的实际交付物' } }] })
+        checks: [{ tool: 'read', arguments: { file_path: 'owned.txt' } }, { tool: 'pwsh', arguments: { command: "Get-Content -LiteralPath './owned.txt' -Raw", description: '读取工程目录中的实际交付物' } },
+          { tool: 'read', arguments: { file_path: independent } }] })
       block = tool('delegation_plan', { relation: 'new', start: true, goal: '核对隔离文件', decisionReason: '执行者读取独立文件，主控验证验收。',
         ...(scenario === 'project-directory' ? { directory: projectDirectory } : {}),
         tasks: scenario === 'cancel-cleanup' ? [{ ...task, writes: [] }, { ...task, id: 'b', writes: [] }] : [task] })
     }
-    else if (task.status === 'running') block = tool('delegation_wait')
+    else if (scenario === 'project-directory' && !projectInspected) {
+      projectInspected = true
+      block = tool('delegation_inspect', { operation: 'list', directory: projectDirectory })
+    } else if (scenario === 'project-directory' && state.sessions[0]?.pendingMessages?.some(message => message.text === projectSupplement)) {
+      const message = state.sessions[0].pendingMessages.find(message => message.text === projectSupplement)
+      block = tool('delegation_decide', { relation: 'update', messageId: message.messageId, mode: 'delegate', reason: '补充沿用原执行者核对另一份只读文件，不增加任务或代理。' })
+    } else if (scenario === 'project-directory' && plan.inputs?.some(input => input.text === projectSupplement && input.status === 'received')) {
+      const input = plan.inputs.find(input => input.text === projectSupplement && input.status === 'received')
+      block = tool('delegation_control', { action: 'steer', taskId: 'a', inputIds: [input.id], message: '按补充继续原任务，不重新开始。',
+        additionalCriteria: ['补充要求已交原执行者；independent.txt 实际读取仍包含 verified。'] })
+    } else if (scenario === 'project-directory' && plan.inputs?.some(input => input.status === 'forwarded') && !projectCoordinatorRead) {
+      projectCoordinatorRead = true
+      block = tool('read', { file_path: independent })
+    } else if (task.status === 'running') block = tool('delegation_wait')
     else if (task.status === 'review' && !task.checks[0].result) block = tool('delegation_verify', { taskId: 'a' })
     else if (task.status === 'review') {
       if (scenario === 'project-directory') assert.ok(task.checks.every(check => check.result?.passed), JSON.stringify(task.checks))
@@ -135,7 +156,9 @@ class Adapter extends LlmAdapter {
           await rm(runsFile, { recursive: true }); await rename(runsFile + '.held', runsFile)
         }
       }
-      block = tool('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '实际读取符合要求', evidence: [task.checks[0].result.ref] }],
+      block = tool('delegation_review', { taskId: 'a', verdict: 'accept', findings: scenario === 'project-directory'
+        ? task.criteria.map((_, index) => ({ criterionId: 'C' + (index + 1), finding: '实际读取及原执行者补充报告符合要求', evidence: [task.checks[index ? 2 : 0].result.ref] }))
+        : [{ criterionId: 'C1', finding: '实际读取符合要求', evidence: [task.checks[0].result.ref] }],
         ...(scenario === 'audited-resolutions' ? { resolutions: task.reworkIds.map(id => ({ id, status: 'ADDRESSED', evidence: [task.checks[0].result.ref] })) } : {}) })
       }
     } else throw new Error('Unexpected task state: ' + task.status)
@@ -158,11 +181,16 @@ try {
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: value.text }] },
     async execute(args, exec) {
       assert.ok([output, independent].includes(args.file_path))
+      if (scenario === 'project-directory' && exec.agent.id !== 'root' && args.file_path === output) {
+        projectWorkerReadEntered = true
+        await workerGate.promise
+      }
       if (scenario === 'cancel-cleanup' && exec.agent.id !== 'root') await new Promise((_, reject) => {
         if (exec.signal.aborted) return reject(exec.signal.reason)
         exec.signal.addEventListener('abort', () => reject(exec.signal.reason), { once: true })
       })
       let text = await readFile(args.file_path, 'utf8')
+      if (scenario === 'project-directory' && exec.agent.id === 'root' && args.file_path === independent) workerGate.resolve()
       if (name === 'edit') { text = text.replace(args.old_string, args.new_string); await writeFile(args.file_path, text); edits.push(args.file_path) }
       return { text }
     } }))
@@ -200,6 +228,10 @@ try {
     await until(async () => (await requestState()).plans[0]?.tasks.every(task => task.status === 'running'), 'two native workers running')
     parent.steer(createUserMessage({ content: [{ type: 'text', text: '取消全部隔离任务' }], source: { kind: 'user' } }))
   }
+  if (scenario === 'project-directory') {
+    await until(() => projectWorkerReadEntered && events.some(event => event.sessionId === 'root' && event.type === 'tool/call' && event.data.name === 'delegation_inspect'), 'inspection while the original worker is active')
+    parent.steer(createUserMessage({ content: [{ type: 'text', text: projectSupplement }], source: { kind: 'user' } }))
+  }
   await until(() => events.some(event => event.sessionId === 'root' && event.type === 'turn/end') && parent.status === 'idle', 'coordinator settled')
   const result = await requestState()
   assert.equal(result.runtimeBuild, RUNTIME_BUILD)
@@ -236,6 +268,18 @@ try {
     assert.equal(plan.tasks[0].checks[1].arguments.workdir, projectDirectory)
     assert.equal(plan.tasks[0].checks[1].result.exitCode, 0)
     assert.match(plan.tasks[0].checks[1].result.summary, /verified/)
+    assert.ok(projectCoordinatorRead && projectWorkerSawSupplement)
+    assert.equal(plan.inputs.length, 1)
+    assert.equal(plan.inputs[0].status, 'forwarded')
+    assert.equal(plan.inputs[0].taskId, 'a')
+    assert.equal(plan.tasks[0].attempts, 1)
+    const inspection = events.find(event => event.sessionId === 'root' && event.type === 'tool/call' && event.data.name === 'delegation_inspect')
+    const inspectionResult = events.find(event => event.sessionId === 'root' && event.type === 'tool/result' && event.data.message?.toolCallId === inspection.data.callId)
+    assert.ok(inspectionResult && !inspectionResult.data.message.isError, 'dedicated inspection executes through the protected plan')
+    const inspectionValue = JSON.parse(inspectionResult.data.message.content.find(block => block.type === 'text').text)
+    assert.equal(inspectionValue.passed, true)
+    assert.equal(inspectionValue.exitCode, 0)
+    assert.match(inspectionValue.output, /owned\.txt/)
     assert.equal(activations.size, 1)
     assert.ok([...releases.values()].every(count => count === 1))
     assert.ok(!events.some(event => event.type === 'tool/result' && event.data.message?.isError))

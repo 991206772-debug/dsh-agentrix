@@ -263,6 +263,31 @@ test('auto permits native direct work without a recorded decision and never inve
   } finally { await h.close() }
 })
 
+test('managed shell feedback names native reading and supplement tools without rejecting the user adjustment', async () => {
+  const h = await host(); await h.state(); h.turn('按设计实现页面')
+  try {
+    await h.definitions.get('delegation_plan').execute({ goal: '实现页面', decisionReason: '执行者实现页面，主控核对。',
+      tasks: [{ id: 'ui', title: '实现页面', instructions: '仅改 client.js', scope: 'client.js', outputs: ['client.js'], writes: ['client.js'],
+        complexity: 'routine', criteria: ['页面正确'], checks: [{ tool: 'read', arguments: { file_path: 'client.js' } }] }] }, { agent: h.agent })
+    h.turn('补充：折叠任务卡并修正对齐', 'supplement-ui')
+    const denial = h.call('pwsh', 'css-query', h.agent, { command: 'Select-String -Path client.js -Pattern alignment' })
+    assert.match(denial, /read\/grep\/glob/)
+    assert.match(denial, /delegation_control.*steer/)
+    assert.match(denial, /读取.*允许/)
+    assert.equal(h.call('read', 'read-css', h.agent, { file_path: 'client.js' }), undefined)
+    assert.equal(h.call('grep', 'grep-css', h.agent, { path: 'client.js', pattern: 'alignment' }), undefined)
+    assert.equal(h.call('glob', 'find-css', h.agent, { pattern: '*.js' }), undefined)
+    const state = await h.state()
+    assert.equal(state.pendingMessages[0].messageId, 'supplement-ui')
+    let snapshot
+    await h.routes.get('/dsh-delegation-first/api/state')({ method: 'GET', url: '/dsh-delegation-first/api/state?sessionId=root' },
+      { writeHead() {}, end(text) { snapshot = JSON.parse(text) } })
+    assert.match(snapshot.plans[0].coordinationIssue.nextAction, /read\/grep\/glob/)
+    assert.match(snapshot.plans[0].coordinationIssue.nextAction, /delegation_control.*steer/)
+    assert.match(h.call('edit', 'overlap', h.agent, { file_path: 'client.js' }), /重叠/)
+  } finally { await h.close() }
+})
+
 test('managed work protects its declared files without blocking unrelated direct edits', async () => {
   const h = await host(); await h.state(); h.turn('实现当前功能')
   try {
