@@ -324,7 +324,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const coordinationFailures = new Set(), coordinationCalls = new Map(), coordinationRestrictions = new Map()
   const toolDefinitions = new Map(), reportSchemas = new Map()
   const inboxes = new Map()
-  const cancellingPlans = new Map(), stopCleanups = new WeakMap(), notificationTimers = new Map(), notifying = new WeakMap()
+  const cancellingPlans = new Map(), stopCleanups = new WeakMap(), notificationTimers = new Map(), notifying = new WeakMap(), notificationOperations = new Set()
   const records = createTaskRecords(file), pendingRecords = new Map()
   let activityTimer
   let closed = false, dirty = false, writing, pumping = Promise.resolve(), storageError = null, recoveryFailed = false
@@ -477,11 +477,22 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const delivery = plan.delivery
     if (!delivery || delivery.receiptId !== plan.completion?.id || delivery.status === 'delivered' || signal?.aborted) return
     try {
-      const existing = agent.session.snapshotEvents?.().find(event => event.type === 'developer/message' &&
-        event.data?.message?.id === delivery.messageId && event.data.message.source?.kind === 'delegation-delivery')
-      const event = existing ?? agent.session.append('developer/message', { message: { id: delivery.messageId, role: 'developer',
-        source: { kind: 'delegation-delivery', receiptId: delivery.receiptId, requestId: delivery.requestId, archiveId: plan.archive.id },
-        content: [{ type: 'text', text: deliveryText(delivery) }] } }, { surfaceOp: 'append' })
+      const events = agent.session.snapshotEvents?.() ?? []
+      const existing = events.find(event => (event.type === 'deliverables/presented' && event.data?.messageId === delivery.messageId &&
+        event.data.source?.kind === 'delegation-delivery') || (event.type === 'developer/message' && event.data?.message?.id === delivery.messageId &&
+        event.data.message.source?.kind === 'delegation-delivery'))
+      let event = existing
+      if (!event) {
+        const call = events.findLast(event => event.type === 'tool/call' && event.data?.turn === delivery.turn && event.data.name === 'delegation_review' &&
+          (!delivery.callId || event.data.callId === delivery.callId))
+        if (!Number.isSafeInteger(delivery.turn) || delivery.turn < 1 || !call?.data.callId) throw new Error('交付所属回合或实际验收调用未记录，保留验收结果，不能伪造原生交付来源')
+        // Native delivery records may follow step/end. Developer messages require an open step.
+        event = agent.session.append('deliverables/presented', { turn: delivery.turn, callId: call.data.callId, messageId: delivery.messageId,
+          source: { kind: 'delegation-delivery', receiptId: delivery.receiptId, requestId: delivery.requestId, archiveId: plan.archive.id },
+          files: delivery.files.map(file => ({ path: file.path, description: file.label })), summary: deliveryText(delivery) })
+      }
+      const sessions = service('sessions')
+      if (typeof sessions?.flush === 'function') await sessions.flush(agent.session)
       delivery.messageSeq = event.seq; delivery.status = 'delivered'; delivery.deliveredAt = Date.now(); delete delivery.error
       remember(plan, 'plan.delivered', '已向聊天交付验收结果及文件入口', undefined, { receiptId: delivery.receiptId, messageId: delivery.messageId })
     } catch (error) {
@@ -634,7 +645,13 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }, 250)
     timer.unref?.(); notificationTimers.set(task, timer)
   }
-  async function notifyParent(plan, task, handle) {
+  function notifyParent(plan, task, handle) {
+    const operation = sendResultNotification(plan, task, handle)
+    notificationOperations.add(operation)
+    operation.finally(() => notificationOperations.delete(operation)).catch(() => {})
+    return operation
+  }
+  async function sendResultNotification(plan, task, handle) {
     if ((notifying.has(task) && notifying.get(task) === task.resultNotification) || task.resultNotification?.status === 'delivered' || task.resultNotification?.attempts >= 2 ||
       closed || plan.cancelled || plan.wakeSuppressed || plans.get(plan.sessionId) !== plan) return
     if (LIVE.includes(task.status) || ['queued', 'cancelled', 'accepted'].includes(task.status) || !targetsOf(plan).includes(task) ||
@@ -646,6 +663,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       service('agents')?.get(plan.sessionId) === parent && task.resultNotification === notice && task.attempts === notice.attempt &&
       task.childId === notice.childId && targetsOf(plan).includes(task) && !['queued', ...LIVE, 'accepted', 'cancelled'].includes(task.status) &&
       !plan.tasks.some(owner => owner.id === task.id && owner.status === 'accepted')
+    let preparing = false
+    const releasePreparation = () => {
+      if (preparing && task.resultNotification === notice) { notice.attempts--; notice.status = 'pending'; preparing = false }
+    }
     notifying.set(task, notice)
     try {
       if ((parent.session?.snapshotEvents?.() ?? []).some(event => event.data?.message?.id === notice.messageId || event.data?.id === notice.messageId)) {
@@ -655,8 +676,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const text = `托管任务 ${task.id}${task.role === 'reviewer' ? ' 的独立审查' : ''} 已返回：${task.status}。${task.error || task.execution?.summary || ''}。无需 stop 清理。\n` +
         JSON.stringify({ task: compactTask(owner), nextAction: nextAction(plan) })
       notice.attempts++; notice.status = 'pending'
+      preparing = true
       await save()
-      if (!current()) return
+      if (!current()) { releasePreparation(); if (!closed) await save(); return }
+      preparing = false
       const waiter = waitingParents.get(plan.sessionId)
       if (waiter) {
         waiter.results.push(text); waiter.wake.resolve()
@@ -669,6 +692,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       notice.status = 'delivered'; notice.deliveredAt = Date.now(); delete notice.error
       await save()
     } catch (error) {
+      if (!current()) releasePreparation()
       if (current() && notice.status !== 'delivered') {
         notice.status = 'failed'; notice.error = messageOf(error)
         remember(plan, 'task.notification_failed', '任务结果已保存，通知主控失败：' + notice.error, task)
@@ -813,6 +837,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       return
     }
     const plan = plans.get(agent.id)
+    // tools/result is an unawaited observer; finish its storage commit before publishing.
+    if (plan && committing.size) await Promise.all(committing)
     if (plan?.delivery) await publishDelivery(plan, agent, signal)
     if (!plan || !(plan.protocolVersion >= 2) || !isCurrentPlan(plan) || plan.wakeSuppressed || plan.cancelled && plan.completion) { truncatedOutputs.delete(agent.id); return }
     if (pendingMessages(agent.id).length && await recoverDecision(agent.id)) {
@@ -2067,6 +2093,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
             }
             if (plan.completion?.outcome === 'completed' && !plan.delivery) {
               plan.delivery = await buildDelivery(plan, plan.completion)
+              plan.delivery.callId = exec.callId
               const events = parent.session.snapshotEvents?.() ?? []
               const anchor = events.findLast(event => event.type === 'assistant/message' &&
                 event.data?.message?.content?.some(block => block.type === 'tool-call' && block.id === exec.callId))
@@ -2638,6 +2665,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       clearTimeout(activityTimer)
       for (const timer of notificationTimers.values()) clearTimeout(timer)
       notificationTimers.clear()
+      // Do not let an old notification writer outlive disposal and overwrite a resumed state.
+      await Promise.allSettled([...notificationOperations])
       for (const plan of plans.values()) {
         plan.autoDispatch = false
         for (const task of targetsOf(plan)) if (LIVE.includes(task.status)) {

@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { createOrchestrator, DEFAULT_OPTIONS } from '../orchestrator.js'
 import { buildCompletion, buildDelivery } from '../completion.js'
 
@@ -27,9 +29,12 @@ const malformedArguments = (tool = 'delegation_plan', raw = '{"checks":[{"argume
 
 async function acceptedDelivery(options = {}) {
   const f = await fixture({ ...options, beforeResult: async (exec, value) => {
-    if (exec.name === 'delegation_review') exec.agent.session.append('assistant/message', { turn: 1, step: 1,
+    if (exec.name === 'delegation_review') {
+      exec.agent.session.append('assistant/message', { turn: 1, step: 1,
       message: { id: 'review-message', role: 'assistant', source: { kind: 'model', provider: 'local', model: 'parent' },
         content: [{ type: 'text', text: '实际结果已核对，提交验收。' }, { type: 'tool-call', id: exec.callId, name: exec.name, arguments: JSON.stringify(exec.arguments) }] } })
+      exec.agent.session.append('tool/call', { turn: 1, step: 1, callId: exec.callId, name: exec.name, arguments: JSON.stringify(exec.arguments) })
+    }
     await options.beforeResult?.(exec, value)
   } })
   f.parent.session.header.cwd = f.directory
@@ -42,29 +47,44 @@ async function acceptedDelivery(options = {}) {
   return f
 }
 
-test('accepted work is delivered through an identified durable producer message before the coordinator finishes', async () => {
+test('accepted work is delivered through an identified native delivery record before the coordinator finishes', async () => {
   const f = await acceptedDelivery()
   assert.equal(f.snapshot().delivery.status, 'pending')
   await f.endTurn()
   const delivery = f.snapshot().delivery
   assert.equal(delivery.status, 'delivered')
-  const messages = f.parent.session.appended.filter(event => event.data.message?.source?.kind === 'delegation-delivery')
+  const messages = f.parent.session.appended.filter(event => event.data.source?.kind === 'delegation-delivery')
   assert.equal(messages.length, 1)
-  assert.equal(messages[0].type, 'developer/message', 'program output must retain its actual producer instead of masquerading as model output')
-  assert.equal(messages[0].data.message.id, delivery.messageId)
-  assert.equal(messages[0].data.message.source.receiptId, f.snapshot().completion.id)
-  assert.equal(messages[0].intent.surfaceOp, 'append')
+  assert.equal(messages[0].type, 'deliverables/presented', 'program output uses the native delivery event without fabricating a model step')
+  assert.equal(messages[0].data.messageId, delivery.messageId)
+  assert.equal(messages[0].data.turn, 1)
+  assert.equal(messages[0].data.source.receiptId, f.snapshot().completion.id)
+  assert.equal(messages[0].data.callId, delivery.callId)
+  assert.equal(messages[0].intent, undefined)
   assert.match(delivery.documents[0].content, /完整正文/)
   assert.equal(delivery.files[0].path, path.join(f.directory, 'article.md'))
   assert.equal(f.calls.length, 1)
   assert.equal(f.snapshot().recovery.used, 0)
 })
 
+test('failed native delivery flush keeps acceptance and retries the same record without duplication', async () => {
+  const f = await acceptedDelivery(), get = f.ctx.get.bind(f.ctx)
+  let writes = 0
+  f.ctx.get = name => name === 'sessions' ? { async flush() { if (++writes === 1) throw new Error('temporary session storage failure'); return true } } : get(name)
+  await f.endTurn()
+  assert.equal(f.snapshot().delivery.status, 'failed')
+  assert.equal(f.snapshot().completion.outcome, 'completed')
+  await f.endTurn()
+  assert.equal(f.snapshot().delivery.status, 'delivered')
+  assert.equal(writes, 2)
+  assert.equal(f.parent.session.appended.filter(event => event.type === 'deliverables/presented').length, 1)
+})
+
 test('a failed final delivery preserves acceptance and retries only the same delivery after reload', async () => {
   const f = await acceptedDelivery(), append = f.parent.session.append
   const receiptId = f.snapshot().completion.id
   f.parent.session.append = function (type, data, intent) {
-    if (data.message?.source?.kind === 'delegation-delivery') throw new Error('交付消息暂时无法写入')
+    if (data.source?.kind === 'delegation-delivery') throw new Error('交付消息暂时无法写入')
     return append.call(this, type, data, intent)
   }
   await f.endTurn()
@@ -91,7 +111,17 @@ test('a committed delivery is recovered from the native journal without publishi
   })
   await f.endTurn(); await f.endTurn()
   assert.equal(f.snapshot().delivery.status, 'delivered')
-  assert.equal(f.parent.session.appended.filter(event => event.data.message?.id === messageId).length, 1)
+  assert.equal(f.parent.session.appended.filter(event => event.data.messageId === messageId).length, 1)
+})
+
+test('a legacy developer delivery is recognized without publishing a second native record', async () => {
+  const f = await acceptedDelivery(), delivery = f.snapshot().delivery
+  f.parent.session.append('developer/message', { turn: 1, step: 1, message: { id: delivery.messageId, role: 'developer',
+    source: { kind: 'delegation-delivery', receiptId: delivery.receiptId }, content: [{ type: 'text', text: '已有交付记录' }] } }, { surfaceOp: 'append' })
+  await f.endTurn()
+  assert.equal(f.snapshot().delivery.status, 'delivered')
+  assert.equal(f.parent.session.appended.filter(event => event.type === 'deliverables/presented').length, 0)
+  assert.equal(f.parent.session.appended.filter(event => event.data.message?.id === delivery.messageId).length, 1)
 })
 
 test('delivery lookup stays bound to its original session and reply after a newer plan replaces the active plan', async () => {
@@ -724,6 +754,39 @@ test('failed result notifications survive reload, stop after two attempts and ne
   await f.reload(); await f.cancel(); await tick()
   assert.equal(sends, 2)
   assert.equal(f.pending.length, 1)
+})
+
+test('reload during notification retry persistence preserves the unsent retry and drains the old writer', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run'); f.parent.status = 'idle'
+  const release = Promise.withResolvers(), original = fs.promises.writeFile
+  const steer = f.parent.steer.bind(f.parent)
+  let sends = 0, captured = false, reloading
+  f.parent.steer = message => { if (++sends === 1) throw new Error('temporary inbox failure'); steer(message) }
+  fs.promises.writeFile = async (file, content, ...rest) => {
+    if (!captured && file === f.file + '.tmp') {
+      const notice = JSON.parse(content).plans[0]?.tasks[0].resultNotification
+      if (notice?.attempts === 2 && notice.status === 'pending') { captured = true; await release.promise }
+    }
+    return original(file, content, ...rest)
+  }
+  syncBuiltinESMExports()
+  try {
+    await f.complete(0, { stopReason: 'completed', output: [] }); await waitFor(() => captured)
+    reloading = f.reload()
+    await new Promise(resolve => setImmediate(resolve))
+    release.resolve(); await reloading
+    const restored = f.snapshot().tasks[0].resultNotification
+    assert.ok(restored.status === 'delivered' || restored.attempts < 2, JSON.stringify({ sends, restored }))
+    await waitFor(() => f.snapshot().tasks[0].resultNotification.status === 'delivered')
+    assert.equal(sends, 2)
+    assert.equal(f.snapshot().tasks[0].resultNotification.attempts, 2)
+    assert.equal(f.parent.injected.length, 1)
+    assert.equal(f.pending.length, 1)
+    assert.equal(f.engine.storageError, null)
+  } finally {
+    release.resolve()
+    try { await reloading } finally { fs.promises.writeFile = original; syncBuiltinESMExports() }
+  }
 })
 
 test('old notification retries cannot notify a replacement attempt or suppress its actual result', async t => {

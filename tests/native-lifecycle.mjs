@@ -653,11 +653,11 @@ try {
     inputCharacters: requests.reduce((sum, request) => sum + request.inputCharacters, 0) }))
   if (finalDelivery) {
     const journal = parent.session.snapshotEvents(), delivery = plan.delivery
-    const messages = journal.filter(event => event.type === 'developer/message' && event.data.message?.source?.kind === 'delegation-delivery')
+    const messages = journal.filter(event => event.type === 'deliverables/presented' && event.data.source?.kind === 'delegation-delivery')
     assert.equal(messages.length, 1)
     assert.equal(delivery.status, 'delivered')
-    assert.equal(messages[0].data.message.id, delivery.messageId)
-    assert.equal(messages[0].data.message.source.receiptId, plan.completion.id)
+    assert.equal(messages[0].data.messageId, delivery.messageId)
+    assert.equal(messages[0].data.source.receiptId, plan.completion.id)
     assert.equal(delivery.documents[0].content, 'verified')
     const ended = journal.findLast(event => event.type === 'turn/end')
     const lastText = journal.findLast(event => event.type === 'assistant/message' && event.data.turn === ended.data.turn &&
@@ -665,13 +665,13 @@ try {
     assert.equal(delivery.anchorSeq, lastText?.seq ?? ended.seq, 'delivery must use the actual native chat footer anchor, including tool-only endings')
     if (reasoningOnly) assert.equal(lastText, undefined)
     assert.ok(messages[0].seq < ended.seq, 'delivery must be committed before turn/end')
-    assert.ok(parent.session.deriveMessages().some(message => message.id === delivery.messageId), 'delivery remains reconstructable after reload')
+    assert.ok(parent.session.snapshotEvents().some(event => event.type === 'deliverables/presented' && event.data.messageId === delivery.messageId), 'native delivery remains reconstructable in the event log')
     let exposed
     await routes.get('/dsh-delegation-first/api/delivery')({ method: 'GET', url: '/dsh-delegation-first/api/delivery?sessionId=root&seq=' + delivery.anchorSeq },
       { writeHead(code) { assert.equal(code, 200) }, end(body) { exposed = JSON.parse(body) } })
     assert.equal(exposed.delivery.messageId, delivery.messageId)
     assert.equal(exposed.delivery.documents[0].content, 'verified')
-    console.log('PASS: native final delivery commits one identified producer message after acceptance and before turn/end, retains inline text, and adds no model call')
+    console.log('PASS: native final delivery commits one identified delivery record after acceptance and before turn/end, retains inline text, and adds no model call')
   }
   const coordinatorCalls = requests.filter(request => request.sessionId === 'root').length
   if (truncateOutput) assert.ok(coordinatorCalls >= 7 && coordinatorCalls <= 8, 'the original coordinator resumes each truncated output and may wait once for the child')

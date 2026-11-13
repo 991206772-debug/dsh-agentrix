@@ -8,7 +8,7 @@ const { apply, RUNTIME_BUILD } = await import(process.env.AGENTRIX_PACKAGE_ROOT
   ? pathToFileURL(path.join(process.env.AGENTRIX_PACKAGE_ROOT, 'index.js')).href : new URL('../index.js', import.meta.url).href)
 
 const scenario = process.argv[2] ?? 'direct'
-assert.ok(['direct', 'separate-error', 'acceptance-save', 'cancel-cleanup'].includes(scenario))
+assert.ok(['direct', 'separate-error', 'acceptance-save', 'cancel-cleanup', 'delivery-persistence'].includes(scenario))
 if (!process.env.DSH_MODULE_ROOT) throw new Error('DSH_MODULE_ROOT is required')
 const native = name => import(pathToFileURL(path.join(process.env.DSH_MODULE_ROOT, name, 'lib/index.js')).href)
 const { Context } = await native('cordis')
@@ -30,6 +30,7 @@ for (const [module, name] of [['dsh-session-projection', 'SessionProjectionRegis
   ['dsh-agent', 'AgentRegistry'], ['dsh-system-prompt', 'SystemPrompt'], ['dsh-llm', 'LlmRuntime'],
   ['dsh-agent-loop', 'AgentLoop'], ['dsh-subagent', 'SubagentRuntime']]) ctx.plugin((await native(module))[name])
 ctx.plugin(ToolRuntime)
+if (scenario === 'delivery-persistence') ctx.plugin(await native('dsh-session-persistence-jsonl'), { root: path.join(directory, 'sessions'), compression: 'none' })
 ctx.plugin(await native('dsh-subagent-spawn-in-process'))
 async function until(predicate, label) {
   for (let index = 0; index < 800; index++) { if (await predicate()) return; await new Promise(resolve => setTimeout(resolve, 10)) }
@@ -188,6 +189,50 @@ try {
     assert.equal(activations.size, 2)
     assert.ok([...releases.values()].every(count => count === 1))
     assert.ok([...activations.keys()].every(id => !ctx.agents.get(id)), 'native child registries are empty after drain retry')
+  } else if (scenario === 'delivery-persistence') {
+    assert.equal(result.plans[0].completion.outcome, 'completed')
+    assert.equal(await ctx.sessions.flush(parent.session), true)
+    const delivery = result.plans[0].delivery
+    const messages = parent.session.snapshotEvents().filter(event => event.type === 'deliverables/presented' && event.data.source?.kind === 'delegation-delivery')
+    assert.equal(messages.length, 1, JSON.stringify({ delivery, events: parent.session.snapshotEvents().slice(-12).map(event => ({ type: event.type, turn: event.data?.turn, step: event.data?.step })) }))
+    assert.equal(messages[0].data.messageId, delivery.messageId)
+    assert.ok(messages[0].data.turn > 0)
+    assert.ok(parent.session.snapshotEvents().some(event => event.type === 'tool/call' && event.data.callId === messages[0].data.callId && event.data.name === 'delegation_review'))
+    const calls = requestCount
+    await handle.dispose(); handle = null; await ctx.fiber.dispose()
+    while (ctx.fiber.inertia) await ctx.fiber.inertia
+    const resumed = new Context(), resumedRoutes = new Map()
+    let resumedHandle
+    try {
+      resumed.provide('webServer', { register(route) { resumedRoutes.set(route.path, route.handler); return () => resumedRoutes.delete(route.path) } })
+      resumed.provide('workingDirectory', { get: () => directory, async set() {} })
+      for (const [module, name] of [['dsh-session-projection', 'SessionProjectionRegistry'], ['dsh-session', 'SessionStore'],
+        ['dsh-agent', 'AgentRegistry'], ['dsh-system-prompt', 'SystemPrompt'], ['dsh-llm', 'LlmRuntime'], ['dsh-agent-loop', 'AgentLoop']]) resumed.plugin((await native(module))[name])
+      resumed.plugin(ToolRuntime)
+      resumed.plugin(await native('dsh-session-persistence-jsonl'), { root: path.join(directory, 'sessions'), compression: 'none' })
+      await until(() => resumed.get('agentLoop') && resumed.get('sessionPersistence'), 'resumed persistence ready')
+      resumed.tools.setExecutor(new NativeToolExecutor(resumed))
+      resumed.llm.registerAdapter(['scripted'], new Adapter())
+      // Reopen the same plugin state and session directory. Force replay of a pending marker
+      // to test native journal deduplication, without requesting another model response.
+      const stored = JSON.parse(await readFile(runsFile, 'utf8'))
+      stored.plans[0].delivery.status = 'pending'
+      await writeFile(runsFile, JSON.stringify(stored))
+      apply(resumed)
+      await until(() => resumedRoutes.has('/dsh-delegation-first/api/state'), 'resumed plugin ready')
+      resumedHandle = await resumed.agents.resume({ resumeSessionId: 'root', agentOptions: { provider: 'scripted', model: 'coordinator' } })
+      const session = resumedHandle.agent.session
+      assert.equal(session.snapshotEvents().filter(event => event.data?.messageId === delivery.messageId).length, 1)
+      await resumed.serial('agent/turn-stopping', { agent: resumedHandle.agent, turn: messages[0].data.turn, signal: new AbortController().signal })
+      assert.equal(await resumed.sessions.flush(session), true)
+      assert.equal(session.snapshotEvents().filter(event => event.data?.messageId === delivery.messageId).length, 1)
+      assert.equal(JSON.parse(await readFile(runsFile, 'utf8')).plans[0].delivery.status, 'delivered')
+      assert.equal(requestCount, calls)
+      console.log('PASS: native JSONL flush and same-directory resume retain one delivery without another model request')
+    } finally {
+      await resumedHandle?.dispose(); await resumed.fiber.dispose()
+      while (resumed.fiber.inertia) await resumed.fiber.inertia
+    }
   } else {
     assert.equal(fault, true); assert.equal(result.plans[0].completion.outcome, 'completed')
     assert.equal(result.plans[0].tasks[0].attempts, 1)
