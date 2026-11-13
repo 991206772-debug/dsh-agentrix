@@ -45,7 +45,7 @@ try {
   npm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', path.join(old, oldPackage.filename)], install)
   await verify(old, oldPackage); replay('direct')
   npm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', path.join(artifacts, nextPackage.filename)], install)
-  await verify(root, nextPackage); replay('cancel-cleanup'); replay('acceptance-save')
+  await verify(root, nextPackage); replay('cancel-cleanup'); replay('acceptance-save'); replay('delivery-persistence'); replay('audited-resolutions')
   npm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', path.join(old, oldPackage.filename)], install)
   await verify(old, oldPackage); replay('direct')
   console.log('PASS: baseline install, current tgz upgrade and baseline rollback match every packaged file; isolated native replays passed')

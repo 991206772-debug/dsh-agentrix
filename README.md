@@ -123,11 +123,16 @@ npm pack --dry-run
 - `tests/native-lifecycle.mjs`：真实 AgentLoop、ToolRuntime 和 SubagentRuntime，外部模型使用脚本化适配器。
 - `tests/native-reliability.mjs`：上述原生运行时的直接执行、跨需求失败隔离和验收保存失败恢复回放，分别使用 `direct`、`separate-error`、`acceptance-save` 参数。
 - `tests/native-reliability.mjs cancel-cleanup`：两个原生子代理运行中注入释放与备用清理故障，核对全部收到取消、原任务可补清理且没有替代启动。
+- `tests/native-reliability.mjs delivery-persistence`：原生交付记录实际写入 JSONL，关闭后从同一目录恢复，核对交付仅保存一次且不新增模型请求。
 - `tests/package-upgrade.mjs <基线提交>`：临时目录内安装基线 tgz、升级当前 tgz、回退基线，校验全部安装文件并对实际安装包运行原生回放；需设置 `DSH_EXECUTABLE` 和 `DSH_MODULE_ROOT`。此项不操作真实 Profile，也不代替真实服务商验证。
+- `node tests/state-upgrade.mjs`：使用旧版与当前编排模块，在同一隔离目录验证 v1 到 v2 迁移、长原文和多会话保留、分片损坏保护、完整备份恢复及旧代码配合升级前备份回退。数据全部为测试生成，不读取真实历史会话。
+- `tests/live-acceptance.mjs <场景>`：用安装版运行时和真实模型自行完成任务。场景包括 `direct`、`auto-simple`、`auto-followup`、`auto-readonly`、`parallel-supplement`、`failure-recovery`、`rework`、`cancel-resume`，分别检查小改、连续调整、只读答复、并行补充、失败恢复、独立审查与返工、取消后同目录重载恢复。任务给模型自然语言需求，工具调用顺序由模型决定。
 
-安装包演练中的每次回放使用独立的临时状态目录，因此没有覆盖同一数据目录跨版本迁移或备份恢复；这两项须单独验证。
+真实模型测试会产生服务调用，默认 `npm test` 不运行它。需显式设置 `AGENTRIX_PROVIDER`、`AGENTRIX_COORDINATOR_MODEL`、`AGENTRIX_WORKER_MODEL` 和 `DSH_MODULE_ROOT`，通过安装版 Electron 的 Node 模式运行。可选 `AGENTRIX_WORKER_EFFORT`、`AGENTRIX_LIVE_BASE_URL`、`AGENTRIX_LIVE_RESULT` 分别指定执行模型思考强度、兼容服务地址和本地证据文件。测试从现有 desktop Profile 读取 pi-ai 提供方及凭据引用，凭据通过内存传给适配器；不复制凭据文件。文件工具只访问合成工作目录、该测试的报告和本包技能；PowerShell 仅放行已审核的固定只读命令，不提供任意脚本能力。测试采用 DSH 原生有限重试，关闭或持久化失败时测试失败。服务商限流与流程判断问题分别记录。
 
-这些测试与真实服务商模型会话分别验证，不能相互替代。`tests/ui-preview.mjs` 使用隔离演示数据展示页面，不连接真实 DSH 或写入用户配置。
+安装包演练验证安装文件，同目录数据迁移和恢复由 `state-upgrade.mjs` 单独验证。升级前应停止相关 Profile 的写入并备份其完整任务目录，包括运行清单、`.state/` 分片、档案与验证输出；业务交付文件按项目自己的备份方式保留。回退旧代码时恢复升级前备份，不能让旧读取器直接读取 v2 清单。已经被旧版本截断的原文无法由升级重建。
+
+脚本化原生回放、合成数据迁移、真实模型流程分别提供证据，不能互相替代。真实模型测试也不代表业务项目验收或桌面界面端到端验证。`tests/ui-preview.mjs` 使用隔离演示数据展示页面，不连接真实 DSH 或写入用户配置。
 
 安装包只包含运行文件、说明、技能和展示素材；测试与本机开发记录不进入安装包。
 
