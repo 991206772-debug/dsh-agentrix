@@ -1005,6 +1005,29 @@ test('a model conflict keeps the edited worker while ignoring obsolete reviewer 
   } finally { panel.close(); f.close() }
 })
 
+test('cancellation cleanup failures stay visible in chat and acceptance without claiming resources were released', async () => {
+  const cleanup = { status: 'failed', remaining: [{ taskId: 'a', role: 'reviewer', childId: 'old-review', error: 'drain failed' }] }
+  const plan = { protocolVersion: 2, sessionId: 'session-current', goal: '核对报告', status: 'cancelled', cancelled: true,
+    cancellation: { reason: '用户取消', cleanup }, tasks: [{ id: 'a', title: '报告', status: 'cancelled', criteria: [], checks: [], outputs: [] }],
+    completion: { id: 'cleanup-receipt', outcome: 'cancelled', accepted: 0, total: 1, evidence: [], deliverables: [], cleanup,
+      remaining: [{ taskId: 'a', title: '报告', status: 'cancelled', reason: '用户取消' }] } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    sessionId: 'session-current', plans: [structuredClone(plan)], sessions: [] }) }) })
+  const notice = f.mountNotice('session-current'), view = f.mountView('session-current')
+  try {
+    await notice.flush(); await view.flush()
+    for (const text of [notice.text(), view.text()]) {
+      assert.match(text, /取消已请求，资源清理未完成/)
+      assert.match(text, /drain failed/)
+      assert.doesNotMatch(text, /计划已停止。如需继续|资源已释放/)
+    }
+    plan.completion = null
+    await view.tick(); await notice.tick()
+    assert.match(view.text(), /资源清理未完成/)
+    assert.match(notice.text(), /资源清理未完成/)
+  } finally { notice.close(); view.close(); f.close() }
+})
+
 test('chat and acceptance read the same program receipt and never label cancellation as failure', async () => {
   const plan = { protocolVersion: 2, sessionId: 'session-current', goal: '修复响应式布局', status: 'cancelled',
     tasks: [{ id: 'a', title: '响应式布局', status: 'cancelled', stop: { reason: '用户取消剩余工作' }, criteria: [], checks: [], outputs: [] }],

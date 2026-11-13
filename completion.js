@@ -25,6 +25,7 @@ export function buildCompletion(plan, reason = null) {
   else if (reason || remaining.every(task => !active.includes(task.status))) outcome = accepted.length ? 'partial' : 'blocked'
   else return null
   return { id: randomUUID(), at: Date.now(), outcome, accepted: accepted.length, total: plan.tasks.length,
+    ...(plan.cancelled && plan.cancellation?.cleanup ? { cleanup: structuredClone(plan.cancellation.cleanup) } : {}),
     ...(reason ? { reason } : {}),
     deliverables: accepted.map(task => ({ taskId: task.id, title: task.title, paths: task.outputs })),
     evidence: [...new Set(accepted.flatMap(task => task.review?.findings?.flatMap(finding => finding.evidence) ?? []))],
@@ -32,12 +33,14 @@ export function buildCompletion(plan, reason = null) {
 }
 
 export function completionText(receipt) {
-  const title = receipt.outcome === 'partial' && receipt.remaining.every(task => task.status === 'cancelled') ? '部分完成，其余已停止'
+  const title = receipt.cleanup && receipt.cleanup.status !== 'completed' ? '取消已请求，资源清理未完成'
+    : receipt.outcome === 'partial' && receipt.remaining.every(task => task.status === 'cancelled') ? '部分完成，其余已停止'
     : { completed: '已完成', blocked: '尚未完成，已阻塞', cancelled: '已停止，未验收', partial: '部分完成，其余尚未验收' }[receipt.outcome]
   return ['交付回执：' + title, `已验收 ${receipt.accepted}/${receipt.total}`, '回执编号：' + receipt.id,
     ...receipt.deliverables.flatMap(task => task.paths.map(file => '交付物：' + file)),
     ...(receipt.evidence.length ? ['验证证据：' + receipt.evidence.join('、')] : []),
     ...(receipt.reason ? ['原因：' + receipt.reason] : []),
+    ...(receipt.cleanup?.remaining ?? []).map(task => `清理未完成：${task.taskId}（${task.role}）；${task.error || '尚未确认资源释放'}`),
     ...receipt.remaining.map(task => '未完成：' + task.title + '；' + task.reason)].join('\n')
 }
 

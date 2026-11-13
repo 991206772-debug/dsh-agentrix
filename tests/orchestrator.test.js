@@ -634,7 +634,9 @@ test('explicit cancellation ends an event wait without reopening or double relea
   await tick()
   await f.cancel({ reason: '用户明确取消隔离测试' })
   const result = await waiting
-  assert.equal(result.nextAction.type, 'finished')
+  assert.equal(result.plan.cancellation.cleanup.status, 'pending', 'the wait wakes as soon as cancellation is requested')
+  assert.equal(result.nextAction.type, 'handle_failure', 'an in-flight cleanup must not be reported as finished')
+  assert.equal((await f.execute('delegation_status')).nextAction.type, 'finished')
   assert.equal(f.snapshot().completion.outcome, 'cancelled')
   assert.equal(f.calls.length, 1)
   assert.equal(f.pending[0].receipt.disposeCount, 1)
@@ -687,6 +689,104 @@ test('default task summaries and notifications retain concerns and the required 
   await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', concernsResolution: '本次仅验收静态文件，保留真实数据库验证限制。',
     findings: [{ criterionId: 'C1', finding: '已按本次范围核对', evidence: [proof.ref] }] })
   assert.equal(f.snapshot().completion.outcome, 'completed')
+})
+
+test('one failed result notification retries the same identified message without another child or recovery turn', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  f.parent.status = 'idle'
+  const steer = f.parent.steer.bind(f.parent)
+  let calls = 0
+  f.parent.steer = message => { if (++calls === 1) throw new Error('temporary inbox failure'); steer(message) }
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  await waitFor(() => f.parent.injected.length === 1)
+  assert.equal(calls, 2)
+  assert.equal(f.snapshot().tasks[0].resultNotification.status, 'delivered')
+  assert.equal(f.parent.injected[0].id, f.snapshot().tasks[0].resultNotification.messageId)
+  assert.equal(f.pending.length, 1)
+  assert.equal(f.snapshot().recovery.used, 0)
+  await f.reload()
+  assert.equal(f.parent.injected.length, 1, 'a delivered notification is not sent again on reload')
+})
+
+test('failed result notifications survive reload, stop after two attempts and never wake a cancelled plan', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  f.parent.status = 'idle'
+  let sends = 0
+  f.parent.steer = () => { sends++; throw new Error('inbox unavailable') }
+  await f.complete(0, { stopReason: 'completed', output: [] }); await tick()
+  const id = f.snapshot().tasks[0].resultNotification.messageId
+  assert.equal(f.snapshot().tasks[0].resultNotification.attempts, 1)
+  await f.reload()
+  await waitFor(() => f.snapshot().tasks[0].resultNotification.attempts === 2 && f.snapshot().tasks[0].resultNotification.status === 'failed')
+  assert.equal(sends, 2)
+  assert.equal(f.snapshot().tasks[0].resultNotification.messageId, id)
+  assert.equal(f.snapshot().tasks[0].resultNotification.status, 'failed')
+  await f.reload(); await f.cancel(); await tick()
+  assert.equal(sends, 2)
+  assert.equal(f.pending.length, 1)
+})
+
+test('old notification retries cannot notify a replacement attempt or suppress its actual result', async t => {
+  for (const action of ['rework', 'retry']) await t.test(action, async () => {
+    const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+    f.parent.status = 'idle'
+    let first = true
+    const steer = f.parent.steer.bind(f.parent)
+    f.parent.steer = message => { if (first) { first = false; throw new Error('temporary notification failure') } steer(message) }
+    if (action === 'rework') await f.complete(0, { stopReason: 'completed', output: [] })
+    else { f.pending[0].reject(new Error('execution failed')); await waitFor(() => f.snapshot().tasks[0].status === 'failed') }
+    await waitFor(() => f.snapshot().tasks[0].resultNotification?.status === 'failed')
+    if (action === 'rework') {
+      const proof = await f.execute('delegation_verify', { taskId: 'a' })
+      await f.execute('delegation_review', { taskId: 'a', verdict: 'rework', issues: [{
+        criterionId: 'C1', severity: 'important', finding: '原需求有一处遗漏', evidence: [proof.results[0].ref] }] })
+    } else await f.execute('delegation_control', { taskId: 'a', action: 'retry', message: '执行故障已解决，重试原任务' })
+    await new Promise(resolve => setTimeout(resolve, 350))
+    assert.equal(f.parent.injected.length, 0, 'old timer cannot announce the replacement running attempt as returned')
+    await f.complete(1, { stopReason: 'completed', output: [] })
+    await waitFor(() => f.parent.injected.length === 1)
+    assert.match(f.parent.injected[0].content[0].text, /已返回：review/)
+    assert.equal(f.snapshot().tasks[0].resultNotification.childId, f.pending[1].receipt.childId)
+    assert.equal(f.snapshot().tasks[0].resultNotification.attempt, 2)
+    await new Promise(resolve => setTimeout(resolve, 300))
+    assert.equal(f.parent.injected.length, 1)
+  })
+})
+
+test('cancellation during notification persistence prevents sending or waking the coordinator', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  f.parent.status = 'idle'
+  const events = f.parent.session.snapshotEvents.bind(f.parent.session), done = Promise.withResolvers()
+  let scheduled = false
+  f.parent.session.snapshotEvents = () => {
+    if (!scheduled && f.snapshot().tasks[0].status === 'review') {
+      scheduled = true
+      setImmediate(async () => {
+        try {
+          assert.equal(f.snapshot().tasks[0].resultNotification.attempts, 1)
+          await f.cancel({ reason: '结果通知保存期间用户取消' }); done.resolve()
+        } catch (error) { done.reject(error) }
+      })
+    }
+    return events()
+  }
+  await f.complete(0, { stopReason: 'completed', output: [] }); await done.promise
+  await new Promise(resolve => setTimeout(resolve, 350))
+  assert.equal(f.parent.injected.length, 0)
+  assert.notEqual(f.snapshot().tasks[0].resultNotification.status, 'delivered')
+})
+
+test('a failed notification cannot wake the coordinator after its result was already accepted', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run'); f.parent.status = 'idle'
+  const steer = f.parent.steer.bind(f.parent)
+  let first = true
+  f.parent.steer = message => { if (first) { first = false; throw new Error('temporary inbox failure') } steer(message) }
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  await waitFor(() => f.snapshot().tasks[0].resultNotification?.status === 'failed')
+  const proof = await f.execute('delegation_verify', { taskId: 'a' })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '已核对', evidence: [proof.results[0].ref] }] })
+  await new Promise(resolve => setTimeout(resolve, 350))
+  assert.equal(f.parent.injected.length, 0)
 })
 
 test('long verification output stays complete across reload and can be read in bounded chunks', async () => {
@@ -2131,6 +2231,116 @@ test('failed child cleanup cannot be bypassed by retry and successful explicit d
   await f.execute('delegation_control', { taskId: 'a', action: 'retry', message: '服务和旧执行清理已恢复。' })
   assert.equal(f.pending.length, 2)
   assert.equal(disposals, 1, 'failed disposal is not repeated; explicit draining confirms release')
+})
+
+test('whole-plan cancellation reaches every worker and reviewer despite cleanup failures and retries after reload', async () => {
+  const f = await fixture({ maxParallel: 3 })
+  await f.plan([card('a'), card('b', { complexity: 'complex' }), card('c')]); await f.execute('delegation_run')
+  await f.complete(1, { stopReason: 'completed', output: [] })
+  await waitFor(() => f.snapshot().tasks[1].audit?.status === 'running')
+  const failedIds = new Set([f.pending[0].receipt.childId, f.pending[3].receipt.childId])
+  let disposals = 0
+  for (const index of [0, 3]) f.pending[index].receipt.dispose = async () => { disposals++; throw new Error('dispose failed') }
+  f.ctx.subagents.drainChildren = async (_parent, ids) => { if (ids.some(id => failedIds.has(id))) throw new Error('drain failed') }
+  const result = await f.cancel({ reason: '用户停止所有执行' }).catch(error => ({ error }))
+  assert.ok([0, 2, 3].every(index => f.calls[index].signal.aborted), 'all active native activations receive abort even when the first cleanup fails')
+  assert.equal(result.error, undefined)
+  assert.equal(f.snapshot().tasks[2].release.status, 'released')
+  assert.equal(f.snapshot().tasks[1].audit.release.status, 'failed')
+  assert.equal(f.snapshot().cancellation.cleanup.status, 'failed')
+  assert.deepEqual(f.snapshot().cancellation.cleanup.remaining.map(item => item.role).sort(), ['reviewer', 'worker'])
+  assert.notEqual(result.nextAction.type, 'finished')
+  assert.match(f.render('delegation_cancel', {}, result), /清理未完成/)
+  await assert.rejects(f.plan([card('replacement')]), /清理/)
+  const original = f.snapshot().cancellation
+  await f.reload()
+  assert.equal(f.snapshot().cancellation.cleanup.status, 'failed')
+  f.ctx.subagents.drainChildren = async () => {}
+  const retried = await f.execute('delegation_cancel')
+  assert.equal(retried.completion.cleanup.status, 'completed')
+  assert.equal(f.snapshot().cancellation.at, original.at)
+  assert.equal(f.snapshot().cancellation.messageId, original.messageId)
+  assert.equal(f.snapshot().tasks[0].release.status, 'drained')
+  assert.equal(f.snapshot().tasks[1].audit.release.status, 'drained')
+  assert.equal(f.pending[2].receipt.disposeCount, 1)
+  assert.equal(disposals, 2, 'failed dispose is not repeated while confirming cleanup')
+  assert.equal(f.pending.length, 4, 'cleanup retries never start replacements')
+})
+
+test('a cancellation save failure does not prevent aborting siblings and remains retryable', async () => {
+  const f = await fixture(); await f.plan([card('a'), card('b')]); await f.execute('delegation_run')
+  const saved = await readFile(f.file, 'utf8')
+  await unlink(f.file); await mkdir(f.file)
+  await assert.rejects(f.cancel({ reason: '用户取消，存储暂时不可写' }))
+  assert.ok(f.calls.every(call => call.signal.aborted), 'storage failure cannot skip the second abort')
+  await rm(f.file, { recursive: true }); await writeFile(f.file, saved)
+  await f.execute('delegation_cancel')
+  await f.reload()
+  assert.equal(f.snapshot().cancellation.cleanup.status, 'completed')
+  assert.ok(f.snapshot().tasks.every(task => task.status === 'cancelled'))
+  assert.ok(f.pending.every(item => item.receipt.disposeCount === 1))
+})
+
+test('a committed cancellation intent survives loss of its final cleanup save and drains after reload', async () => {
+  const f = await fixture(); await f.plan([card('a'), card('b')]); await f.execute('delegation_run')
+  let intent
+  const dispose = f.pending[0].receipt.dispose
+  f.pending[0].receipt.dispose = async () => {
+    intent = await readFile(f.file, 'utf8')
+    assert.equal(JSON.parse(intent).plans[0].cancellation.cleanup.status, 'pending')
+    await unlink(f.file); await mkdir(f.file)
+    await dispose()
+  }
+  await assert.rejects(f.cancel({ reason: '用户取消，最终清理结果保存失败' }))
+  assert.ok(f.calls.every(call => call.signal.aborted))
+  await rm(f.file, { recursive: true }); await writeFile(f.file, intent)
+  await f.reload(async file => writeFile(file, intent))
+  assert.equal(f.snapshot().cancellation.cleanup.status, 'pending')
+  assert.notEqual((await f.execute('delegation_status')).nextAction.type, 'finished')
+  const drained = []
+  f.ctx.subagents.drainChildren = async (_parent, ids) => drained.push(...ids)
+  await f.execute('delegation_cancel')
+  assert.equal(drained.length, 2)
+  assert.equal(f.snapshot().cancellation.cleanup.status, 'completed')
+  assert.equal(f.pending.length, 2)
+})
+
+test('concurrent cancellation calls share cleanup and retain one cancellation source and receipt', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const entered = Promise.withResolvers(), gate = Promise.withResolvers(), dispose = f.pending[0].receipt.dispose
+  f.pending[0].receipt.dispose = async () => { entered.resolve(); await gate.promise; await dispose() }
+  const first = f.cancel({ reason: '用户取消一次即可' })
+  await entered.promise
+  const second = f.execute('delegation_cancel')
+  gate.resolve()
+  const results = await Promise.all([first, second])
+  assert.equal(results[0].completion.id, results[1].completion.id)
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+  assert.equal(f.snapshot().cancellation.cleanup.status, 'completed')
+})
+
+test('a previous cancellation message cannot authorize a new cancellation after explicit task retry', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run'); await f.cancel()
+  await f.execute('delegation_control', { taskId: 'a', action: 'retry', message: '用户明确要求重试原任务' })
+  await assert.rejects(f.execute('delegation_cancel', { reason: '不能复用之前的取消消息' }), /真实用户消息/)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.calls[1].signal.aborted, false)
+})
+
+test('cancelling remaining tasks preserves accepted artifacts, review and evidence exactly', async () => {
+  const f = await fixture(); await f.plan([card('accepted'), card('running')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'accepted' })
+  await f.execute('delegation_review', { taskId: 'accepted', verdict: 'accept', findings: [{
+    criterionId: 'C1', finding: '产物已实际核对', evidence: [proof.results[0].ref] }] })
+  const accepted = f.snapshot().tasks[0]
+  const cancelled = await f.cancel({ reason: '用户仅保留已验收成果，取消剩余任务' })
+  assert.equal(cancelled.completion.outcome, 'partial')
+  assert.deepEqual(f.snapshot().tasks[0], accepted)
+  await f.reload()
+  assert.deepEqual(f.snapshot().tasks[0], accepted)
+  assert.equal(f.pending[0].receipt.disposeCount, 1)
+  assert.equal(f.pending[1].receipt.disposeCount, 1)
 })
 
 test('failed interruption cleanup cannot start a replacement until the old child is drained', async () => {

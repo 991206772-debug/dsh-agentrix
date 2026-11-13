@@ -4,10 +4,11 @@ import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promise
 import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { apply, RUNTIME_BUILD } from '../index.js'
+const { apply, RUNTIME_BUILD } = await import(process.env.AGENTRIX_PACKAGE_ROOT
+  ? pathToFileURL(path.join(process.env.AGENTRIX_PACKAGE_ROOT, 'index.js')).href : new URL('../index.js', import.meta.url).href)
 
 const scenario = process.argv[2] ?? 'direct'
-assert.ok(['direct', 'separate-error', 'acceptance-save'].includes(scenario))
+assert.ok(['direct', 'separate-error', 'acceptance-save', 'cancel-cleanup'].includes(scenario))
 if (!process.env.DSH_MODULE_ROOT) throw new Error('DSH_MODULE_ROOT is required')
 const native = name => import(pathToFileURL(path.join(process.env.DSH_MODULE_ROOT, name, 'lib/index.js')).href)
 const { Context } = await native('cordis')
@@ -19,6 +20,8 @@ process.env.DSH_HOME = directory
 delete process.env.DSH_DELEGATION_FIRST
 const ctx = new Context(), routes = new Map(), phases = new Map(), events = [], releases = new Map(), edits = []
 const workerGate = Promise.withResolvers()
+const activations = new Map()
+let cleanupFixed = false
 const output = path.join(directory, 'owned.txt'), independent = path.join(directory, 'independent.txt')
 let parent, handle, sequence = 0, requestCount = 0, fault = false, runsFile, closing = false
 ctx.provide('webServer', { register(route) { routes.set(route.path, route.handler); return () => routes.delete(route.path) } })
@@ -62,6 +65,19 @@ class Adapter extends LlmAdapter {
       if (phase === 0) block = tool('edit', { file_path: independent, old_string: 'verified', new_string: 'updated' })
       else if (phase === 1) block = tool('read', { file_path: independent })
       else block = { type: 'text', text: '已修改并核对独立文件。' }
+    } else if (scenario === 'cancel-cleanup' && plan?.cancelled) {
+      assert.ok([...activations.values()].every(spec => spec.signal.aborted), 'all native children receive cancellation before cleanup recovery')
+      if (plan.cancellation.cleanup.status === 'failed') {
+        assert.ok(plan.cancellation.cleanup.remaining.length > 0)
+        cleanupFixed = true
+        block = tool('delegation_cancel')
+      } else {
+        assert.equal(plan.cancellation.cleanup.status, 'completed')
+        block = { type: 'text', text: '已取消，原子任务均已确认清理。' }
+      }
+    } else if (scenario === 'cancel-cleanup' && state.sessions[0]?.pendingMessages?.some(message => message.text === '取消全部隔离任务')) {
+      block = tool('delegation_cancel', { reason: '用户明确取消所有隔离任务',
+        messageId: state.sessions[0].pendingMessages.find(message => message.text === '取消全部隔离任务').messageId })
     } else if (scenario === 'separate-error' && state.sessions[0]?.pendingMessages?.some(message => message.text === '核对另一份独立文档')) {
       block = tool('delegation_decide', { relation: 'new', mode: 'direct', reason: '另一份文档独立处理，原子任务继续。' })
     } else if (scenario === 'separate-error' && state.sessions[0]?.source?.text === '核对另一份独立文档') {
@@ -70,11 +86,15 @@ class Adapter extends LlmAdapter {
         yield { type: 'finish', reason: { kind: 'error', failure: { code: 'UNKNOWN', message: 'independent request failed' } } }
         return
       }
-    } else if (!plan) block = tool('delegation_plan', { relation: 'new', start: true, goal: '核对隔离文件', decisionReason: '执行者读取独立文件，主控验证验收。', tasks: [{
+    } else if (!plan) {
+      const task = {
       id: 'a', title: '核对文件', instructions: '读取 owned.txt 并提交报告', scope: directory, outputs: [output], writes: [output],
       complexity: 'routine', reviewPolicy: 'coordinator', reviewReason: '仅核对隔离文件，由主控实际验证。', criteria: ['内容包含 verified'],
       checks: [{ tool: 'read', arguments: { file_path: output } }],
-    }] })
+      }
+      block = tool('delegation_plan', { relation: 'new', start: true, goal: '核对隔离文件', decisionReason: '执行者读取独立文件，主控验证验收。',
+        tasks: scenario === 'cancel-cleanup' ? [{ ...task, writes: [] }, { ...task, id: 'b', writes: [] }] : [task] })
+    }
     else if (task.status === 'running') block = tool('delegation_wait')
     else if (task.status === 'review' && !task.checks[0].result) block = tool('delegation_verify', { taskId: 'a' })
     else if (task.status === 'review') {
@@ -103,16 +123,30 @@ try {
   for (const name of ['read', 'edit']) ctx.tools.register(defineTool({ name, description: 'Isolated reliability fixture',
     parameters: { file_path: { type: 'string', required: true }, ...name === 'edit' ? { old_string: { type: 'string' }, new_string: { type: 'string' } } : {} },
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: value.text }] },
-    async execute(args) {
+    async execute(args, exec) {
       assert.ok([output, independent].includes(args.file_path))
+      if (scenario === 'cancel-cleanup' && exec.agent.id !== 'root') await new Promise((_, reject) => {
+        if (exec.signal.aborted) return reject(exec.signal.reason)
+        exec.signal.addEventListener('abort', () => reject(exec.signal.reason), { once: true })
+      })
       let text = await readFile(args.file_path, 'utf8')
       if (name === 'edit') { text = text.replace(args.old_string, args.new_string); await writeFile(args.file_path, text); edits.push(args.file_path) }
       return { text }
     } }))
   const start = ctx.subagents.startActivation.bind(ctx.subagents)
+  const drain = ctx.subagents.drainChildren.bind(ctx.subagents)
+  ctx.subagents.drainChildren = async (agent, ids) => {
+    if (scenario === 'cancel-cleanup' && !cleanupFixed && ids.includes([...activations.keys()][0])) throw new Error('scripted native drain failure')
+    return drain(agent, ids)
+  }
   ctx.subagents.startActivation = async (...args) => {
     const receipt = await start(...args), dispose = receipt.dispose.bind(receipt)
-    receipt.dispose = async () => { releases.set(receipt.childId, (releases.get(receipt.childId) ?? 0) + 1); return dispose() }
+    activations.set(receipt.childId, args[0])
+    receipt.dispose = async () => {
+      releases.set(receipt.childId, (releases.get(receipt.childId) ?? 0) + 1)
+      if (scenario === 'cancel-cleanup' && receipt.childId === [...activations.keys()][0]) throw new Error('scripted native dispose failure')
+      return dispose()
+    }
     return receipt
   }
   ctx.on('session/event', (session, event) => events.push({ sessionId: session.id, ...event }), { global: true })
@@ -128,6 +162,10 @@ try {
     await until(async () => (await requestState()).plans[0]?.tasks[0].status === 'running', 'old worker started')
     parent.steer(createUserMessage({ content: [{ type: 'text', text: '核对另一份独立文档' }], source: { kind: 'user' } }))
   }
+  if (scenario === 'cancel-cleanup') {
+    await until(async () => (await requestState()).plans[0]?.tasks.every(task => task.status === 'running'), 'two native workers running')
+    parent.steer(createUserMessage({ content: [{ type: 'text', text: '取消全部隔离任务' }], source: { kind: 'user' } }))
+  }
   await until(() => events.some(event => event.sessionId === 'root' && event.type === 'turn/end') && parent.status === 'idle', 'coordinator settled')
   const result = await requestState()
   assert.equal(result.runtimeBuild, RUNTIME_BUILD)
@@ -142,6 +180,14 @@ try {
     assert.equal(result.plans[0].tasks[0].status, 'running')
     assert.equal(result.plans[0].completion, null); assert.equal(releases.size, 0)
     assert.equal(await readFile(independent, 'utf8'), 'updated')
+  } else if (scenario === 'cancel-cleanup') {
+    assert.equal(cleanupFixed, true)
+    assert.equal(result.plans[0].completion.outcome, 'cancelled')
+    assert.equal(result.plans[0].cancellation.cleanup.status, 'completed')
+    assert.equal(result.plans[0].cancellation.cleanup.failures.length, 1)
+    assert.equal(activations.size, 2)
+    assert.ok([...releases.values()].every(count => count === 1))
+    assert.ok([...activations.keys()].every(id => !ctx.agents.get(id)), 'native child registries are empty after drain retry')
   } else {
     assert.equal(fault, true); assert.equal(result.plans[0].completion.outcome, 'completed')
     assert.equal(result.plans[0].tasks[0].attempts, 1)

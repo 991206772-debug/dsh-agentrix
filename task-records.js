@@ -48,7 +48,9 @@ export function taskSummary(plan) {
     '- 接续方式：用户明确继续后沿用原计划，只恢复未完成部分；已返回报告继续验证验收，失败任务须处理原因后明确重试。')
   if (plan.cancellation) lines.push('', '## 整计划取消来源', '',
     '- 用户消息：' + plan.cancellation.messageId, '- 取消原因：' + plan.cancellation.reason,
-    '- 取消时间：' + time(plan.cancellation.at))
+    '- 取消时间：' + time(plan.cancellation.at),
+    ...(plan.cancellation.cleanup ? ['- 资源清理：' + ({ pending: '尚未确认完成', failed: '清理未完成', completed: '已确认完成' }[plan.cancellation.cleanup.status]),
+      ...plan.cancellation.cleanup.remaining.map(item => '- 清理未完成：' + item.taskId + '（' + item.role + '）；' + (item.error || '等待确认'))] : []))
   if (plan.coordinationIssue) {
     const issue = plan.coordinationIssue
     lines.push('', '## ' + (issue.role === 'coordinator' ? '主控操作未执行' : '协作操作未执行'), '',

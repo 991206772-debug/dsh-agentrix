@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 
@@ -11,8 +11,16 @@ export function createRuntimeStore(file) {
   const directory = file + '.state'
   let references = new Set()
   async function replace(target, content) {
-    await writeFile(target + '.tmp', content, 'utf8')
-    await rename(target + '.tmp', target)
+    try {
+      await writeFile(target + '.tmp', content, 'utf8')
+      await rename(target + '.tmp', target)
+    } finally { await unlink(target + '.tmp').catch(() => {}) }
+  }
+  async function collect(retained) {
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) if (entry.isFile() && /^[a-f0-9]{64}\.json(?:\.tmp)?$/.test(entry.name) && !retained.has(entry.name)) {
+      await unlink(path.join(directory, entry.name)).catch(() => {})
+    }
   }
   return {
     async read() {
@@ -42,6 +50,7 @@ export function createRuntimeStore(file) {
       const content = JSON.stringify(state)
       if (!references.size && Buffer.byteLength(content) <= INLINE_BYTES) {
         await replace(file, content)
+        await collect(references)
         return
       }
       const sessions = new Map()
@@ -55,16 +64,26 @@ export function createRuntimeStore(file) {
       }
       await mkdir(directory, { recursive: true })
       const manifest = { version: 2, sessions: [] }, next = new Set()
-      for (const [sessionId, chunk] of sessions) {
-        const text = JSON.stringify(chunk), name = hash(text) + '.json'
-        if (!references.has(name)) await replace(path.join(directory, name), text)
-        manifest.sessions.push({ sessionId, file: name }); next.add(name)
+      const created = new Set()
+      try {
+        for (const [sessionId, chunk] of sessions) {
+          const text = JSON.stringify(chunk), name = hash(text) + '.json'
+          if (!references.has(name)) {
+            const target = path.join(directory, name)
+            const existed = await lstat(target).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error })
+            await replace(target, text)
+            if (!existed) created.add(name)
+          }
+          manifest.sessions.push({ sessionId, file: name }); next.add(name)
+        }
+        await replace(file, JSON.stringify(manifest))
+      } catch (error) {
+        for (const name of created) await unlink(path.join(directory, name)).catch(() => {})
+        throw error
       }
-      await replace(file, JSON.stringify(manifest))
-      const previous = references
       references = next
-      // Old snapshots are redundant only after the new manifest has committed.
-      for (const name of previous) if (!next.has(name)) await unlink(path.join(directory, name)).catch(() => {})
+      // Includes debris from a failed writer or reload; committed references remain protected.
+      await collect(references)
     },
   }
 }

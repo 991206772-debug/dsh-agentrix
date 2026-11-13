@@ -702,6 +702,8 @@ window.__ModuleLoader__.load({
       'direct.stale': '进度暂时无法更新，以下为最近记录',
       'coordination.incomplete': '尚未完成', 'coordination.coordinator': '主控操作未执行', 'coordination.worker': '协作操作未执行',
       'coordination.active': '原生优先执行策略已生效（v7）', 'coordination.pending': '协作执行策略等待加载', 'runtime.build': '运行逻辑标识',
+      'completion.cleanupPending': '取消已请求，资源清理未完成', 'completion.cleanupNext': '取消已记录。处理清理错误后，让主控重试取消清理；无需新增取消消息，不会启动新代理。',
+      'plans.notificationFailed': '结果已保存，通知主控失败：{error}。可查看报告并继续验证，无需重跑子任务。',
       'plans.outputTruncated': '验证摘要已截断，完整结果已保存', 'plans.outputPath': '完整验证结果', 'plans.concerns': '执行疑点（验收前需处理）',
     })
     Object.assign(en, {
@@ -731,6 +733,8 @@ window.__ModuleLoader__.load({
       'direct.stale': 'Progress could not be refreshed; the last record is shown',
       'coordination.incomplete': 'Not completed', 'coordination.coordinator': 'Coordinator operation did not succeed', 'coordination.worker': 'Coordination operation did not succeed',
       'coordination.active': 'Native-first execution policy active (v7)', 'coordination.pending': 'Coordination policy awaiting reload', 'runtime.build': 'Loaded runtime identity',
+      'completion.cleanupPending': 'Cancellation requested; resource cleanup incomplete', 'completion.cleanupNext': 'Cancellation is recorded. Resolve the cleanup error and retry cancellation cleanup; no new cancellation message or agent is needed.',
+      'plans.notificationFailed': 'Result saved; coordinator notification failed: {error}. Read the report and continue verification without rerunning the task.',
       'plans.outputTruncated': 'Verification preview truncated; full output saved', 'plans.outputPath': 'Full verification output', 'plans.concerns': 'Worker concerns (resolve before acceptance)',
     })
 
@@ -1249,6 +1253,7 @@ window.__ModuleLoader__.load({
 `
 
     function completionLabel(t, receipt) {
+      if (receipt.cleanup && receipt.cleanup.status !== 'completed') return t('completion.cleanupPending')
       const stopped = receipt.outcome === 'partial' && receipt.remaining.length > 0 && receipt.remaining.every(task => task.status === 'cancelled')
       return t('completion.' + (stopped ? 'partialStopped' : receipt.outcome))
     }
@@ -1288,6 +1293,7 @@ window.__ModuleLoader__.load({
     function completionNext(t, plan, state) {
       const receipt = plan?.completion
       if (!receipt) return ''
+      if ((plan.cancellation?.cleanup ?? receipt.cleanup)?.status && (plan.cancellation?.cleanup ?? receipt.cleanup).status !== 'completed') return t('completion.cleanupNext')
       const service = serviceProblem(plan)
       if (service) return service.action
       if (receipt.outcome === 'blocked') {
@@ -1314,6 +1320,12 @@ window.__ModuleLoader__.load({
 
     function CompletionReceipt({ t, plan, state }) {
       const receipt = plan?.completion
+      const cleanup = plan?.cancellation?.cleanup ?? receipt?.cleanup
+      const pending = cleanup && cleanup.status !== 'completed'
+      const cleanupItems = pending ? h('ul', { 'data-cleanup': cleanup.status }, ...(cleanup.remaining ?? []).map(item => h('li', {
+        key: item.childId || item.taskId + item.role }, item.taskId + ' · ' + item.role + '：' + (item.error || t('completion.cleanupPending'))))) : null
+      if (!receipt && pending) return h('section', { className: 'ddf-receipt', role: 'alert' }, h('style', null, RECEIPT_STYLES),
+        h('strong', null, t('completion.cleanupPending')), h('p', null, t('completion.cleanupNext')), cleanupItems)
       if (!receipt) return null
       const service = serviceProblem(plan)
       return h('section', { className: 'ddf-receipt', 'data-outcome': receipt.outcome, role: 'status' },
@@ -1323,6 +1335,7 @@ window.__ModuleLoader__.load({
         service?.code === 'MODEL_SERVICE_REQUEST_REFUSED' ? h(ServiceErrorDetails, { t, details: service.details }) : null,
         h('p', null, fill(t('completion.accepted'), { done: receipt.accepted, total: receipt.total })),
         h('p', { className: 'ddf-receipt-next' }, completionNext(t, plan, state)),
+        cleanupItems,
         receipt.reason ? h('p', null, t('completion.reason') + '：' + receipt.reason) : null,
         receipt.deliverables.length ? h('div', null, h('b', null, t('completion.deliverables')),
           h('ul', null, ...receipt.deliverables.map(task => h('li', { key: task.taskId }, task.title + '：' + task.paths.join('、'))))) : null,
@@ -2100,6 +2113,7 @@ window.__ModuleLoader__.load({
             task.release?.status === 'released' ? h('p', { className: 'ddf-hint' }, t('plans.childReleased')) : null,
             task.release?.status === 'drained' ? h('p', { className: 'ddf-hint' }, t('plans.childDrained')) : null,
             task.release?.status === 'failed' ? h('p', { className: 'ddf-foot-failed' }, fill(t('plans.childReleaseFailed'), { error: task.release.error })) : null,
+            task.resultNotification?.status === 'failed' ? h('p', { className: 'ddf-foot-failed' }, fill(t('plans.notificationFailed'), { error: task.resultNotification.error })) : null,
             task.error ? h('pre', null, task.error) : null),
           task.execution?.reportPath ? h('p', { className: 'ddf-hint' }, t('execution.report') + '：', h('code', null, task.execution.reportPath)) : null,
           audit?.report ? h('details', null, h('summary', null, t('audit.title')), h('pre', null, audit.report)) : null,

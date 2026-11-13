@@ -108,6 +108,7 @@ function compactTask(task) {
     summary: brief(task.execution?.summary, 300), reportPath: task.execution?.reportPath,
     execution: task.execution ? { status: task.execution.status, reason: task.execution.reason, concerns: task.execution.concerns ?? [] } : null,
     error: task.error ? brief(task.error, 500) : null,
+    ...(task.resultNotification ? { resultNotification: task.resultNotification } : {}),
     checks: (task.checks ?? []).map((check, index) => ({ index, passed: check.result?.passed ?? null, ref: check.result?.ref, callId: check.result?.callId,
       ...(check.result?.truncated ? { truncated: true, outputPath: check.result.outputPath, readOutput: check.result.readOutput } : {}) })),
     issues: (task.issues ?? []).filter(issue => issue.status === 'open').map(issue => ({ id: issue.id, severity: issue.severity, finding: brief(issue.finding, 300) })),
@@ -126,6 +127,7 @@ function compactResult(value) {
     decision: value.plan.decision, nextAction: value.plan.nextAction, pendingMessages: value.plan.pendingMessages?.map(compactMessage),
     activationBudget: value.plan.activationBudget, dispatchWait: value.plan.dispatchWait,
     interruption: value.plan.interruption,
+    ...(value.plan.cancellation ? { cancellation: { reason: value.plan.cancellation.reason, at: value.plan.cancellation.at, cleanup: value.plan.cancellation.cleanup } } : {}),
     coordinatorIssue: value.plan.coordinatorIssue, coordinationIssue: value.plan.coordinationIssue, messageResolution: value.plan.messageResolution,
     ...(value.plan.delivery ? { delivery: { status: value.plan.delivery.status, messageId: value.plan.delivery.messageId, error: value.plan.delivery.error } } : {}),
     inputs: (value.plan.inputs ?? []).filter(input => ['queued', 'received'].includes(input.status)).map(input => ({ id: input.id, text: brief(input.text, 400), status: input.status })),
@@ -322,7 +324,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const coordinationFailures = new Set(), coordinationCalls = new Map(), coordinationRestrictions = new Map()
   const toolDefinitions = new Map(), reportSchemas = new Map()
   const inboxes = new Map()
-  const cancellingPlans = new Set()
+  const cancellingPlans = new Map(), stopCleanups = new WeakMap(), notificationTimers = new Map(), notifying = new WeakMap()
   const records = createTaskRecords(file), pendingRecords = new Map()
   let activityTimer
   let closed = false, dirty = false, writing, pumping = Promise.resolve(), storageError = null, recoveryFailed = false
@@ -409,6 +411,61 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     return receipt
   }
+  function updateCancellationCleanup(plan) {
+    if (!plan.cancellation) return
+    const previous = plan.cancellation.cleanup
+    const remaining = plan.tasks.flatMap(task => (task.audit ? [task, task.audit] : [task])
+      .filter(target => task.status !== 'accepted' && (target.recovered || LIVE.includes(target.status) || target.release?.status === 'failed'))
+      .map(target => ({ taskId: task.id, role: modelRole(target), childId: target.childId ?? null,
+        ...(target.release?.error ? { error: target.release.error } : {}) })))
+    const failures = [...(previous?.failures ?? [])]
+    for (const item of remaining.filter(item => item.error)) if (!failures.some(old => old.childId === item.childId && old.error === item.error)) failures.push({ ...item, at: Date.now() })
+    const status = remaining.length ? remaining.some(item => item.error) ? 'failed' : 'pending' : 'completed'
+    if (previous?.status === status && JSON.stringify(previous.remaining) === JSON.stringify(remaining)) return
+    plan.cancellation.cleanup = { status,
+      remaining, failures, updatedAt: Date.now(), ...(!remaining.length ? { completedAt: previous?.completedAt ?? Date.now() } : {}) }
+  }
+  function requestTaskStop(plan, task, reason) {
+    if (task.status === 'accepted') return
+    if (task.status !== 'cancelled' || !task.stop) task.stop = { reason, source: 'coordinator', at: Date.now(), previousStatus: task.status }
+    task.status = 'cancelled'; plan.dispatchWait = null
+    for (const target of task.audit ? [task, task.audit] : [task]) {
+      target.status = 'cancelled'
+      const handle = live.get(targetKey(plan, target))
+      if (handle) { target.recovered = true; clearTaskTimers(handle); handle.controller.abort(new Error('任务已取消：' + reason)) }
+    }
+    waitingParents.get(plan.sessionId)?.wake.resolve()
+  }
+  async function cleanupStoppedTask(plan, task, parent) {
+    if (stopCleanups.has(task)) return stopCleanups.get(task)
+    const operation = (async () => {
+      await pumping
+      const errors = await Promise.all((task.audit ? [task, task.audit] : [task]).map(async target => {
+        const key = targetKey(plan, target), handle = live.get(key)
+        try {
+          if (handle) {
+            const error = await releaseChild(handle, target)
+            if (error) throw error
+            if (live.get(key) === handle) live.delete(key)
+            expectedRoutes.delete(target.childId); handle.done.resolve()
+          } else if (target.recovered && target.childId && !['released', 'drained'].includes(target.release?.status)) {
+            await service('subagents').drainChildren(parent, [target.childId])
+            target.release = { status: 'drained', at: Date.now() }
+          }
+          target.recovered = false
+          return null
+        } catch (error) {
+          target.recovered = true
+          target.release = { status: 'failed', at: Date.now(), error: messageOf(error) }
+          remember(plan, 'task.cleanup_failed', '取消已请求，资源清理未完成：' + messageOf(error), target, { release: clone(target.release) })
+          return error
+        }
+      }))
+      return errors.find(Boolean)
+    })()
+    stopCleanups.set(task, operation)
+    try { return await operation } finally { stopCleanups.delete(task) }
+  }
   function runtimeMessage(plan, text, kind = 'delegation-recovery') {
     return { id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { kind, planId: plan.archive.id } }
   }
@@ -456,6 +513,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     if (interruptedPlan(plan) && !pendingMessages(plan.sessionId).length && (!decisionCurrent(plan.sessionId) || decisionFor(plan.sessionId)?.mode !== 'delegate')) return { type: 'decide', message: '继续消息已关联，但旧判断不是委派。请用 delegation_decide(relation:continue,mode:delegate,reason:监督原托管任务的具体理由) 确认继续原计划，无需改成 update 或重建任务卡。' }
     if (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt) return { type: 'run', message: '执行已中断，进度保留。用户明确继续后调用 delegation_run，沿用原计划恢复未完成任务；已返回报告继续验证验收，不必新建计划。' }
+    if (plan.cancelled && plan.cancellation?.cleanup?.status !== 'completed' && plan.cancellation?.cleanup) return {
+      type: 'handle_failure', message: '用户取消已记录，资源清理未完成。处理清理错误后再次调用 delegation_cancel 重试清理；无需新增取消消息，不启动新代理。' }
     if (completion || plan.cancelled) return { type: 'finished', message: '以程序交付回执为准；不要重复启动或清理。' }
     if (unresolvedInputs(plan).length) return { type: 'handle_input', message: '先处理用户补充，沿用原代理同步要求。' }
     const returned = plan.tasks.filter(task => task.status === 'review' && !task.pendingAcceptance)
@@ -564,22 +623,59 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       ].join('\n') }] }, { surfaceOp: 'append' })
     return { kind: 'retry' }
   }, { global: true, prepend: true }))
-  function notifyParent(plan, task, handle) {
-    if (handle.notified || closed || plan.cancelled || plan.wakeSuppressed || plans.get(plan.sessionId) !== plan) return
-    handle.notified = true
+  function scheduleResultNotification(plan, task) {
+    if (closed || plan.cancelled || plan.wakeSuppressed || notificationTimers.has(task) || task.resultNotification?.status === 'delivered' || task.resultNotification?.attempts >= 2) return
+    const notice = task.resultNotification, attempt = task.attempts, childId = task.childId
+    const timer = setTimeout(() => {
+      notificationTimers.delete(task)
+      if (task.resultNotification === notice && task.attempts === attempt && task.childId === childId) {
+        void notifyParent(plan, task).catch(error => { storageError = messageOf(error) })
+      }
+    }, 250)
+    timer.unref?.(); notificationTimers.set(task, timer)
+  }
+  async function notifyParent(plan, task, handle) {
+    if ((notifying.has(task) && notifying.get(task) === task.resultNotification) || task.resultNotification?.status === 'delivered' || task.resultNotification?.attempts >= 2 ||
+      closed || plan.cancelled || plan.wakeSuppressed || plans.get(plan.sessionId) !== plan) return
+    if (LIVE.includes(task.status) || ['queued', 'cancelled', 'accepted'].includes(task.status) || !targetsOf(plan).includes(task) ||
+      plan.tasks.some(owner => owner.id === task.id && owner.status === 'accepted')) return
     const parent = service('agents')?.get(plan.sessionId)
-    if (parent !== handle.parent) return
-    const owner = plan.tasks.find(item => item.id === task.id) ?? task
-    const text = `托管任务 ${task.id}${task.role === 'reviewer' ? ' 的独立审查' : ''} 已返回：${task.status}。${task.error || task.execution?.summary || ''}。无需 stop 清理。\n` +
-      JSON.stringify({ task: compactTask(owner), nextAction: nextAction(plan) })
-    const waiter = waitingParents.get(plan.sessionId)
-    if (waiter) {
-      waiter.results.push(text); waiter.wake.resolve()
-      return
-    }
-    const message = runtimeMessage(plan, text, 'delegation-result')
-    if (parent.status === 'running') parent.inject?.(message)
-    else parent.steer?.(message)
+    if (!parent || handle && parent !== handle.parent) return
+    const notice = task.resultNotification ??= { messageId: randomUUID(), status: 'pending', attempts: 0, attempt: task.attempts, childId: task.childId }
+    const current = () => !closed && !plan.cancelled && !plan.wakeSuppressed && plans.get(plan.sessionId) === plan &&
+      service('agents')?.get(plan.sessionId) === parent && task.resultNotification === notice && task.attempts === notice.attempt &&
+      task.childId === notice.childId && targetsOf(plan).includes(task) && !['queued', ...LIVE, 'accepted', 'cancelled'].includes(task.status) &&
+      !plan.tasks.some(owner => owner.id === task.id && owner.status === 'accepted')
+    notifying.set(task, notice)
+    try {
+      if ((parent.session?.snapshotEvents?.() ?? []).some(event => event.data?.message?.id === notice.messageId || event.data?.id === notice.messageId)) {
+        notice.status = 'delivered'; delete notice.error; await save(); return
+      }
+      const owner = plan.tasks.find(item => item.id === task.id) ?? task
+      const text = `托管任务 ${task.id}${task.role === 'reviewer' ? ' 的独立审查' : ''} 已返回：${task.status}。${task.error || task.execution?.summary || ''}。无需 stop 清理。\n` +
+        JSON.stringify({ task: compactTask(owner), nextAction: nextAction(plan) })
+      notice.attempts++; notice.status = 'pending'
+      await save()
+      if (!current()) return
+      const waiter = waitingParents.get(plan.sessionId)
+      if (waiter) {
+        waiter.results.push(text); waiter.wake.resolve()
+      } else {
+        const message = { ...runtimeMessage(plan, text, 'delegation-result'), id: notice.messageId }
+        const send = parent.status === 'running' ? parent.inject : parent.steer
+        if (typeof send !== 'function') throw new Error('主控通知入口不可用')
+        await send.call(parent, message)
+      }
+      notice.status = 'delivered'; notice.deliveredAt = Date.now(); delete notice.error
+      await save()
+    } catch (error) {
+      if (current() && notice.status !== 'delivered') {
+        notice.status = 'failed'; notice.error = messageOf(error)
+        remember(plan, 'task.notification_failed', '任务结果已保存，通知主控失败：' + notice.error, task)
+        await save().catch(() => {})
+        scheduleResultNotification(plan, task)
+      }
+    } finally { if (notifying.get(task) === notice) notifying.delete(task) }
   }
   const pendingSupervision = plan => targetsOf(plan).filter(task => LIVE.includes(task.status) && !task.execution && task.supervision?.pending && !task.supervision.pending.deliveredAt)
   function deliverSupervision(plan, agent) {
@@ -911,7 +1007,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (names.length) coordinationRestrictions.set(target.id, { agent: target, key, names, dispose: target.ctx.tools.restrict({ deny: names }) })
     }
   }
-  disposers.push(ctx.on('agent/created', async ({ agent }) => { await ready; refreshCoordinationTools(agent) }, { global: true }))
+  disposers.push(ctx.on('agent/created', async ({ agent }) => {
+    await ready; refreshCoordinationTools(agent)
+    const plan = plans.get(agent.id)
+    if (plan) for (const task of targetsOf(plan)) if (task.resultNotification && task.resultNotification.status !== 'delivered') scheduleResultNotification(plan, task)
+  }, { global: true }))
   disposers.push(ctx.on('agent/disposed', ({ agent }) => {
     coordinationRestrictions.get(agent.id)?.dispose(); coordinationRestrictions.delete(agent.id)
     reportSchemas.get(agent.id)?.dispose(); reportSchemas.delete(agent.id)
@@ -1017,9 +1117,15 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
           delete task.pendingAcceptance
           for (const check of task.checks) delete check.verifying
         }
+        if (plan.cancelled && plan.cancellation) {
+          for (const task of plan.tasks) if (task.status !== 'accepted') requestTaskStop(plan, task, plan.cancellation.reason)
+          updateCancellationCleanup(plan)
+          if (plan.completion) plan.completion.cleanup = clone(plan.cancellation.cleanup)
+        }
       }
       for (const plan of stored.plans) plans.set(plan.sessionId, plan)
       if (plans.size) await save()
+      for (const plan of plans.values()) for (const task of targetsOf(plan)) if (task.resultNotification && task.resultNotification.status !== 'delivered') scheduleResultNotification(plan, task)
     } catch (error) {
       if (error.code !== 'ENOENT') { recoveryFailed = true; storageError = messageOf(error); console.warn('[dsh-delegation-first] 任务恢复失败：%s', storageError) }
     }
@@ -1359,7 +1465,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     try {
       await save()
       if (!closed) await pump()
-      if (task.protocolVersion >= 2) notifyParent(plan, task, handle)
+      if (task.protocolVersion >= 2) await notifyParent(plan, task, handle)
     } finally { handle.done?.resolve() }
   }
   function coordinatorModel(parent, attempt, source = 'dispatch') {
@@ -1473,6 +1579,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   async function launch(plan, owner, parent, reviewer = false) {
     invalidateCompletion(plan)
     const task = reviewer ? owner.audit : owner
+    clearTimeout(notificationTimers.get(task)); notificationTimers.delete(task); delete task.resultNotification
     const key = targetKey(plan, task)
     const handle = { key, planSessionId: plan.sessionId, parent, task, owner, done: Promise.withResolvers(), controller: new AbortController(), receipt: null, settling: false }
     live.set(key, handle)
@@ -1512,6 +1619,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
           { dispatcherModel: clone(dispatcher) })
       }
       task.startedAt = Date.now(); task.childId = randomUUID()
+      delete task.release
       startSupervision(task, task.startedAt, timeoutMinutes * 60_000)
       expectedRoutes.set(task.childId, { plan, task, handle, config: clone(resolved) })
       await save()
@@ -1571,7 +1679,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         waitChanged = true
       }
       for (const plan of plans.values()) {
-        if (!plan.autoDispatch || plan.cancelled || plan.tasks.some(task => task.recovered) || getConfig().enabled === false) continue
+        if (!plan.autoDispatch || plan.cancelled || targetsOf(plan).some(task => task.recovered) || getConfig().enabled === false) continue
         const parent = service('agents')?.get(plan.sessionId)
         if (!parent) { plan.autoDispatch = false; continue }
         for (const owner of plan.tasks) {
@@ -2024,31 +2132,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (args.action === 'stop') {
       const reason = task.protocolVersion >= 2 ? requireText(args.reason, '取消原因；完成后无需 stop，请提交报告并验收', 2000) : args.reason || '主控已停止任务'
       invalidateCompletion(plan)
-      task.stop = { reason, source: 'coordinator', at: Date.now(), previousStatus: task.status }
-      task.status = 'cancelled'; plan.dispatchWait = null
-      for (const target of task.audit ? [task, task.audit] : [task]) {
-        const targetId = targetKey(plan, target), handle = live.get(targetId)
-        target.status = 'cancelled'
-        if (handle) {
-          handle.controller.abort(new Error('任务已取消：' + reason))
-          clearTaskTimers(handle)
-          const releaseError = await releaseChild(handle, target)
-          if (releaseError) throw releaseError
-          await pumping
-          if (live.get(targetId) === handle) live.delete(targetId)
-          expectedRoutes.delete(target.childId)
-          handle.done.resolve()
-        } else if (target.recovered && target.childId) {
-          await service('subagents').drainChildren(parent, [target.childId])
-          target.release = { status: 'drained', at: Date.now() }
-        }
-        target.recovered = false
-      }
-      task.recovered = false
+      requestTaskStop(plan, task, reason)
+      const releaseError = await cleanupStoppedTask(plan, task, parent)
+      updateCancellationCleanup(plan)
       remember(plan, 'task.stopped', '主 Agent 已取消子任务：' + reason, task, { stop: task.stop })
       if (!cancellingPlans.has(plan)) finishPlan(plan)
+      if (releaseError) { await save(); throw releaseError }
     } else if (args.action === 'retry') {
-      if (task.recovered) throw new Error('请先 stop 旧子任务，再 retry')
+      if (task.recovered || task.audit?.recovered) throw new Error('请先 stop 旧子任务，再 retry')
       if (!['failed', 'blocked', 'cancelled'].includes(task.status)) throw new Error('只能重试失败、阻塞或已停止的任务')
       if (task.attempts >= getConfig().maxAttempts) throw new Error('已达到执行次数上限')
       if (activationBudget(plan, getConfig().maxActivations).remaining <= 0) {
@@ -2274,13 +2365,15 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (args.start && !previous.autoDispatch && decisionCurrent(parent.id) && decisionFor(parent.id)?.mode === 'delegate') return runPlan({}, exec)
       return { plan: snapshotPlan(previous) }
     }
+    if (previous?.cancellation?.cleanup && previous.cancellation.cleanup.status !== 'completed') throw new Error('原计划资源清理未完成；处理原因后再次 delegation_cancel 清理，不能覆盖原计划')
     if (previous && !['accepted', 'cancelled'].includes(planStatus(previous))) throw new Error('当前计划尚未验收；请监督、返工或取消后再建新计划')
     if (pendingMessages(parent.id).length && args.decisionReason === undefined) throw new Error('建立计划前须明确消息关联；可在本次 delegation_plan 一并提供 relation/messageId/decisionReason，或先用 delegation_decide 确认')
     const validated = validatePlan(args)
     validateChecks(validated.tasks, parent, exec.toolSet)
     if (args.decisionReason !== undefined) await recordDecision({ mode: 'delegate', reason: args.decisionReason, relation: args.relation, messageId: args.messageId }, exec)
     if (!previous && plans.size >= MAX_PLANS) {
-      const oldest = [...plans.values()].filter(plan => ['accepted', 'cancelled'].includes(planStatus(plan))).sort((a, b) => a.updatedAt - b.updatedAt)[0]
+      const oldest = [...plans.values()].filter(plan => ['accepted', 'cancelled'].includes(planStatus(plan)) &&
+        (!plan.cancellation?.cleanup || plan.cancellation.cleanup.status === 'completed')).sort((a, b) => a.updatedAt - b.updatedAt)[0]
       if (!oldest) throw new Error(`已有 ${MAX_PLANS} 个未完成计划，请先完成或取消`)
       plans.delete(oldest.sessionId)
     }
@@ -2322,7 +2415,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       await save()
     }
     if (plan.interruption && !plan.interruption.resumedAt || targetsOf(plan).some(task => task.interruption)) await resumeInterrupted(plan, parent, exec.signal)
-    if (plan.tasks.some(task => task.recovered)) throw new Error('请先用 delegation_control stop 清理恢复前的子任务，再继续执行')
+    if (targetsOf(plan).some(task => task.recovered)) throw new Error('请先用 delegation_control stop 清理恢复前的子任务，再继续执行')
     if (activationBudget(plan, getConfig().maxActivations).remaining <= 0 && plan.tasks.some(task => task.status === 'queued')) {
       const message = pauseAtActivationLimit(plan); await save(); throw new Error(message)
     }
@@ -2424,13 +2517,17 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     taskId: string, action: { type: 'string', enum: ['steer', 'stop', 'retry', 'acknowledge'] }, message: string, reason: string,
     inputIds: array(string), additionalCriteria: array(string),
   }, ['action'], control)
-  routeTool('delegation_cancel', '仅在用户明确取消整个计划时调用。须提供 reason 和本会话新增真实用户消息的 messageId；自己推测同模型不可用不能作为用户取消。单任务失败只处理该任务；中断后继续用 delegation_run，无需新建计划。', { reason: string, messageId: string }, [], async (args, exec) => {
+  routeTool('delegation_cancel', '用户明确取消整计划时提供 reason 和本会话新增真实用户消息的 messageId；自己推测模型不可用不能代替用户取消。已取消计划资源清理未完成时，可空参数重试清理，保留原取消来源，不启动新代理。单任务失败只处理该任务；中断后用 delegation_run 继续原计划。', { reason: string, messageId: string }, [], async (args, exec) => {
     const { plan, parent } = ownPlan(exec)
     if (planStatus(plan) === 'accepted') return { status: 'accepted', completion: plan.completion ?? null }
-    if (plan.cancelled) return { status: 'cancelled', completion: plan.completion ?? null }
+    if (cancellingPlans.has(plan)) return cancellingPlans.get(plan)
+    if (plan.cancelled && (!plan.cancellation || plan.cancellation.cleanup?.status === 'completed')) {
+      await save(); return { status: 'cancelled', completion: plan.completion ?? null }
+    }
     const serviceIssue = pendingServiceIssue(plan)
     const hasLive = targetsOf(plan).some(task => LIVE.includes(task.status))
-    if (!args.reason) {
+    const retryCleanup = plan.cancelled && plan.cancellation
+    if (!args.reason && !retryCleanup) {
       const message = serviceIssue ? serviceIssue.message + '。' + serviceIssue.action
         : '计划未取消。整计划取消须关联真实用户消息；已有任务继续，失败项处理原因后明确 retry，中断用 delegation_run 恢复原计划。'
       remember(plan, 'plan.cancellation_rejected', message)
@@ -2438,22 +2535,34 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       await save()
       return { status: serviceIssue ? 'blocked' : planStatus(plan), ...(serviceIssue ? { issue: clone(serviceIssue) } : {}), message, completion }
     }
-    const reason = requireText(args.reason, '取消原因', 2000)
-    const messages = (decisions.get(parent.id)?.messages ?? []).filter(message => !message.withdrawn)
-    const message = messages.at(-1)
-    if (!args.messageId || message?.messageId !== args.messageId || message.messageId === plan.source?.messageId ||
-      message.at < plan.createdAt || message.cancellation) throw new Error('整计划取消必须关联本会话新增的真实用户消息 messageId；主控推测故障或自行填写 reason 不能代替用户取消。单任务失败只处理该任务，中断后用 delegation_run 沿用原计划继续')
-    plan.cancellation = { source: 'user-message', messageId: message.messageId, text: message.text, reason, at: Date.now() }
-    message.cancellation = clone(plan.cancellation)
+    if (!retryCleanup) {
+      const reason = requireText(args.reason, '取消原因', 2000)
+      const messages = (decisions.get(parent.id)?.messages ?? []).filter(message => !message.withdrawn)
+      const message = messages.at(-1)
+      if (!args.messageId || message?.messageId !== args.messageId || message.messageId === plan.source?.messageId ||
+        message.at < plan.createdAt || message.cancellation) throw new Error('整计划取消必须关联本会话新增的真实用户消息 messageId；主控推测故障或自行填写 reason 不能代替用户取消。单任务失败只处理该任务，中断后用 delegation_run 沿用原计划继续')
+      plan.cancellation = { source: 'user-message', messageId: message.messageId, text: message.text, reason, at: Date.now() }
+      message.cancellation = clone(plan.cancellation)
+    }
+    const reason = plan.cancellation.reason
     invalidateCompletion(plan)
     plan.cancelled = true; plan.cancelledBy = 'explicit'; plan.autoDispatch = false; plan.wakeSuppressed = true
-    cancellingPlans.add(plan)
-    try { for (const task of plan.tasks) if (task.status !== 'accepted') {
-      await control({ taskId: task.id, action: 'stop', reason }, exec)
-    } } finally { cancellingPlans.delete(plan) }
-    remember(plan, 'plan.cancelled', '用户明确停止计划：' + reason, undefined, { cancellation: clone(plan.cancellation) })
-    finishPlan(plan)
-    await save(); return { status: 'cancelled', completion: plan.completion ?? null }
+    // Abort all activations before awaiting cleanup or storage; one failure cannot skip a sibling.
+    for (const task of plan.tasks) requestTaskStop(plan, task, reason)
+    updateCancellationCleanup(plan)
+    const operation = Promise.resolve().then(async () => {
+      let saveError
+      try { await save() } catch (error) { saveError = error }
+      await Promise.all(plan.tasks.filter(task => task.status !== 'accepted').map(task => cleanupStoppedTask(plan, task, parent)))
+      updateCancellationCleanup(plan)
+      remember(plan, 'plan.cancelled', '用户取消已记录：' + reason, undefined, { cancellation: clone(plan.cancellation) })
+      finishPlan(plan)
+      try { await save(); saveError = null } catch (error) { saveError = error }
+      if (saveError) throw saveError
+      return { status: 'cancelled', completion: plan.completion ?? null }
+    }).finally(() => cancellingPlans.delete(plan))
+    cancellingPlans.set(plan, operation)
+    return operation
   })
   return {
     ready, snapshot, observe, allowsVerification, decisionFor, decisionCurrent, decisionGuidance, recoverDecision, sourceOf, revisionOf,
@@ -2527,6 +2636,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       for (const waiter of waitingParents.values()) waiter.wake.resolve()
       truncatedOutputs.clear()
       clearTimeout(activityTimer)
+      for (const timer of notificationTimers.values()) clearTimeout(timer)
+      notificationTimers.clear()
       for (const plan of plans.values()) {
         plan.autoDispatch = false
         for (const task of targetsOf(plan)) if (LIVE.includes(task.status)) {
