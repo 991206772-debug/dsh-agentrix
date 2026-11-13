@@ -23,7 +23,7 @@ const workerGate = Promise.withResolvers()
 const activations = new Map()
 let cleanupFixed = false
 let projectInspected = false, projectVersionsInspected = false, projectWorkerReadEntered = false, projectCoordinatorRead = false, projectWorkerSawSupplement = false
-let projectCoordinatorBuilt = false, projectSupplementMessageId
+let projectCoordinatorBuilt = false, projectSupplementMessageId, projectDirectDecisionSubmitted = false
 let projectMisrouteGuarded = false, nativeTeamMessages = 0
 const projectSupplement = '补充要求：继续原任务，并读取 independent.txt 确认内容仍为 verified。'
 const projectDirectory = scenario === 'project-directory' ? path.join(directory, 'project') : directory
@@ -148,6 +148,20 @@ class Adapter extends LlmAdapter {
     } else if (scenario === 'project-directory' && !projectVersionsInspected) {
       projectVersionsInspected = true
       block = tool('delegation_inspect', { operation: 'runtime_versions', directory: projectDirectory })
+    } else if (scenario === 'project-directory' && state.sessions[0]?.pendingMessages?.some(message => message.text === projectSupplement)) {
+      const message = state.sessions[0].pendingMessages.find(message => message.text === projectSupplement)
+      projectSupplementMessageId = message.messageId
+      block = tool('delegation_decide', { relation: 'update', messageId: message.messageId, mode: 'delegate', reason: '先记录新增资料与原委派任务的关联。' })
+    } else if (scenario === 'project-directory' && projectSupplementMessageId && !projectDirectDecisionSubmitted) {
+      assert.equal(task.status, 'running', 'the original worker keeps running when the coordinator records disjoint direct work')
+      projectDirectDecisionSubmitted = true
+      block = tool('delegation_decide', { relation: 'update', messageId: projectSupplementMessageId, mode: 'direct',
+        reason: '独立 app 由主控处理；原执行者继续核对 owned.txt，保持原范围与验收。' })
+    } else if (scenario === 'project-directory' && projectSupplementMessageId && !plan.inputs?.some(input => input.id === projectSupplementMessageId && input.status === 'forwarded')) {
+      assert.equal(state.sessions[0].decision.mode, 'direct', 'the current coordinator decision records direct work')
+      assert.equal(plan.decision.mode, 'delegate', 'the existing plan retains its delegated execution decision')
+      block = tool('delegation_control', { action: 'steer', taskId: 'a', inputIds: [projectSupplementMessageId], message: '按补充继续原任务，不重新开始。',
+        additionalCriteria: ['补充要求已交原执行者；independent.txt 实际读取仍包含 verified。'] })
     } else if (scenario === 'project-directory' && !projectCoordinatorBuilt) {
       assert.equal(task.status, 'running', 'the original worker remains active while the coordinator builds a disjoint app directory')
       assert.ok(projectWorkerReadEntered)
@@ -155,13 +169,6 @@ class Adapter extends LlmAdapter {
       block = tool('delegation_execute', { tool: 'pwsh', writes: ['app'], arguments: { workdir: projectDirectory,
         description: '搭建独立应用目录',
         command: "New-Item -ItemType Directory -Path './app' -Force | Out-Null; Set-Content -LiteralPath './app/probe.txt' -Value 'coordinator-built' -NoNewline" } })
-    } else if (scenario === 'project-directory' && state.sessions[0]?.pendingMessages?.some(message => message.text === projectSupplement)) {
-      const message = state.sessions[0].pendingMessages.find(message => message.text === projectSupplement)
-      projectSupplementMessageId = message.messageId
-      block = tool('delegation_decide', { relation: 'continue', messageId: message.messageId })
-    } else if (scenario === 'project-directory' && projectSupplementMessageId && !plan.inputs?.some(input => input.id === projectSupplementMessageId && input.status === 'forwarded')) {
-      block = tool('delegation_control', { action: 'steer', taskId: 'a', inputIds: [projectSupplementMessageId], message: '按补充继续原任务，不重新开始。',
-        additionalCriteria: ['补充要求已交原执行者；independent.txt 实际读取仍包含 verified。'] })
     } else if (scenario === 'project-directory' && plan.inputs?.some(input => input.status === 'forwarded') && !projectCoordinatorRead) {
       projectCoordinatorRead = true
       block = tool('read', { file_path: independent })
@@ -280,7 +287,12 @@ try {
     projectMisrouteGuarded = true
     parent.steer(createUserMessage({ content: [{ type: 'text', text: projectSupplement }], source: { kind: 'user' } }))
   }
-  await until(() => events.some(event => event.sessionId === 'root' && event.type === 'turn/end') && parent.status === 'idle', 'coordinator settled')
+  try {
+    await until(() => events.some(event => event.sessionId === 'root' && event.type === 'turn/end') && parent.status === 'idle', 'coordinator settled')
+  } catch (error) {
+    if (scenario !== 'project-directory') throw error
+    throw new Error(error.message + '\n' + JSON.stringify({ phases: [...phases], events: events.slice(-15), state: await requestState() }))
+  }
   const result = await requestState()
   assert.equal(result.runtimeBuild, RUNTIME_BUILD)
   assert.equal(result.executionPolicyVersion, 1)
@@ -309,7 +321,7 @@ try {
     assert.equal(parent.session.header.cwd, directory)
     assert.deepEqual(plan.tasks[0].writes, [output])
     assert.equal([...activations.values()][0].request.cwd, projectDirectory)
-    assert.equal(plan.completion.outcome, 'completed', JSON.stringify({ checks: plan.tasks[0].checks, task: plan.tasks[0].error, issue: plan.tasks[0].issue,
+    assert.equal(plan.completion?.outcome, 'completed', JSON.stringify({ checks: plan.tasks[0].checks, task: plan.tasks[0].error, issue: plan.tasks[0].issue,
       errors: events.filter(event => event.type === 'tool/result' && event.data.message?.isError).map(event => event.data.message.content) }))
     assert.equal(plan.delivery.files[0].path, output)
     assert.equal(plan.tasks[0].checks[0].arguments.file_path, output)
@@ -326,7 +338,9 @@ try {
     assert.equal(plan.inputs[0].status, 'forwarded')
     assert.equal(plan.inputs[0].taskId, 'a')
     assert.equal(plan.inputs[0].id, projectSupplementMessageId)
-    assert.equal(plan.messageResolution.relation, 'continue')
+    assert.equal(plan.messageResolution.relation, 'update')
+    assert.equal(result.sessions[0].decision.mode, 'direct')
+    assert.equal(plan.decision.mode, 'delegate')
     assert.equal(plan.tasks[0].attempts, 1)
     assert.ok(ctx.tools.schemas(parent).some(tool => tool.name === 'send_message'), 'completion restores the native Team messaging entry point')
     const completedPrompt = await ctx.systemPrompt.assemble({ agent: parent, scope: parent,

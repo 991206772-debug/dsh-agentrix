@@ -1173,7 +1173,7 @@ export function apply(ctx) {
             const decision = orchestration.decisionFor(agentId)
             const messages = orchestration.pendingMessages(agentId)
             const pending = messages.length && !summary ? '待关联用户消息（仅事实，尚未归属需求）：' + messages.map(message => message.messageId + '：' + message.text.slice(0, 180)).join('；') + '。新委派用 delegation_plan({relation,decisionReason,start:true,...}) 同时关联并派发；直接执行或多条消息分别关联才用 delegation_decide，不能按字数猜测。' : ''
-            const choice = orchestration.decisionCurrent(agentId) ? '本需求已记录执行方式：' + decision.mode + '。范围未变无需重复记录。'
+            const choice = orchestration.decisionCurrent(agentId) ? '主控当前阶段已记录执行方式：' + decision.mode + '。已确认的原委派计划继续监督验收，不因当前阶段 direct 而取消或接管；范围未变无需重复记录。'
               : current.mode === 'auto' ? '当前判断尚未记录；auto 普通操作可直接执行，主控用 delegation_decide 补充真实理由。委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run。'
                 : '本需求尚未记录判断或范围已补充；新委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run；直接执行先记录 direct。'
             const checks = orchestration.checkGuidance(agentId)

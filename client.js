@@ -268,6 +268,14 @@ window.__ModuleLoader__.load({
       return source?.messageId && source.messageId !== plan?.source?.messageId ? null : plan
     }
 
+    function planDecisionState(plan, session) {
+      if (!plan) return session
+      const requestId = plan.source?.messageId, decision = session?.decision
+      return requestId && !plan.completion && !plan.cancelled && !['accepted', 'cancelled'].includes(plan.status) && session?.source?.messageId === requestId && decision
+        && (!decision.requestId || decision.requestId === requestId)
+        && (!Number.isFinite(plan.decision?.at) || !Number.isFinite(decision.at) || decision.at >= plan.decision.at) ? session : plan
+    }
+
     /**
      * One source of truth for the P0 acceptance page. The header badge, the
      * conclusion card, the "next step" line and the task list all derive from
@@ -727,6 +735,7 @@ window.__ModuleLoader__.load({
       'decision.revised': '需求已补充，等待主控更新判断', 'decision.notStarted': '已决定委派，尚未启动子代理', 'decision.at': '判断时间',
       'decision.previous': '上次执行判断', 'decision.previousComplete': '上次委派已完成。', 'decision.previousEnded': '上次委派已结束。',
       'decision.currentDirect': '当前由主控直接处理；当前阶段的执行判断尚未更新。',
+      'decision.plan': '建计划时的判断', 'decision.concurrent': '主控直接处理当前工作，原委派任务继续保留，仍须监督和验收。',
       'view.modelNoPlanHint': '主控按上下文判断是否委派；程序展示已记录的决定和实际活动。没有托管计划时，不会显示子代理进度或验收回执。', 'relation.title': '消息与需求的关联', 'relation.pending': '待主控确认消息关联', 'relation.new': '新需求', 'relation.continue': '继续原需求',
       'relation.update': '补充原需求或调整方案', 'relation.question': '询问进度或普通提问，沿用原需求',
       'direct.unavailable': '委派入口不可用', 'direct.checkPlugin': '请检查 DSH Agentrix 插件是否启用，以及宿主的子代理功能是否可用；当前没有通过这些入口启动协作。',
@@ -760,6 +769,7 @@ window.__ModuleLoader__.load({
       'decision.revised': 'Request updated; waiting for a revised decision', 'decision.notStarted': 'Delegation chosen; no child agent has started', 'decision.at': 'Decision time',
       'decision.previous': 'Previous execution decision', 'decision.previousComplete': 'The previous delegation is complete.', 'decision.previousEnded': 'The previous delegation has ended.',
       'decision.currentDirect': 'The coordinator is now handling work directly; the execution decision for this stage has not been updated.',
+      'decision.plan': 'Decision when planning', 'decision.concurrent': 'The coordinator handles the current work directly. Existing delegated tasks remain in place and still require supervision and acceptance.',
       'view.modelNoPlanHint': 'The coordinator decides from context; the plugin shows its recorded choice and observed activity. Without a managed plan there is no child progress or acceptance receipt.', 'relation.title': 'Message relationship', 'relation.pending': 'Waiting for coordinator to classify the message', 'relation.new': 'New request', 'relation.continue': 'Continue the current request',
       'relation.update': 'Update the current scope or approach', 'relation.question': 'Progress inquiry or question; keep the current request',
       'direct.unavailable': 'Delegation tools unavailable', 'direct.checkPlugin': 'Check that DSH Agentrix is enabled and the host supports subagents. These entry points have not started collaboration.',
@@ -1726,9 +1736,11 @@ window.__ModuleLoader__.load({
         state?.checkpoint?.summary ? h('p', null, t('supervision.stage') + '：' + state.checkpoint.summary) : null)
     }
 
-    function ChatLiveProgress({ t, plan, openView, error }) {
+    function ChatLiveProgress({ t, plan, state, openView, error }) {
       const tasks = plan?.tasks ?? [], accepted = tasks.filter(task => task.status === 'accepted').length
       if (!tasks.length || plan.completion || accepted === tasks.length && plan.protocolVersion < 2) return null
+      const decisionState = planDecisionState(plan, state)
+      const concurrent = decisionState !== plan && decisionState.decision?.mode === 'direct' && plan.decision?.mode === 'delegate'
       const live = task => ['starting', 'running'].includes(task.status)
       const running = tasks.filter(task => live(task) || live(task.audit ?? {})).length
       const waiting = tasks.filter(task => task.status === 'queued' || task.audit?.status === 'queued').length
@@ -1783,7 +1795,9 @@ window.__ModuleLoader__.load({
               h(ChatPlanProblem, { t, plan, problem, compact: true, ownerId: task.id })))
         })),
         h('details', { className: 'ddf-chat-task-decision' }, h('summary', null, t('dock.decision')),
-          h(DecisionDetails, { t, decision: plan.decision, current: plan.decisionCurrent !== false, resolution: plan.messageResolution, pending: plan.pendingMessages })),
+          h(DecisionDetails, { t, decision: decisionState.decision, current: decisionState.decisionCurrent !== false, resolution: decisionState.messageResolution, pending: decisionState.pendingMessages }),
+          concurrent ? h('p', { className: 'ddf-chat-live-meta' }, t('decision.concurrent')) : null,
+          concurrent ? h(DecisionDetails, { t, decision: plan.decision, label: 'decision.plan', current: true }) : null),
         typeof openView === 'function' ? h('button', { type: 'button', className: 'ddf-chat-notice-action',
           onClick: () => openView(VIEW_ID) }, t('view.details')) : null)
     }
@@ -1836,7 +1850,7 @@ window.__ModuleLoader__.load({
       if (!latest || !sessionId) return null
       const plan = currentPlanOf(result.data, sessionId)
       if (!plan) return null
-      if (!plan.completion) return h(ChatPlanNotice, { t, plan, openView, error: result.error })
+      if (!plan.completion) return h(ChatPlanNotice, { t, plan, state: result.data?.sessions?.find(item => item.sessionId === sessionId), openView, error: result.error })
       if (plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled) return null
       return h(CompletionReceipt, { t, plan, state: result.data })
     }
@@ -1908,7 +1922,7 @@ window.__ModuleLoader__.load({
         }
         if (tasks.length) indicators.push({ kind: 'accepted', text: t('dock.accepted') + ' ' + done + '/' + tasks.length,
           prefix: t('dock.accepted'), value: done + '/' + tasks.length })
-        content = h(ChatPlanNotice, { t, plan, error: result.error })
+        content = h(ChatPlanNotice, { t, plan, state, error: result.error })
         tone = serviceProblem(plan) || ['failed', 'blocked'].includes(status) ? 'service' : chatProblem(plan) || plan.coordinationIssue && !plan.coordinationIssue.resolvedAt ? 'supervision' : 'progress'
       } else {
         summary = failures.length ? t(execution.running ? 'dock.repairing' : 'direct.incomplete') : t('dock.coordinator')
@@ -1942,11 +1956,11 @@ window.__ModuleLoader__.load({
           : resolution ? h('p', { className: 'ddf-chat-live-meta' }, t('relation.title') + '：' + t('relation.' + resolution.relation)) : null)
     }
 
-    function DecisionDetails({ t, decision, current = true, preparing = false, historical = false, resolution, pending = [] }) {
+    function DecisionDetails({ t, decision, current = true, preparing = false, historical = false, label, resolution, pending = [] }) {
       if (!decision) return h('div', { className: 'ddf-decision' }, h(AssociationDetails, { t, resolution, pending }), h('p', { className: 'ddf-chat-live-meta' }, t(preparing ? 'decision.pending' : 'decision.unrecorded')))
       return h('div', { className: 'ddf-decision' },
         h(AssociationDetails, { t, resolution, pending }),
-        h('p', { className: 'ddf-decision-choice' }, t(historical ? 'decision.previous' : 'decision.title') + '：' + t('decision.' + decision.mode)),
+        h('p', { className: 'ddf-decision-choice' }, t(label || (historical ? 'decision.previous' : 'decision.title')) + '：' + t('decision.' + decision.mode)),
         !current && !pending.length ? h('p', null, t('decision.revised')) : null,
         h('p', null, t('decision.reason') + '：' + decision.reason),
         h('p', { className: 'ddf-chat-live-meta' }, decision.model?.model || '—',
@@ -2009,13 +2023,13 @@ window.__ModuleLoader__.load({
         nextAction ? h('p', { className: 'ddf-coordination-next' }, h('strong', null, t('view.next') + '：'), nextAction) : null)
     }
 
-    function ChatPlanNotice({ t, plan, openView, error }) {
+    function ChatPlanNotice({ t, plan, state, openView, error }) {
       return h('div', null,
-        h(CoordinationIssueNotice, { t, plan }), h(ChatPlanBody, { t, plan, openView, error }))
+        h(CoordinationIssueNotice, { t, plan }), h(ChatPlanBody, { t, plan, state, openView, error }))
     }
 
-    function ChatPlanBody({ t, plan, openView, error }) {
-      const progress = h(ChatLiveProgress, { t, plan, openView, error })
+    function ChatPlanBody({ t, plan, state, openView, error }) {
+      const progress = h(ChatLiveProgress, { t, plan, state, openView, error })
       if (plan?.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled) return h('div', null, progress, h(ServiceIssueNotice, { t, issue: plan.coordinatorIssue }))
       return plan?.tasks?.length ? progress : h(ChatPlanProblem, { t, plan, problem: chatProblem(plan), openView, error })
     }
@@ -2500,7 +2514,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'ddf-card-title' }, t('view.details')),
         plan.activationBudget ? h('p', { className: 'ddf-hint' }, fill(t('plans.activationBudget'), plan.activationBudget)) : null,
         plan.routing ? h('p', { className: 'ddf-hint' }, routeEstimate(t, plan.routing)) : null,
-        h(DecisionDetails, { t, decision: plan.decision, current: plan.decisionCurrent !== false, resolution: plan.messageResolution, pending: plan.pendingMessages }),
+        h(DecisionDetails, { t, decision: plan.decision, label: 'decision.plan', current: plan.decisionCurrent !== false, resolution: plan.messageResolution, pending: plan.pendingMessages }),
         h('details', { className: 'ddf-details' }, h('summary', null, t('view.source')),
           h('div', { className: 'ddf-task-body' },
             h('pre', null, plan.source?.text || t('view.unknownSource')),
@@ -2734,8 +2748,10 @@ window.__ModuleLoader__.load({
       const route = plan?.routing ?? session?.route
       const semantic = session?.requestBindingVersion >= 2
       const pending = session?.pendingMessages ?? []
-      const decision = plan ? plan.decision : session?.decision
-      const decisionCurrent = (plan ? plan.decisionCurrent : session?.decisionCurrent) !== false
+      const decisionState = planDecisionState(plan, session)
+      const decision = decisionState?.decision
+      const decisionCurrent = decisionState?.decisionCurrent !== false
+      const concurrent = plan && decisionState !== plan && decision?.mode === 'direct' && plan.decision?.mode === 'delegate'
       const difficulty = session?.difficulty, level = levelKey(difficulty)
       const tasks = plan?.tasks ?? []
       const complex = tasks.some(task => task.complexity === 'complex')
@@ -2767,6 +2783,7 @@ window.__ModuleLoader__.load({
             h('div', null, h('h2', null, t('decision.title')),
               h('strong', { className: 'ddf-board-decision-route' }, t(decision ? 'decision.' + decision.mode : 'decision.unrecorded')),
               decision ? h('p', { className: 'ddf-board-decision-note' }, decision.reason) : null,
+              concurrent ? h('p', { className: 'ddf-board-decision-note' }, t('decision.concurrent')) : null,
               !decisionCurrent && decision && !pending.length ? h('p', { className: 'ddf-board-decision-note' }, t('decision.revised')) : null,
               plan && semantic ? h(AssociationDetails, { t, resolution: session.messageResolution, pending }) : null,
               plan ? h('p', { className: 'ddf-board-decision-note' }, t(tasks.some(task => requiresAudit(task) || task.audit) ? 'view.complexAudit' : 'view.routineAcceptance')) : null),
@@ -3330,7 +3347,8 @@ window.__ModuleLoader__.load({
       const session = state?.sessions?.find(item => item.sessionId === sessionId), request = session?.source
       const route = plan?.routing || session?.route, sessionTitle = plan?.sessionTitle || session?.sessionTitle
       const execution = request?.messageId && session?.execution?.requestId && session.execution.requestId !== request.messageId ? null : session?.execution
-      const decision = (plan?.decision ?? (request?.messageId && session?.decision?.requestId && session.decision.requestId !== request.messageId ? null : session?.decision))
+      const decision = plan ? planDecisionState(plan, session)?.decision
+        : request?.messageId && session?.decision?.requestId && session.decision.requestId !== request.messageId ? null : session?.decision
       const receipt = plan?.completion
       // The single state source drives the badge, conclusion card, next step and
       // task list. While a load has not succeeded, only the load notice shows.

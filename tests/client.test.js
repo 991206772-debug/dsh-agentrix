@@ -954,6 +954,43 @@ test('an active managed worker stays visible when the current turn has no new di
   } finally { dock.close(); f.close() }
 })
 
+test('a current direct phase is shown alongside its still-running delegated plan without replacing its dispatch decision', async () => {
+  const request = { messageId: 'mixed-development-request', text: '后端委派，新增角色由主控实现' }
+  const plan = { sessionId: 'session-current', protocolVersion: 2, source: request, status: 'running', completion: null,
+    decision: { mode: 'delegate', reason: '后端接口交给原执行者实现。', requestId: request.messageId, at: 100 },
+    tasks: [{ id: 'backend', title: '后端接口', status: 'running', attempts: 1, childId: 'original-backend' }] }
+  const row = { sessionId: plan.sessionId, source: request, decisionCurrent: true,
+    decision: { mode: 'direct', reason: '新增角色前端已掌握上下文，由主控直接完成。', requestId: request.messageId, at: 200 },
+    turnStats: { direct: 3, delegated: 0, denied: 0 }, execution: { running: true, startedAt: 200, toolCalls: 3,
+      activity: { kind: 'tool', tool: 'write' }, unresolvedChanges: [] } }
+  const before = JSON.stringify({ plan, row })
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone({ ok: true,
+    sessionId: plan.sessionId, plans: [plan], sessions: [row] }) }) })
+  const dock = f.mountDock(plan.sessionId), notice = f.mountNotice(plan.sessionId), view = f.mountView(plan.sessionId)
+  try {
+    await dock.flush(); await notice.flush(); await view.flush()
+    for (const surface of [dock, notice]) {
+      assert.match(surface.text(), /主控决定.*直接执行/)
+      assert.ok(surface.text().includes(row.decision.reason))
+      assert.match(surface.text(), /原委派任务继续/)
+      assert.match(surface.text(), /建计划时的判断.*委派/)
+      assert.ok(surface.text().includes(plan.decision.reason))
+      assert.match(surface.text(), /后端接口.*执行中/)
+      assert.doesNotMatch(surface.text(), /尚未启动子代理|上次委派已完成/)
+    }
+    const main = view.nodes('div').find(node => node.props?.className === 'ddf-board-decision-main')
+    assert.match(flatten(main), /主控决定.*直接执行/)
+    assert.ok(flatten(main).includes(row.decision.reason))
+    assert.match(flatten(main), /原委派任务继续/)
+    assert.equal(JSON.stringify({ plan, row }), before, 'displaying concurrent work must preserve the dispatch decision and worker identity')
+    row.decision.requestId = 'other-request'
+    await dock.tick(); await notice.tick()
+    for (const surface of [dock, notice]) {
+      assert.ok(!surface.text().includes(row.decision.reason), 'another request cannot replace the retained plan decision')
+    }
+  } finally { dock.close(); notice.close(); view.close(); f.close() }
+})
+
 test('coordinator overview groups observed activity, model and tool calls separately from its decision and request', async () => {
   const row = { sessionId: 'session-current', source: { messageId: 'request', text: '核对接口文档并准备调试工具' },
     decision: { mode: 'direct', reason: '先核对接口与现有代码，再确定实施范围。', model: { model: 'previous/coordinator' } },

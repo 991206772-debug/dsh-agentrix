@@ -524,7 +524,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
           : decision.mode === 'delegate' ? '为当前需求调用 delegation_plan({decisionReason,start:true,...}) 建立并启动计划；旧计划回执不代表当前需求已完成。'
             : '按已确认的当前需求直接处理并验证；旧计划回执不代表当前需求已完成。' }
     }
-    if (interruptedPlan(plan) && !pendingMessages(plan.sessionId).length && (!decisionCurrent(plan.sessionId) || decisionFor(plan.sessionId)?.mode !== 'delegate')) return { type: 'decide', message: '继续消息已关联，但旧判断不是委派。请用 delegation_decide(relation:continue,mode:delegate,reason:监督原托管任务的具体理由) 确认继续原计划，无需改成 update 或重建任务卡。' }
+    if (interruptedPlan(plan) && !pendingMessages(plan.sessionId).length && !planDelegationCurrent(plan)) return { type: 'decide', message: '继续消息已关联，但原计划尚无有效委派判断。请用 delegation_decide(relation:continue,mode:delegate,reason:监督原托管任务的具体理由) 确认继续原计划，无需改成 update 或重建任务卡。' }
     if (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt) return { type: 'run', message: '执行已中断，进度保留。用户明确继续后调用 delegation_run，沿用原计划恢复未完成任务；已返回报告继续验证验收，不必新建计划。' }
     if (plan.cancelled && plan.cancellation?.cleanup?.status !== 'completed' && plan.cancellation?.cleanup) return {
       type: 'handle_failure', message: '用户取消已记录，资源清理未完成。处理清理错误后再次调用 delegation_cancel 重试清理；无需新增取消消息，不启动新代理。' }
@@ -1202,6 +1202,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const decision = decisionFor(sessionId)
     return Boolean(decision && !pendingMessages(sessionId).length && decision.revisionId === revisionOf(sessionId)?.messageId)
   }
+  function planDelegationCurrent(plan) {
+    return isCurrentPlan(plan) && decisionCurrent(plan.sessionId) && plan.decision?.mode === 'delegate'
+  }
   function decisionGuidance(sessionId) {
     const pending = pendingMessages(sessionId), source = sourceOf(sessionId)
     return [
@@ -1253,7 +1256,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const source = relation === 'new' || !entry.source ? message ? { messageId: message.messageId, text: message.text } : getSource(parent.id) : entry.source
     if (!source?.messageId) throw new Error('尚未取得当前需求编号，请先接收用户需求后记录判断')
     const revision = ['new', 'update'].includes(relation) ? message ? { messageId: message.messageId, text: message.text } : source : entry.revision ?? source
-    if (changes && relation !== 'new' && args.mode === 'direct' && plan && !['accepted', 'cancelled'].includes(planStatus(plan))) throw new Error('托管计划尚未结束，请监督、返工或明确取消，不能同时改为主控重复实现')
+    if (changes && relation !== 'new' && args.mode === 'direct' && plan?.source?.messageId === source.messageId &&
+      !['accepted', 'cancelled'].includes(planStatus(plan)) && plan.decision?.mode !== 'delegate') throw new Error('原计划尚无有效委派判断，不能同时改为主控重复实现；独立工作可另行关联，启动原计划仍须确认委派')
     const model = coordinatorModel(parent, 0, 'decision'), at = Date.now()
     const decision = changes ? { mode: args.mode, reason, requestId: source.messageId, revisionId: revision.messageId, at, model } : entry.decision ?? null
     const resolution = { messageId: message?.messageId ?? revision.messageId, requestId: source.messageId, relation, at, model, ...(reason ? { reason } : {}) }
@@ -1265,7 +1269,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     decisions.set(parent.id, next); decisionWrites.add(parent.id)
     const previousPlanDecision = plan?.decision, previousResolution = plan?.messageResolution, previousInputs = clone(plan?.inputs ?? null), previousUsage = usageLedger.snapshot()
     if (plan?.source?.messageId === source.messageId) {
-      if (changes) plan.decision = clone(decision)
+      if (changes && decision.mode === 'delegate' && plan.decision?.mode !== 'delegate') plan.decision = clone(decision)
       plan.messageResolution = clone(resolution)
       if (message && relation === 'update' && message.messageId !== plan.source.messageId) {
         plan.inputs ??= []
@@ -1292,7 +1296,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (message && coordinatorUsage.get(parent.id)?.messageId === message.messageId) coordinatorUsage.set(parent.id, { entry: usageFor(parent.id) })
     onRequestResolved(parent.id, clone(next))
     if (message && relation === 'continue' && plan?.source?.messageId === source.messageId && interruptedPlan(plan) &&
-      decisionCurrent(parent.id) && decisionFor(parent.id)?.mode === 'delegate') await runPlan({}, exec)
+      planDelegationCurrent(plan)) await runPlan({}, exec)
     return { decision: clone(decision), source: clone(source), messageResolution: clone(resolution), pendingMessages: clone(pendingMessages(parent.id)) }
   }
   function taskOf(plan, id) {
@@ -2311,7 +2315,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         issue: error.issue ?? { code: 'MODEL_ROUTE_CHECK_FAILED', source: 'model-resolution', message: messageOf(error) } }
     }
   })
-  routeTool('delegation_decide', '主控确认消息关联：new 新需求、continue 继续、update 调整、question 提问。新需求/方案变化给出 direct/delegate 和理由；继续沿用原决定。恢复原托管计划时如旧判断为 direct，可在 continue 中提供 mode:delegate 和具体 reason 修正，无需 update 或重建任务卡。多条真实消息须逐条用 messageId 关联，全部处理后才自动接续。', {
+  routeTool('delegation_decide', '主控确认消息关联：new 新需求、continue 继续、update 调整、question 提问。新需求/方案变化给出 direct/delegate 和理由；继续沿用原决定。已有确认的委派计划时，update direct 仅记录主控当前独立工作，原执行者、计划委派依据和验收要求继续保留，不接管其写入范围；补充涉及原执行者时仍须 steer 或 acknowledge。恢复原计划使用其已确认的委派依据；缺失时可在 continue 中提供 mode:delegate 和具体 reason 修正。多条真实消息须逐条用 messageId 关联，全部处理后才自动接续。', {
     relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'] }, messageId: string,
     mode: { type: 'string', enum: ['direct', 'delegate'] }, reason: { type: 'string', description: '新需求或方案变化时说明已有上下文、委派收益与准备、汇报、验收开销的取舍，不能只复述角色分工；最多 500 字。继续和进度询问沿用原判断。' },
   }, [], recordDecision)
@@ -2529,8 +2533,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         const directory = await planDirectory(args, parent, [])
         if (!previous.cwd || normalizedPath(directory) !== normalizedPath(previous.cwd)) throw new Error('继续已有计划不能更换工程目录；请沿用原目录和任务卡')
       }
-      if (args.decisionReason !== undefined) await recordDecision({ mode: 'delegate', reason: args.decisionReason, relation: 'continue', messageId: args.messageId }, exec)
-      if (args.start && !previous.autoDispatch && decisionCurrent(parent.id) && decisionFor(parent.id)?.mode === 'delegate') return runPlan({}, exec)
+      if (args.decisionReason !== undefined) await recordDecision({ mode: isCurrentPlan(previous) && previous.decision?.mode === 'delegate' ? decisionFor(parent.id)?.mode ?? 'delegate' : 'delegate', reason: args.decisionReason, relation: 'continue', messageId: args.messageId }, exec)
+      if (args.start && !previous.autoDispatch && planDelegationCurrent(previous)) return runPlan({}, exec)
       return { plan: snapshotPlan(previous) }
     }
     if (previous?.cancellation?.cleanup && previous.cancellation.cleanup.status !== 'completed') throw new Error('原计划资源清理未完成；处理原因后再次 delegation_cancel 清理，不能覆盖原计划')
@@ -2566,7 +2570,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const { plan, parent } = ownPlan(exec)
     await interrupting.get(plan.sessionId)
     exec.signal?.throwIfAborted()
-    if (getConfig().enabled && plan.decisionProtocolVersion >= 1 && (!decisionCurrent(parent.id) || decisionFor(parent.id).mode !== 'delegate')) throw new Error('启动前请用 delegation_decide 记录 delegate 和具体理由，再自动继续 delegation_run；建计划时可用 decisionReason 一并记录')
+    if (getConfig().enabled && plan.decisionProtocolVersion >= 1 && !planDelegationCurrent(plan)) throw new Error('启动前请用 delegation_decide 关联当前需求与待处理消息，并确认原计划的 delegate 和具体理由；新计划不能借用旧计划判断，建计划时可用 decisionReason 一并记录')
     if (plan.cancelled && plan.cancelledBy === 'host' && !plan.cancellation) {
       plan.cancelled = false; plan.cancelledBy = null
       plan.interruption = { source: 'host', at: Date.now(), reason: '沿用原计划恢复旧版本记录的宿主中断' }
