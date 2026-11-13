@@ -28,7 +28,7 @@ const projectDirectory = scenario === 'project-directory' ? path.join(directory,
 const output = path.join(projectDirectory, 'owned.txt'), independent = path.join(directory, 'independent.txt')
 let parent, handle, sequence = 0, requestCount = 0, fault = false, runsFile, closing = false
 ctx.provide('webServer', { register(route) { routes.set(route.path, route.handler); return () => routes.delete(route.path) } })
-ctx.provide('workingDirectory', { get: () => directory, async ensure() { return directory }, async set() {} })
+if (scenario !== 'project-directory') ctx.provide('workingDirectory', { get: () => directory, async ensure() { return directory }, async set() {} })
 for (const [module, name] of [['dsh-session-projection', 'SessionProjectionRegistry'], ['dsh-session', 'SessionStore'],
   ['dsh-agent', 'AgentRegistry'], ['dsh-system-prompt', 'SystemPrompt'], ['dsh-llm', 'LlmRuntime'],
   ['dsh-agent-loop', 'AgentLoop'], ['dsh-subagent', 'SubagentRuntime']]) ctx.plugin((await native(module))[name])
@@ -36,6 +36,8 @@ ctx.plugin(ToolRuntime)
 if (scenario === 'delivery-persistence') ctx.plugin(await native('dsh-session-persistence-jsonl'), { root: path.join(directory, 'sessions'), compression: 'none' })
 ctx.plugin(await native('dsh-subagent-spawn-in-process'))
 if (scenario === 'project-directory') {
+  ctx.plugin((await native('dsh-fs-local')).default, { cwd: directory })
+  ctx.plugin((await native('dsh-working-directory')).default, { defaultDirectory: directory })
   ctx.plugin((await native('dsh-subprocess-local')).default)
   ctx.plugin((await native('dsh-pwsh-local')).default, { cwd: directory })
   ctx.plugin(await native('dsh-shell-env'))
@@ -202,6 +204,12 @@ try {
   }
   ctx.subagents.startActivation = async (...args) => {
     const receipt = await start(...args), dispose = receipt.dispose.bind(receipt)
+    if (scenario === 'project-directory') {
+      const session = ctx.sessions.get(receipt.childId)
+      assert.equal(session.header.cwd, directory)
+      assert.equal(ctx.workingDirectory.get(session), projectDirectory)
+      assert.ok(session.snapshotEvents().some(event => event.type === 'working-directory/change' && event.data.cwd === projectDirectory))
+    }
     activations.set(receipt.childId, args[0])
     receipt.dispose = async () => {
       releases.set(receipt.childId, (releases.get(receipt.childId) ?? 0) + 1)

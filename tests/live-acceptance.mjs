@@ -9,9 +9,14 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { apply, RUNTIME_BUILD } from '../index.js'
+import { setupWorkflow, verifyWorkflow } from './live-workflow-fixtures.mjs'
 
 const scenario = process.argv[2] ?? 'direct'
-assert.ok(['direct', 'auto-simple', 'auto-followup', 'auto-readonly', 'parallel-supplement', 'failure-recovery', 'rework', 'cancel-resume'].includes(scenario))
+assert.ok(['direct', 'auto-simple', 'auto-followup', 'auto-readonly', 'parallel-supplement', 'failure-recovery', 'rework', 'cancel-resume', 'workflow-direct', 'workflow-delegate', 'workflow-contracts'].includes(scenario))
+const workflow = scenario.startsWith('workflow-'), delegatedWorkflow = workflow && scenario !== 'workflow-direct'
+const extendedWorkflow = scenario === 'workflow-contracts'
+const explicitDelegation = process.env.AGENTRIX_LIVE_DELEGATION === 'explicit'
+assert.ok(!explicitDelegation || delegatedWorkflow, 'Explicit delegation requires a delegated workflow scenario')
 const simple = ['direct', 'auto-simple', 'auto-followup', 'auto-readonly'].includes(scenario)
 const providerName = process.env.AGENTRIX_PROVIDER, coordinatorModel = process.env.AGENTRIX_COORDINATOR_MODEL, workerModel = process.env.AGENTRIX_WORKER_MODEL
 assert.ok(providerName && coordinatorModel && workerModel, 'Explicit provider, coordinator and worker model selections are required')
@@ -47,6 +52,8 @@ const temporary = await mkdtemp(path.join(os.tmpdir(), 'agentrix-live-'))
 const resolvedTemporary = await realpath(temporary)
 const workspace = path.join(temporary, 'workspace'), home = path.join(temporary, 'home')
 await mkdir(workspace); await mkdir(home)
+const project = workflow ? path.join(workspace, 'project') : workspace
+let workflowFixture, implementationStarted = false, gatedSession, supplementActivationCount
 process.env.DSH_HOME = home
 delete process.env.DSH_DELEGATION_FIRST
 let ctx
@@ -57,15 +64,16 @@ let corruptedAttempt, corruptedTaskId, corruptionEventIndex
 const started = Date.now(), deadline = started + Number(process.env.AGENTRIX_LIVE_TIMEOUT_MS ?? 12 * 60_000)
 const result = { scenario, runtimeBuild: RUNTIME_BUILD, coordinator: providerName + '/' + coordinatorModel, worker: providerName + '/' + workerModel,
   layer: 'installed AgentLoop/ToolRuntime/SubagentRuntime and real pi-ai provider; restricted synthetic filesystem',
-  scriptedModel: false, passed: false, assertions: [] }
+  scriptedModel: false, delegationSelection: explicitDelegation ? 'user-requested' : 'autonomous', passed: false, assertions: [] }
 const contained = (root, target) => { const relative = path.relative(root, target); return !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep) }
-const targetPath = value => {
+const sessionCwd = session => session && ctx?.get('workingDirectory')?.get(session) || session?.header?.cwd || workspace
+const targetPath = (value, exec) => {
   assert.ok(typeof value === 'string' && value, 'file_path is required')
-  return path.resolve(workspace, value)
+  return path.resolve(sessionCwd(exec?.agent?.session), value)
 }
-const writable = value => { const target = targetPath(value); assert.ok(contained(workspace, target), 'Writes must stay in the synthetic workspace'); return target }
-const readable = value => {
-  const target = targetPath(value)
+const writable = (value, exec) => { const target = targetPath(value, exec); assert.ok(contained(workspace, target), 'Writes must stay in the synthetic workspace'); return target }
+const readable = (value, exec) => {
+  const target = targetPath(value, exec)
   assert.ok(contained(workspace, target) || contained(path.join(repository, 'skills'), target) || contained(path.join(home, 'delegation-first'), target),
     'Read is outside the synthetic workspace, its plugin reports and the bundled skills')
   return target
@@ -88,6 +96,7 @@ async function request(endpoint, body) {
 }
 const state = () => request('state')
 const send = text => {
+  ;(result.userMessages ??= []).push({ at: Date.now(), text })
   minimumTurnEnds = events.filter(event => event.sessionId === 'root' && event.type === 'turn/end').length + 1
   return parent.steer(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
 }
@@ -102,10 +111,11 @@ async function launchRuntime(resume = false) {
 ctx = new Context(); routes.clear()
 ctx.provide('launchEnvironment', createLaunchEnvironmentSnapshot([{ source: 'process', values: { [reference]: secret } }]))
 ctx.provide('webServer', { register(route) { routes.set(route.path, route.handler); return () => routes.delete(route.path) } })
-ctx.provide('workingDirectory', { get: () => workspace, async ensure() { return workspace }, async set() {} })
 for (const [module, name] of [['dsh-session-projection', 'SessionProjectionRegistry'], ['dsh-session', 'SessionStore'],
   ['dsh-agent', 'AgentRegistry'], ['dsh-system-prompt', 'SystemPrompt'], ['dsh-llm', 'LlmRuntime'],
   ['dsh-agent-loop', 'AgentLoop'], ['dsh-subagent', 'SubagentRuntime']]) ctx.plugin((await native(module))[name])
+ctx.plugin((await native('dsh-fs-local')).default, { cwd: workspace })
+ctx.plugin((await native('dsh-working-directory')).default, { defaultDirectory: workspace })
 ctx.plugin(ToolRuntime)
 ctx.plugin(await native('dsh-session-persistence-jsonl'), { root: path.join(home, 'sessions'), compression: 'none' })
 // Match the installed base/SDK runtime's provider-owned, bounded request recovery.
@@ -115,17 +125,19 @@ ctx.plugin(await native('dsh-llm-pi-ai'), { providers: { [providerName]: provide
 ctx.plugin((await native('dsh-skill')).default)
 ctx.plugin(await native('dsh-skill-filesystem'), { providerName: 'delegation-first-plugin', includeDefaultRoots: false, bundledSkillDir: path.join(repository, 'skills') })
 ctx.plugin(await native('dsh-tool-skill'))
-  await until(() => ctx.get('agentLoop') && ctx.get('subagents') && ctx.get('llm') && ctx.get('skills') && ctx.get('sessionPersistence'), 'installed native services')
+  await until(() => ctx.get('agentLoop') && ctx.get('subagents') && ctx.get('llm') && ctx.get('skills') && ctx.get('sessionPersistence') && ctx.get('workingDirectory'), 'installed native services')
   ctx.tools.setExecutor(new NativeToolExecutor(ctx))
-  ctx.systemPrompt.section({ name: 'acceptance-workspace', order: 10, text: () =>
-    `你是软件工程助手。当前工作目录：${workspace}。根据用户目标自行选择工具并完成验证。文件工具只允许访问当前隔离工作目录和插件自带技能。按实际工具schema调用。需要帮助或遇到无法解决的错误时如实报告。` })
+  ctx.systemPrompt.context({ name: 'acceptance-workspace', order: 10, required: true, interpolate: false, text: context =>
+    `你是软件工程助手。当前工作目录：${sessionCwd(context?.agent?.session)}。根据用户目标自行选择工具并完成验证。文件工具只允许访问隔离工作区 ${workspace} 和插件自带技能。按实际工具schema调用。需要帮助或遇到无法解决的错误时如实报告。` })
   const register = (name, description, parameters, execute) => ctx.tools.register(defineTool({ name, description, parameters,
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     async execute(args, exec) {
-      activities.push({ at: Date.now(), sessionId: exec.agent.id, tool: name, arguments: structuredClone(args), callId: exec.callId })
-      const gatedFiles = scenario === 'parallel-supplement' ? ['fruit.json', 'fruit.txt'] : scenario === 'cancel-resume' ? ['a.json', 'a.txt'] : []
-      if (gatedFiles.includes(path.basename(args.file_path ?? '')) && exec.agent.id !== 'root' && !supplementSent && !gateEntered) {
-        gateEntered = true
+      activities.push({ at: Date.now(), sessionId: exec.agent.id, cwd: sessionCwd(exec.agent.session), tool: name, arguments: structuredClone(args), callId: exec.callId })
+      const gatedFiles = workflow && implementationStarted ? workflowFixture.gatedFiles : scenario === 'parallel-supplement' ? ['fruit.json', 'fruit.txt'] : scenario === 'cancel-resume' ? ['a.json', 'a.txt'] : []
+      if (gatedFiles.includes(path.basename(args.file_path ?? '')) &&
+        (!workflow || targetPath(args.file_path, exec) === path.join(project, path.basename(args.file_path))) &&
+        (explicitDelegation ? exec.agent.id !== 'root' : workflow || exec.agent.id !== 'root') && !supplementSent && !gateEntered) {
+        gateEntered = true; gatedSession = exec.agent.id
         await Promise.race([gate.promise, new Promise((_, reject) => {
           if (exec.signal.aborted) reject(exec.signal.reason)
           else exec.signal.addEventListener('abort', () => reject(exec.signal.reason), { once: true })
@@ -135,44 +147,64 @@ ctx.plugin(await native('dsh-tool-skill'))
     } }))
   register('read', '读取UTF-8文本文件，file_path可为当前目录相对路径或绝对路径。', {
     file_path: { type: 'string', required: true }, offset: { type: 'integer' }, limit: { type: 'integer' } }, async (args, exec) => {
-    const target = readable(args.file_path)
+    const target = readable(args.file_path, exec)
     const text = await readFile(target, 'utf8'), lines = text.split('\n')
-    return { file_path: target, text: lines.slice(args.offset ?? 0, args.limit ? (args.offset ?? 0) + args.limit : undefined).join('\n') }
+    const offset = Math.max(0, (args.offset ?? 1) - 1)
+    return { file_path: target, text: lines.slice(offset, args.limit ? offset + args.limit : undefined).join('\n') }
   })
   register('write', '写入UTF-8文本文件，只能写当前任务目录。', {
-    file_path: { type: 'string', required: true }, content: { type: 'string', required: true } }, async args => {
-    const target = writable(args.file_path); await mkdir(path.dirname(target), { recursive: true }); await writeFile(target, args.content)
+    file_path: { type: 'string', required: true }, content: { type: 'string', required: true } }, async (args, exec) => {
+    const target = writable(args.file_path, exec); await mkdir(path.dirname(target), { recursive: true }); await writeFile(target, args.content)
     return { file_path: target, written: true }
   })
   register('edit', '精确替换文本文件中的一处内容，找不到old_string时报错。', {
-    file_path: { type: 'string', required: true }, old_string: { type: 'string', required: true }, new_string: { type: 'string', required: true } }, async args => {
-    const target = writable(args.file_path), text = await readFile(target, 'utf8')
+    file_path: { type: 'string', required: true }, old_string: { type: 'string', required: true }, new_string: { type: 'string', required: true } }, async (args, exec) => {
+    const target = writable(args.file_path, exec), text = await readFile(target, 'utf8')
     assert.ok(text.includes(args.old_string), 'old_string was not found')
     await writeFile(target, text.replace(args.old_string, args.new_string)); return { file_path: target, edited: true }
   })
-  register('glob', '列出当前任务目录中的文件。', { pattern: { type: 'string' } }, async () => ({ files: await readdir(workspace) }))
-  register('grep', '在指定UTF-8文件中按正则表达式逐行查找文本。', { file_path: { type: 'string', required: true }, pattern: { type: 'string', required: true } },
-    async args => { const pattern = new RegExp(args.pattern); return { matches: (await readFile(readable(args.file_path), 'utf8')).split('\n').filter(line => pattern.test(line)) } })
-  const literalWorkspace = "'" + workspace.replaceAll("'", "''") + "'"
-  const allowedCommands = new Set([
-    `Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath ${literalWorkspace} -Force | Microsoft.PowerShell.Utility\\Select-Object -First 200 Name,Mode,Length`,
-    `& (Microsoft.PowerShell.Core\\Get-Command git -CommandType Application | Microsoft.PowerShell.Utility\\Select-Object -First 1).Source --no-optional-locks -c core.fsmonitor=false --no-pager -C ${literalWorkspace} status --short --branch --untracked-files=normal | Microsoft.PowerShell.Utility\\Select-Object -First 200`,
-  ])
+  const fixtureFiles = async directory => (await readdir(directory, { recursive: true, withFileTypes: true }))
+    .filter(entry => entry.isFile()).map(entry => path.join(entry.parentPath ?? entry.path, entry.name))
+  register('glob', '在path目录递归查找文件；省略path使用当前会话目录。', { pattern: { type: 'string' }, path: { type: 'string' } }, async (args, exec) => {
+    const directory = readable(args.path ?? '.', exec)
+    const pattern = new RegExp('^' + (args.pattern ?? '**/*').replaceAll('\\', '/').replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('**/', '\0').replaceAll('?', '[^/]').replaceAll('*', '[^/]*').replaceAll('\0', '(?:.*/)?') + '$')
+    return { files: (await fixtureFiles(directory)).filter(file => pattern.test((args.pattern ?? '**/*').includes('/') || (args.pattern ?? '').includes('\\')
+      ? path.relative(directory, file).replaceAll('\\', '/') : path.basename(file))) }
+  })
+  register('grep', '在path文件或目录按正则表达式查找；省略path使用当前会话目录。file_path兼容旧验收。', {
+    path: { type: 'string' }, file_path: { type: 'string' }, pattern: { type: 'string', required: true } }, async (args, exec) => {
+    const target = readable(args.path ?? args.file_path ?? '.', exec), pattern = new RegExp(args.pattern)
+    let files
+    try { files = await fixtureFiles(target) } catch (error) { if (error.code !== 'ENOTDIR') throw error; files = [target] }
+    const matches = []
+    for (const file of files) (await readFile(file, 'utf8')).split('\n').forEach((line, index) => { if (pattern.test(line)) matches.push({ file, line: index + 1, text: line }) })
+    return { matches }
+  })
+  const allowedCommands = new Set()
+  for (const directory of new Set([workspace, project])) {
+    const literalDirectory = "'" + directory.replaceAll("'", "''") + "'"
+    allowedCommands.add(`Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath ${literalDirectory} -Force | Microsoft.PowerShell.Utility\\Select-Object -First 200 Name,Mode,Length`)
+    allowedCommands.add(`& (Microsoft.PowerShell.Core\\Get-Command git -CommandType Application | Microsoft.PowerShell.Utility\\Select-Object -First 1).Source --no-optional-locks -c core.fsmonitor=false --no-pager -C ${literalDirectory} status --short --branch --untracked-files=normal | Microsoft.PowerShell.Utility\\Select-Object -First 200`)
+  }
+  if (workflow) for (const module of ['contacts', 'orders', 'all']) allowedCommands.add(workflowFixture.testCommand(module))
   // These two read-only fixture checks are exact literals; do not allow arbitrary shell prefixes.
   const sumComparison = "$c=[System.IO.File]::ReadAllText((Join-Path (Get-Location) '__fixture__.txt')); $s=((Get-Content (Join-Path (Get-Location) '__fixture__.json') -Raw | ConvertFrom-Json) | Measure-Object -Sum).Sum; Write-Output (\"expected_sum=\" + $s); Write-Output (\"content=[\" + $c + \"]\"); Write-Output (\"length=\" + $c.Length); Write-Output (\"format_match=\" + ($c -eq (\"sum=\" + $s + \"`n\") -or $c -eq (\"sum=\" + $s + \"`r`n\")))"
   for (const fixture of ['a', 'b']) allowedCommands.add(sumComparison.replaceAll('__fixture__', fixture))
-  register('pwsh', '仅支持 delegation_inspect 的固定只读命令，以及已审核的固定 a/b JSON 求和与全文比对命令；其他文件验证使用 read/grep。', {
-    command: { type: 'string', required: true }, description: { type: 'string' } }, async args => {
+  register('pwsh', '支持 delegation_inspect 的固定只读命令和项目README内列出的固定功能测试命令；其他文件验证使用 read/grep。', {
+    command: { type: 'string', required: true }, description: { type: 'string' }, workdir: { type: 'string' } }, async (args, exec) => {
     assert.ok(allowedCommands.has(args.command), 'The test shell only admits reviewed fixed read-only commands; use read/grep for other file checks')
     try {
-      const output = await runFile('pwsh', ['-NoProfile', '-NonInteractive', '-Command', args.command], { cwd: workspace, windowsHide: true, timeout: 15000 })
+      const cwd = writable(args.workdir ?? '.', exec)
+      const output = await runFile('pwsh', ['-NoProfile', '-NonInteractive', '-Command', args.command], { cwd, windowsHide: true, timeout: 15000,
+        env: { ...process.env, AGENTRIX_WORKFLOW_SUPPLEMENTED: supplementSent ? '1' : '0' } })
       return { exitCode: 0, output: output.stdout + output.stderr }
     } catch (error) { return { exitCode: typeof error.code === 'number' ? error.code : 1, output: redact((error.stdout ?? '') + (error.stderr ?? '') || error.message) } }
   })
   const nativeStart = ctx.subagents.startActivation.bind(ctx.subagents)
   ctx.subagents.startActivation = async (...args) => {
     const receipt = await nativeStart(...args), dispose = receipt.dispose.bind(receipt)
-    activations.push({ at: Date.now(), childId: receipt.childId, options: args[0].request.agentOptions, signal: args[0].signal })
+    activations.push({ at: Date.now(), childId: receipt.childId, cwd: args[0].request.cwd,
+      effectiveCwd: sessionCwd(ctx.sessions.get(receipt.childId)), options: args[0].request.agentOptions, signal: args[0].signal })
     receipt.dispose = async () => { releases.push(receipt.childId); return dispose() }
     return receipt
   }
@@ -196,6 +228,7 @@ ctx.plugin(await native('dsh-tool-skill'))
     events.push({ at: Date.now(), sessionId: session.id, type: event.type,
       ...(event.type === 'tool/call' ? { name: event.data.name, arguments: event.data.arguments } : {}),
       ...(event.type === 'tool/result' ? { result: structuredClone(event.data) } : {}),
+      ...(event.type === 'assistant/message' ? { text: event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('\n') } : {}),
       ...(event.type === 'turn/end' ? { reason: event.data.reason } : {}) })
     if (event.type === 'turn/end') console.log(JSON.stringify({ event: 'turn/end', role: session.id === 'root' ? 'coordinator' : 'child', reason: event.data.reason?.kind }))
     if (event.type === 'tool/call' && event.data.name.startsWith('delegation_')) console.log(JSON.stringify({ event: 'tool', name: event.data.name }))
@@ -219,9 +252,14 @@ ctx.plugin(await native('dsh-tool-skill'))
   parent = handle.agent
 }
 try {
+  if (workflow) {
+    workflowFixture = await setupWorkflow(project, delegatedWorkflow, extendedWorkflow)
+    await writeFile(path.join(workspace, 'parent-only.txt'), 'Do not modify the parent directory.\n')
+  }
   await launchRuntime()
   let prompt
-  if (simple) {
+  if (workflow) prompt = workflowFixture.discussion
+  else if (simple) {
     await writeFile(path.join(workspace, 'notice.txt'), '状态：待确认\n备注：保持原样\n')
     prompt = scenario === 'direct' ? '把 notice.txt 中的“待确认”直接改为“已确认”，其他内容不要动，核对后告诉我结果。'
       : scenario === 'auto-readonly' ? '看一下 notice.txt，告诉我当前状态和备注，文件不要修改。'
@@ -235,8 +273,33 @@ try {
     prompt = '请分别交给执行模型计算 a.json 和 b.json 两份数组的总和，生成 a.txt 和 b.txt，文件只写“sum=总数”并换行。两项独立并行处理，逐项核对后交付。' +
       (scenario === 'rework' ? 'a.txt 交付前还需要由独立审查者核对计算和格式，b.txt 由主控核对即可。' : '')
   }
+  ;(result.userMessages ??= []).push({ at: Date.now(), text: prompt })
+  const initialProject = workflow ? await Promise.all(['README.md', ...workflowFixture.allowedFiles].map(file => readFile(path.join(project, file), 'utf8'))) : null
   parent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }))
-  if (scenario === 'parallel-supplement') {
+  if (workflow) {
+    await settled()
+    check('Discussion leaves every project file unchanged and starts no implementation worker', () => {
+      assert.equal(activations.length, 0)
+      assert.ok(!activities.some(item => ['write', 'edit'].includes(item.tool)))
+    })
+    assert.deepEqual(await Promise.all(['README.md', ...workflowFixture.allowedFiles].map(file => readFile(path.join(project, file), 'utf8'))), initialProject)
+    implementationStarted = true
+    send(explicitDelegation
+      ? '可以，按刚才讨论的方案开始调整。这次请把联系人和订单两个独立模块分别委派给已配置的执行模型实现，你负责监督、验证和最终验收交付。'
+      : workflowFixture.implementation)
+    await until(() => gateEntered, 'implementation reaches a real project file before the supplement')
+    supplementActivationCount = activations.length
+    result.supplement = { at: Date.now(), sessionId: gatedSession, activations: supplementActivationCount,
+      state: await state() }
+    send(workflowFixture.supplement)
+    supplementSent = true
+    if (gatedSession !== 'root') await until(async () => {
+      const plan = (await state()).plans[0]
+      return plan?.inputs?.some(input => input.text === workflowFixture.supplement && input.status === 'forwarded' &&
+        plan.tasks.find(task => task.id === input.taskId)?.childId === gatedSession)
+    }, 'the real supplement is forwarded to the original worker')
+    gate.resolve()
+  } else if (scenario === 'parallel-supplement') {
     await until(() => activations.length >= 2 && gateEntered, 'parallel workers start before supplement')
     send('补充一下：fruit.txt 最后一行再加 total=6；colors.txt 保持刚才的要求。')
     supplementSent = true
@@ -281,6 +344,7 @@ try {
     await settled()
     send('再把备注改为“已复核”，状态保持“已确认”，其他内容不变。')
   }
+  if (workflow && activations.length) await until(async () => (await state()).plans[0]?.completion, 'the managed workflow reaches a final receipt')
   const final = await settled()
   await ctx.sessions.flush(parent.session)
   check('Loaded runtime matches the tested source', () => assert.equal(final.runtimeBuild, RUNTIME_BUILD))
@@ -289,6 +353,48 @@ try {
     assert.ok(requests.every(req => req.provider === providerName && req.model === (req.sessionId === 'root' ? coordinatorModel : activations.find(item => item.childId === req.sessionId)?.options.model)))
     assert.ok(activations.every(item => [workerModel, coordinatorModel].includes(item.options.model)))
   })
+  if (workflow) {
+    result.projectVerification = await verifyWorkflow(project, delegatedWorkflow, extendedWorkflow)
+    result.executionChoice = activations.length ? 'delegate' : 'direct'
+    check('The final project satisfies the original request and the in-flight supplement', () => assert.ok(result.projectVerification))
+    check('The parent directory and its sentinel remain unchanged', () => {
+      assert.equal(parent.session.header.cwd, workspace)
+    })
+    assert.equal(await readFile(path.join(workspace, 'parent-only.txt'), 'utf8'), 'Do not modify the parent directory.\n')
+    assert.deepEqual((await readdir(workspace)).sort(), ['parent-only.txt', 'project'])
+    check('All actual mutations stay within the requested project files', () => {
+      const allowed = new Set(workflowFixture.allowedFiles.map(file => path.join(project, file)))
+      for (const activity of activities.filter(item => ['write', 'edit'].includes(item.tool))) {
+        const cwd = activity.cwd
+        assert.ok(cwd && allowed.has(path.resolve(cwd, activity.arguments.file_path)), JSON.stringify(activity))
+      }
+    })
+    if (delegatedWorkflow && !activations.length) check('Direct execution ran real functional checks after each final module edit', () => {
+      for (const module of ['contacts', 'orders']) {
+        const mutation = activities.findLast(item => ['write', 'edit'].includes(item.tool) && path.basename(item.arguments.file_path) === module + '.mjs')
+        assert.ok(mutation, module + ' must be implemented')
+        assert.ok(activities.some(item => item.tool === 'pwsh' && item.at > mutation.at &&
+          [workflowFixture.testCommand(module), workflowFixture.testCommand('all')].includes(item.arguments.command) &&
+          events.some(event => event.type === 'tool/result' && event.result?.message?.toolCallId === item.callId &&
+            !event.result.message.isError && event.result.message.content.some(block => {
+              try { return JSON.parse(block.text).exitCode === 0 } catch { return false }
+            }))), 'Missing final direct functional check: ' + module)
+      }
+    })
+    if (!delegatedWorkflow) check('The small multi-turn task uses no child agents', () => assert.equal(activations.length, 0))
+    else check(explicitDelegation ? 'The user-requested delegation branch was actually exercised' : 'The autonomous delegation branch was actually exercised', () => {
+      assert.ok(activations.length > 0, 'The model chose direct execution; the delegation branch remains uncovered')
+      assert.notEqual(gatedSession, 'root', 'The supplement must arrive during original worker execution')
+      assert.equal(final.plans.length, 1)
+      assert.equal(final.plans[0].cwd, project)
+      assert.ok(activations.every(item => item.cwd === project && item.effectiveCwd === project))
+    })
+    if (!activations.length) check('The coordinator verifies after the final direct edit', () => {
+      const lastEdit = activities.findLastIndex(item => ['write', 'edit'].includes(item.tool))
+      assert.ok(activities.slice(lastEdit + 1).some(item => item.tool === 'read' && path.basename(item.arguments.file_path) === 'notice.txt' ||
+        item.tool === 'pwsh' && item.arguments.command === workflowFixture.testCommand('all')))
+    })
+  }
   if (simple) {
     const content = await readFile(path.join(workspace, 'notice.txt'), 'utf8')
     const expected = scenario === 'auto-readonly' ? '状态：待确认\n备注：保持原样\n' : scenario === 'auto-followup' ? '状态：已确认\n备注：已复核\n' : '状态：已确认\n备注：保持原样\n'
@@ -306,7 +412,7 @@ try {
         assert.ok(mutation >= 0 && activities.slice(mutation + 1).some(item => item.tool === 'read' && path.basename(item.arguments.file_path) === 'notice.txt'))
       })
     assert.deepEqual(await readdir(workspace), ['notice.txt'])
-  } else {
+  } else if (!workflow || activations.length) {
     const plan = final.plans[0]
     check('All managed tasks are accepted with a completed receipt', () => assert.equal(plan?.completion?.outcome, 'completed', JSON.stringify(plan?.completion ?? null)))
     check('The delivery is committed once in the native journal', () => {
@@ -323,7 +429,37 @@ try {
         for (const finding of task.review.findings) assert.ok(finding.evidence.length && finding.evidence.every(ref => evidence.has(ref)))
       }
     })
-    if (scenario === 'parallel-supplement') {
+    if (workflow) {
+      check('Supplement continues the same worker with no retry or additional task', () => {
+        const original = result.supplement.state.plans[0]
+        const scope = tasks => tasks.map(({ id, writes, outputs }) => ({ id, writes, outputs }))
+        assert.deepEqual(scope(plan.tasks), scope(original.tasks))
+        assert.equal(activations.filter(item => item.options.model === workerModel).length, plan.tasks.length)
+        assert.ok(plan.tasks.every(task => task.attempts === 1))
+        assert.ok(plan.tasks.every(task => activations.filter(item => item.childId === task.childId).length === 1))
+        const input = plan.inputs.find(input => input.text === workflowFixture.supplement)
+        assert.equal(input.status, 'forwarded')
+        assert.equal(plan.tasks.find(task => task.id === input.taskId)?.childId, gatedSession)
+      })
+      check('Managed writes, checks and final delivery resolve inside the same project', () => {
+        for (const task of plan.tasks) {
+          assert.ok(task.writes.every(file => path.isAbsolute(file) && contained(project, file)))
+          assert.ok(task.outputs.every(file => contained(project, path.resolve(plan.cwd, file))))
+          for (const item of task.checks) if (item.tool === 'pwsh') assert.equal(item.arguments.workdir, project)
+        }
+        assert.ok(plan.delivery.files.every(file => contained(project, file.path)))
+      })
+      check('The coordinator ran real functional checks after each final module mutation', () => {
+        for (const module of ['contacts', 'orders']) {
+          const mutation = activities.findLast(item => ['write', 'edit'].includes(item.tool) && path.basename(item.arguments.file_path) === module + '.mjs')
+          assert.ok(mutation, module + ' must be implemented')
+          assert.ok(plan.tasks.some(task => task.checks.some(item => item.tool === 'pwsh' && item.result?.passed === true &&
+            item.result.at > mutation.at && (module !== 'contacts' || item.result.at > result.supplement.at) &&
+            [workflowFixture.testCommand(module), workflowFixture.testCommand('all')].includes(item.arguments.command))),
+          'Missing final coordinator functional check: ' + module)
+        }
+      })
+    } else if (scenario === 'parallel-supplement') {
       assert.equal(await readFile(path.join(workspace, 'fruit.txt'), 'utf8'), 'apple=3\nbanana=2\ncherry=1\ntotal=6\n')
       assert.equal(await readFile(path.join(workspace, 'colors.txt'), 'utf8'), 'blue=#0000ff\nred=#ff0000\n')
       check('Supplement reused the original plan and workers', () => assert.equal(activations.filter(item => item.options.model === workerModel).length, 2))
@@ -365,6 +501,17 @@ try {
   result.durationMs = Date.now() - started
   result.requests = requests; result.activations = activations.map(({ signal, ...item }) => ({ ...item, aborted: signal.aborted }))
   result.releases = releases; result.activities = activities; result.events = events
+  result.toolErrors = events.filter(event => event.type === 'tool/result' && event.result?.message?.isError)
+  result.commandFailures = events.filter(event => event.type === 'tool/result').flatMap(event => {
+    const call = activities.find(item => item.callId === event.result?.message?.toolCallId && item.tool === 'pwsh')
+    if (!call) return []
+    return (event.result.message.content ?? []).flatMap(block => {
+      try {
+        const value = JSON.parse(block.text)
+        return typeof value.exitCode === 'number' && value.exitCode !== 0 ? [{ at: event.at, callId: call.callId, sessionId: event.sessionId, ...value }] : []
+      } catch { return [] }
+    })
+  })
   result.usage = result.finalState?.requestUsage
   const evidence = process.env.AGENTRIX_LIVE_RESULT
   if (evidence) { await mkdir(path.dirname(evidence), { recursive: true }); await writeFile(evidence, redact(JSON.stringify(result, null, 2))) }
