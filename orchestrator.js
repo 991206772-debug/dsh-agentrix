@@ -14,7 +14,7 @@ export const DEFAULT_OPTIONS = Object.freeze({
 export const REVIEWER_MODEL_POLICY = 'dispatcher-snapshot'
 export const COORDINATION_POLICY_VERSION = 7
 const COORDINATION_CONFLICT_TOOLS = new Set(['team_task_create', 'team_task_update', 'wait_agent', 'spawn_teammate', 'subagent', 'subagent_fork', 'send_message'])
-const COORDINATOR_TOOLS = new Set(['delegation_models', 'delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_wait', 'delegation_status', 'delegation_inspect', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
+const COORDINATOR_TOOLS = new Set(['delegation_models', 'delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_wait', 'delegation_status', 'delegation_inspect', 'delegation_execute', 'delegation_note', 'delegation_verify', 'delegation_review', 'delegation_audit', 'delegation_control', 'delegation_cancel'])
 const EXECUTOR_TOOLS = new Set(['delegation_checkpoint', 'delegation_report'])
 const ARGUMENT_RECOVERY_LIMIT = 2
 const REVIEW_TOOLS = new Set(['read', 'grep', 'glob', ...EXECUTOR_TOOLS])
@@ -27,7 +27,7 @@ export const OPTION_RANGES = Object.freeze({
   maxActivations: Object.freeze({ min: MIN_ACTIVATIONS, max: MAX_ACTIVATIONS }), taskTimeoutMinutes: Object.freeze({ min: 1, max: 240 }),
 })
 const CHECK_TOOLS = ['read', 'grep', 'glob', 'pwsh', 'bash']
-const MANAGED_READ_GUIDANCE = '当前计划尚有未验收的写入任务，普通 pwsh/bash 暂不可用。读取源码允许使用 read/grep/glob；目录、Git 与 Node/Python/Docker 版本检查用 delegation_inspect（版本使用 operation:runtime_versions）；报告返回后的正式验证用 delegation_verify；执行中的补充用 delegation_control steer 同步原执行者，不使用原生 send_message。'
+const MANAGED_READ_GUIDANCE = '当前计划尚有未验收的写入任务，普通 pwsh/bash 暂不可用。主控在独立范围施工用 delegation_execute，明确 workdir 和 writes，不能与任务产物重叠。读取源码允许使用 read/grep/glob；目录、Git 与 Node/Python/Docker 版本检查用 delegation_inspect（版本使用 operation:runtime_versions）；正式验证用 delegation_verify；补充用 delegation_control steer 同步原执行者。'
 const LIVE = ['starting', 'running']
 const STATUSES = ['queued', ...LIVE, 'review', 'accepted', 'failed', 'blocked', 'cancelled']
 const targetsOf = plan => plan.tasks.flatMap(task => task.audit ? [task, task.audit] : [task])
@@ -322,6 +322,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const stagedResults = new Map(), pendingTransports = new Map(), committing = new Set()
   const waitingParents = new Map()
   const verifyingTasks = new WeakSet()
+  const coordinatorCommands = new Map()
   const coordinationFailures = new Set(), coordinationCalls = new Map(), coordinationRestrictions = new Map()
   const toolDefinitions = new Map(), reportSchemas = new Map()
   const inboxes = new Map()
@@ -549,12 +550,21 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   function selectInputs(plan, ids = []) {
     const selected = strings(ids, '补充消息编号', true)
     if (new Set(selected).size !== selected.length) throw new Error('补充消息编号重复')
-    return selected.map(id => {
-      const input = (plan.inputs ?? []).find(input => input.id === id && ['queued', 'received'].includes(input.status))
-      if (!input && pendingMessages(plan.sessionId).some(message => message.messageId === id)) throw new Error('请先用 delegation_decide 确认 relation，再同步补充或处理消息')
-      if (!input) throw new Error(`补充消息 ${id} 不存在、已处理或已撤回`)
-      return input
+    const invalid = message => { throw Object.assign(new Error(message), { inputRecovery: message }) }
+    const inputs = selected.map(id => {
+      const input = (plan.inputs ?? []).find(input => input.id === id)
+      const message = decisions.get(plan.sessionId)?.messages?.find(message => message.messageId === id)
+      if (message?.withdrawn || input?.status === 'withdrawn') invalid(`补充消息 ${id} 已撤回，不能转交；请使用用户仍保留的消息编号`)
+      if (input && !['queued', 'received'].includes(input.status)) invalid(`补充消息 ${id} 已${input.status === 'forwarded' ? '转交' : '处理'}，不要重复发送；新增要求请关联新的用户消息`)
+      if (input) return input
+      if (!message) invalid(`补充消息 ${id} 不存在于本会话；请从 delegation_status 的当前消息记录读取真实编号`)
+      if (!message.resolution) invalid(`补充消息 ${id} 尚未关联；请先用 delegation_decide 确认 relation，再同步补充或处理消息`)
+      if (message.resolution.requestId !== plan.source?.messageId) invalid(`补充消息 ${id} 属于其他需求，不能转交给当前计划；请核对消息与任务的归属`)
+      if (message.resolution.relation !== 'continue') invalid(`补充消息 ${id} 已关联为 ${message.resolution.relation}；若实际增加当前任务要求，请用 delegation_decide 的 relation:update 及具体理由更正后再转交`)
+      return { id, text: message.text, at: message.at, status: 'received', target: message.target }
     })
+    for (const input of inputs) if (!(plan.inputs ?? []).some(existing => existing.id === input.id)) (plan.inputs ??= []).push(input)
+    return inputs
   }
   function additionalCriteria(task, args, inputs) {
     const criteria = strings(args.additionalCriteria ?? [], '新增验收标准', true)
@@ -970,7 +980,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     issue.resolvedAt = Date.now()
     remember(plan, 'plan.coordination_resolved', '协作操作问题已随正确操作或任务进展解决', undefined, { callId: issue.callId, resolvedAt: issue.resolvedAt })
   }
-  function recordCoordinationFailure(exec, message, code = 'COORDINATION_OPERATION_FAILED') {
+  function recordCoordinationFailure(exec, message, code = 'COORDINATION_OPERATION_FAILED', inputRecovery) {
     const context = coordinationContext(exec.agent?.id)
     if (!context) return
     const { plan } = context, worker = plan.sessionId !== exec.agent.id
@@ -981,7 +991,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const task = context.task ?? plan.tasks.find(item => item.id === exec.arguments?.taskId) ?? (plan.tasks.length === 1 ? plan.tasks[0] : null)
     plan.coordinationIssue = { code, tool: exec.name, callId: exec.callId ?? null, agentId: exec.agent.id, role: worker ? modelRole(task) : 'coordinator',
       ...(task ? { taskId: task.id } : {}), message: brief(message, 1000),
-      nextAction: !worker && ['pwsh', 'bash'].includes(exec.name) && !allowsVerification(exec) && coordinatorWriteBlock(exec) ? MANAGED_READ_GUIDANCE : coordinationNext(plan, task, worker), at: Date.now(),
+      nextAction: inputRecovery || (!worker && exec.name === 'delegation_control' && unresolvedInputs(plan).length
+        ? '补充仍未处理；核对本次错误后用 delegation_control steer 同步给原执行者，并提供新增验收标准；纯答复用 acknowledge，不要跳过补充直接等待或验收。'
+        : !worker && ['pwsh', 'bash'].includes(exec.name) && !allowsVerification(exec) && coordinatorWriteBlock(exec) ? MANAGED_READ_GUIDANCE : coordinationNext(plan, task, worker)), at: Date.now(),
       stage: coordinationStage(plan, task?.id) }
     remember(plan, 'plan.coordination_failed', (worker ? '执行者操作未执行：' : '主控操作未执行：') + exec.name + '；' + brief(message, 500),
       undefined, { coordinationIssue: clone(plan.coordinationIssue) })
@@ -1568,7 +1580,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const required = tool.parameters.required ?? Object.entries(tool.parameters.properties ?? {}).filter(([, field]) => field?.required === true).map(([name]) => name)
       return tool.name + ' 必填：' + (required.map(name => name + (tool.parameters.properties?.[name]?.type ? ':' + tool.parameters.properties[name].type : '')).join('、') || '无')
     })
-    return contracts.length ? 'delegation_plan 的 checks.arguments 使用当前工具定义的原始字段名和类型：' + contracts.join('；') + '。其余参数以对应工具定义为准。' : ''
+    return contracts.length ? 'delegation_plan 的 checks.arguments 与 delegation_execute 的 arguments 使用当前工具定义的原始字段名和类型：' + contracts.join('；') + '。其余参数以对应工具定义为准；主控执行还必须明确 workdir。' : ''
   }
   function validateChecks(tasks, parent, toolSet, errors = []) {
     const schemas = ctx.tools.schemas?.(parent, toolSet)
@@ -2059,6 +2071,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   }
   async function review(args, exec) {
     const { plan, parent } = ownPlan(exec), task = taskOf(plan, args.taskId)
+    if (args.verdict === 'accept' && coordinatorCommands.has(plan)) throw new Error('主控命令正在执行，等待结果后再验收，不能提前交付')
     const presentation = args.delivery === undefined ? null : deliveryOptions(plan, args.delivery)
     if (task.status !== 'review') throw new Error('只能评审已经返回结果的任务')
     args = { ...args, findings: reviewFindings(task, args.findings), issues: reviewFindings(task, args.issues),
@@ -2205,7 +2218,15 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       const inputs = selectInputs(plan, args.inputIds), criteria = additionalCriteria(task, args, inputs)
       const message = [requireText(args.message, '纠偏内容'), ...inputs.map(input => '用户补充：' + input.text),
         ...(criteria.length ? ['新增验收标准：', ...criteria] : [])].join('\n')
-      const messageId = await service('subagents').sendMessage(parent, target.childId, [{ type: 'text', text: message }], { signal: exec.signal })
+      if (inputs.length) await save()
+      let messageId
+      try { messageId = await service('subagents').sendMessage(parent, target.childId, [{ type: 'text', text: message }], { signal: exec.signal }) }
+      catch (error) {
+        if (!inputs.length) throw error
+        throw Object.assign(error instanceof Error ? error : new Error(messageOf(error)), {
+          inputRecovery: '补充尚未送达，消息仍保留为待处理；处理本次发送错误后，用相同 inputIds 向原执行者重试，不要省略关联或直接等待验收。',
+        })
+      }
       forwardInputs(plan, task, inputs, criteria, message, messageId)
       target.progress = { tool: '主控纠偏', at: Date.now(), message: brief(message, 500) }
       if (target.supervision?.pending) {
@@ -2262,7 +2283,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
           if (value.completion && action.type === 'finished') action.message = completionText(value.completion)
           return { ...value, context: messageContext(exec.agent.id), nextAction: action }
         }
-        catch (error) { recordCoordinationFailure(exec, messageOf(error)); throw error }
+        catch (error) { recordCoordinationFailure(exec, messageOf(error), undefined, error?.inputRecovery); throw error }
         finally { refreshCoordinationTools(exec.agent) }
       } }
     toolDefinitions.set(name, definition)
@@ -2378,6 +2399,54 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     } else { reportEvent(); await save() }
     return { status: args.status, taskId: task.id, attempt: task.attempts, reportPath: task.execution.reportPath }
   }, true)
+  async function canonicalWrite(value) {
+    let current = path.resolve(value)
+    const suffix = []
+    while (true) {
+      try { return path.join(await realpath(current), ...suffix) }
+      catch (error) {
+        if (!['ENOENT', 'ENOTDIR'].includes(error.code) || path.dirname(current) === current) throw error
+        suffix.unshift(path.basename(current)); current = path.dirname(current)
+      }
+    }
+  }
+  routeTool('delegation_execute', '主控在托管期间执行独立范围的前台 Shell 命令。必须提供原生 arguments.workdir 和非空 writes（相对 workdir），不得与本计划任何任务的写入范围重叠。使用当前 pwsh/bash 参数定义，包括必填说明；不运行后台任务。同一计划一次执行一条。writes 是协作范围声明，命令须遵守它；此入口不是文件系统沙箱，仍使用宿主既有权限。结果不作为子任务验收证据。', {
+    tool: { type: 'string', enum: ['pwsh', 'bash'] }, arguments: { type: 'object', additionalProperties: true }, writes: array(string),
+  }, ['tool', 'arguments', 'writes'], async (args, exec) => {
+    const { plan, parent } = ownPlan(exec)
+    if (plan.cancelled || plan.completion || !isCurrentPlan(plan)) throw new Error('仅当前未结束托管计划可执行主控命令；先确认消息关联')
+    if (getConfig().mode !== 'auto' && !decisionCurrent(parent.id)) throw new Error('strict/fixed 主控命令执行前须用 delegation_decide 关联待处理消息并确认当前判断；原委派方式可继续沿用')
+    if (coordinatorCommands.has(plan)) throw new Error('主控命令正在执行，请等待结果')
+    if (plan.tasks.some(task => task.pendingAcceptance)) throw new Error('验收正在确认，不能同时开始主控命令')
+    if (!['pwsh', 'bash'].includes(args.tool)) throw new Error('主控命令只接受 pwsh 或 bash')
+    if (!args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) throw new Error('arguments 必须是原生工具参数对象')
+    if (args.arguments.run_in_background) throw new Error('主控命令必须前台完成')
+    const declared = strings(args.writes, '主控写入范围', false)
+    if (declared.some(value => /[*?]/.test(value))) throw new Error('主控写入范围必须是明确路径，不接受通配符')
+    const workdir = requireText(args.arguments.workdir, 'arguments.workdir', 4000)
+    const controller = new AbortController(), settled = Promise.withResolvers()
+    coordinatorCommands.set(plan, { controller, settled: settled.promise })
+    try {
+      const cwd = await realpath(path.resolve(parent.session?.header?.cwd ?? plan.cwd ?? process.cwd(), workdir))
+      if (!(await lstat(cwd)).isDirectory()) throw new Error('workdir 必须是已存在目录')
+      const writes = await Promise.all(declared.map(value => canonicalWrite(path.resolve(cwd, value))))
+      const protectedWrites = await Promise.all(plan.tasks.flatMap(task => task.writes).map(value => canonicalWrite(writeScope(path.resolve(plan.cwd ?? cwd, value)))))
+      if (overlaps({ writes }, { writes: protectedWrites })) throw new Error('主控声明的写入范围与托管任务重叠，请同步原执行者或等待计划结束')
+      const nativeArgs = { ...clone(args.arguments), workdir: cwd }
+      validateChecks([{ id: '主控', checks: [{ tool: args.tool, arguments: nativeArgs }] }], parent, exec.toolSet)
+      if (plan.cancelled || closed || controller.signal.aborted) throw new Error('主控命令已取消')
+      remember(plan, 'plan.coordinator_command_started', '主控开始在独立范围执行命令', undefined, { tool: args.tool, workdir: cwd, writes })
+      await save()
+      const signal = exec.signal ? AbortSignal.any([exec.signal, controller.signal]) : controller.signal
+      signal.throwIfAborted()
+      const { result, callId } = await executePermitted(parent, args.tool, nativeArgs, { ...exec, signal })
+      if (signal.aborted || plan.cancelled || closed) throw new Error('主控命令已取消，本次结果不登记为成功')
+      const exitCode = result.value?.exitCode ?? null, passed = !result.isError && exitCode === 0
+      remember(plan, 'plan.coordinator_command_finished', passed ? '主控独立命令已完成' : '主控独立命令失败，请核对输出后处理', undefined, { callId, tool: args.tool, workdir: cwd, writes, passed, exitCode })
+      await save()
+      return { tool: args.tool, workdir: cwd, writes, callId, passed, exitCode, output: brief(textOf(result.content), 16000) }
+    } finally { coordinatorCommands.delete(plan); settled.resolve() }
+  })
   routeTool('delegation_inspect', '准备阶段只读检查：list 列出当前目录前 200 项（不递归）；git_status 查看 Git 基线；runtime_versions 查询 Node、Python、Docker 版本并标明不可用项，不查询运行中的容器。只接受操作类型与目录，不接受脚本，不占业务操作额度。深层检索使用 glob/grep。', {
     operation: { type: 'string', enum: ['list', 'git_status', 'runtime_versions'] }, directory: string,
   }, ['operation'], async (args, exec) => {
@@ -2648,6 +2717,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const reason = plan.cancellation.reason
     invalidateCompletion(plan)
     plan.cancelled = true; plan.cancelledBy = 'explicit'; plan.autoDispatch = false; plan.wakeSuppressed = true
+    const coordinatorCommand = coordinatorCommands.get(plan)
+    coordinatorCommand?.controller.abort(new Error('计划已取消，停止主控命令'))
     // Abort all activations before awaiting cleanup or storage; one failure cannot skip a sibling.
     for (const task of plan.tasks) requestTaskStop(plan, task, reason)
     updateCancellationCleanup(plan)
@@ -2655,6 +2726,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       let saveError
       try { await save() } catch (error) { saveError = error }
       await Promise.all(plan.tasks.filter(task => task.status !== 'accepted').map(task => cleanupStoppedTask(plan, task, parent)))
+      if (coordinatorCommand) await coordinatorCommand.settled
       updateCancellationCleanup(plan)
       remember(plan, 'plan.cancelled', '用户取消已记录：' + reason, undefined, { cancellation: clone(plan.cancellation) })
       finishPlan(plan)
@@ -2735,6 +2807,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     async dispose() {
       if (closed) return
       closed = true
+      const commands = [...coordinatorCommands.values()]
+      for (const command of commands) command.controller.abort(new Error('插件停止，主控命令已取消'))
+      await Promise.allSettled(commands.map(command => command.settled))
       for (const waiter of waitingParents.values()) waiter.wake.resolve()
       truncatedOutputs.clear()
       clearTimeout(activityTimer)

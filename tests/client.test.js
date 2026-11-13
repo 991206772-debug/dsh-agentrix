@@ -829,6 +829,40 @@ test('managed chat shows actual task states and never claims completed delivery 
   } finally { dock.close(); action.close(); f.close() }
 })
 
+test('coordination notices show legacy repeated shell guidance once without removing distinct explanations', async () => {
+  const guidance = '当前计划尚有未验收的写入任务，普通 pwsh/bash 暂不可用。读取源码允许使用 read/grep/glob；目录检查用 delegation_inspect。'
+  const reason = '[DSH Agentrix] 本次普通 Shell 命令未执行。'
+  const plan = { protocolVersion: 2, sessionId: 'session-current', status: 'running', completion: null,
+    tasks: [{ id: 'a', title: '提取文档', status: 'running' }],
+    coordinationIssue: { tool: 'pwsh', role: 'coordinator', callId: 'blocked-shell', message: reason + guidance, nextAction: guidance, at: 100 } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({ ok: true,
+    enabled: true, sessionId: plan.sessionId, plans: [structuredClone(plan)], sessions: [] }) }) })
+  const dock = f.mountDock(plan.sessionId)
+  const notice = () => dock.nodes('section').find(node => node.props?.['data-kind'] === 'coordination')
+  try {
+    await dock.flush()
+    assert.equal(flatten(notice()).split(guidance).length - 1, 1, 'the stored legacy guidance is shown only as the next action')
+    assert.ok(flatten(notice()).includes('pwsh：' + reason), 'the actual blocked operation and reason remain visible')
+    assert.ok(flatten(notice()).includes('下一步： ' + guidance))
+    plan.coordinationIssue.message = '检查尚未执行；请核对工作目录。'
+    plan.coordinationIssue.nextAction = '改用 delegation_inspect 检查目录。'
+    await dock.tick()
+    assert.ok(flatten(notice()).includes(plan.coordinationIssue.message))
+    assert.ok(flatten(notice()).includes(plan.coordinationIssue.nextAction), 'a different next action is preserved')
+    plan.coordinationIssue.message = guidance + '另外仍需核对工作目录。'
+    plan.coordinationIssue.nextAction = guidance
+    await dock.tick()
+    assert.ok(flatten(notice()).includes(plan.coordinationIssue.message), 'overlapping text is not stripped from the middle of an explanation')
+    plan.coordinationIssue.message = '检查失败，请核对工作目录。'
+    plan.coordinationIssue.nextAction = '工作目录。'
+    await dock.tick()
+    assert.ok(flatten(notice()).includes(plan.coordinationIssue.message), 'a suffix inside a sentence is not a repeated guidance paragraph')
+    plan.coordinationIssue.resolvedAt = 200
+    await dock.tick()
+    assert.equal(notice(), undefined)
+  } finally { dock.close(); f.close() }
+})
+
 test('a previous terminal receipt never hides current coordinator work or stops its activity polling', async t => {
   for (const outcome of ['completed', 'cancelled', 'blocked']) await t.test(outcome, async () => {
     const request = { messageId: 'continued-request', text: '继续核对当前需求' }
@@ -869,6 +903,55 @@ test('a previous terminal receipt never hides current coordinator work or stops 
       assert.equal(JSON.stringify(plan), originalPlan, 'displaying current activity does not alter the historical receipt')
     } finally { dock.close(); f.close() }
   })
+})
+
+test('coordinator activity after completed delegation keeps the old decision historical instead of claiming no worker started', async () => {
+  const request = { messageId: 'same-development-request', text: '继续开发应用' }
+  const decision = { mode: 'delegate', reason: '先由执行者提取 PRD，主控并行搭建应用。', at: 100, model: { model: 'coordinator' } }
+  const plan = { sessionId: 'session-current', protocolVersion: 2, source: request, status: 'accepted', createdAt: 100,
+    decision, tasks: [{ id: 'prd-extract', status: 'accepted', attempts: 1, childId: 'original-worker' }],
+    completion: { id: 'prd-receipt', at: 200, outcome: 'completed', accepted: 1, total: 1, deliverables: [], evidence: [], remaining: [] } }
+  const row = { sessionId: plan.sessionId, source: request, decision, decisionCurrent: true, messageResolution: { relation: 'continue' },
+    turnStats: { direct: 3, delegated: 0, denied: 0 }, execution: { running: true, startedAt: 300, toolCalls: 4,
+      activity: { kind: 'model' }, lastResult: { tool: 'write', target: 'app/src/tokens.css' }, unresolvedChanges: [] } }
+  const before = JSON.stringify({ plan, row })
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone({ ok: true,
+    sessionId: plan.sessionId, plans: [plan], sessions: [row] }) }) })
+  const dock = f.mountDock(plan.sessionId)
+  const section = name => dock.nodes('div').find(node => node.props?.['data-section'] === name)
+  try {
+    await dock.flush()
+    assert.match(flatten(section('current')), /主控直接执行.*模型正在生成/)
+    assert.match(flatten(section('decision')), /上次执行判断.*委派/)
+    assert.ok(flatten(section('decision')).includes(decision.reason))
+    assert.match(flatten(section('decision')), /上次委派已完成.*当前由主控直接处理.*执行判断尚未更新/)
+    assert.doesNotMatch(dock.text(), /尚未启动子代理|主控准备中|主控决定：直接执行/)
+    assert.equal(JSON.stringify({ plan, row }), before, 'observed direct work must not rewrite a recorded model decision or receipt')
+    row.decision = { ...decision, reason: '下一阶段另有独立任务需要委派。', at: 400 }
+    await dock.tick()
+    assert.match(flatten(section('decision')), /主控决定.*委派/)
+    assert.match(flatten(section('decision')), /尚未启动子代理/, 'a newly recorded delegation intention remains distinct from the previous completed plan')
+    assert.doesNotMatch(flatten(section('decision')), /执行判断尚未更新/)
+  } finally { dock.close(); f.close() }
+})
+
+test('an active managed worker stays visible when the current turn has no new dispatch', async () => {
+  const request = { messageId: 'active-development-request', text: '继续核对文档' }
+  const plan = { sessionId: 'session-current', protocolVersion: 2, source: request, status: 'running', completion: null,
+    decision: { mode: 'delegate', reason: '原执行者继续提取文档。', at: 100 },
+    tasks: [{ id: 'prd-extract', title: '提取文档', status: 'running', attempts: 1, childId: 'original-worker' }] }
+  const row = { sessionId: plan.sessionId, source: request, decision: plan.decision, decisionCurrent: true,
+    turnStats: { direct: 1, delegated: 0, denied: 0 }, execution: { running: true, startedAt: 200, toolCalls: 1,
+      activity: { kind: 'tool', tool: 'read' }, unresolvedChanges: [] } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone({ ok: true,
+    sessionId: plan.sessionId, plans: [plan], sessions: [row] }) }) })
+  const dock = f.mountDock(plan.sessionId)
+  try {
+    await dock.flush()
+    assert.match(dock.nodes('summary')[0].props['aria-label'], /执行中 1/)
+    assert.match(dock.text(), /提取文档/)
+    assert.doesNotMatch(dock.text(), /尚未启动子代理|上次委派已完成/)
+  } finally { dock.close(); f.close() }
 })
 
 test('coordinator overview groups observed activity, model and tool calls separately from its decision and request', async () => {

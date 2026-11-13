@@ -725,6 +725,8 @@ window.__ModuleLoader__.load({
       'direct.preparing': '主控准备中', 'decision.title': '主控决定', 'decision.direct': '直接执行', 'decision.delegate': '委派',
       'decision.reason': '判断理由', 'decision.pending': '等待主控记录执行方式和理由', 'decision.unrecorded': '主控判断未记录',
       'decision.revised': '需求已补充，等待主控更新判断', 'decision.notStarted': '已决定委派，尚未启动子代理', 'decision.at': '判断时间',
+      'decision.previous': '上次执行判断', 'decision.previousComplete': '上次委派已完成。', 'decision.previousEnded': '上次委派已结束。',
+      'decision.currentDirect': '当前由主控直接处理；当前阶段的执行判断尚未更新。',
       'view.modelNoPlanHint': '主控按上下文判断是否委派；程序展示已记录的决定和实际活动。没有托管计划时，不会显示子代理进度或验收回执。', 'relation.title': '消息与需求的关联', 'relation.pending': '待主控确认消息关联', 'relation.new': '新需求', 'relation.continue': '继续原需求',
       'relation.update': '补充原需求或调整方案', 'relation.question': '询问进度或普通提问，沿用原需求',
       'direct.unavailable': '委派入口不可用', 'direct.checkPlugin': '请检查 DSH Agentrix 插件是否启用，以及宿主的子代理功能是否可用；当前没有通过这些入口启动协作。',
@@ -756,6 +758,8 @@ window.__ModuleLoader__.load({
       'direct.preparing': 'Coordinator preparing', 'decision.title': 'Coordinator decision', 'decision.direct': 'Execute directly', 'decision.delegate': 'Delegate',
       'decision.reason': 'Reason', 'decision.pending': 'Waiting for the coordinator to record its execution choice and reason', 'decision.unrecorded': 'Coordinator decision not recorded',
       'decision.revised': 'Request updated; waiting for a revised decision', 'decision.notStarted': 'Delegation chosen; no child agent has started', 'decision.at': 'Decision time',
+      'decision.previous': 'Previous execution decision', 'decision.previousComplete': 'The previous delegation is complete.', 'decision.previousEnded': 'The previous delegation has ended.',
+      'decision.currentDirect': 'The coordinator is now handling work directly; the execution decision for this stage has not been updated.',
       'view.modelNoPlanHint': 'The coordinator decides from context; the plugin shows its recorded choice and observed activity. Without a managed plan there is no child progress or acceptance receipt.', 'relation.title': 'Message relationship', 'relation.pending': 'Waiting for coordinator to classify the message', 'relation.new': 'New request', 'relation.continue': 'Continue the current request',
       'relation.update': 'Update the current scope or approach', 'relation.question': 'Progress inquiry or question; keep the current request',
       'direct.unavailable': 'Delegation tools unavailable', 'direct.checkPlugin': 'Check that DSH Agentrix is enabled and the host supports subagents. These entry points have not started collaboration.',
@@ -1914,7 +1918,7 @@ window.__ModuleLoader__.load({
         if (execution.model?.model) indicators.push({ kind: 'model', text: execution.model.model })
         if (Number.isFinite(execution.toolCalls)) indicators.push({ kind: 'calls', text: fill(t('direct.calls'), { count: execution.toolCalls }),
           value: execution.toolCalls, unit: t('dock.callsUnit') })
-        content = h(CoordinatorProgress, { t, state, error: result.error })
+        content = h(CoordinatorProgress, { t, state, previousPlan: terminal ? savedPlan : null, error: result.error })
         tone = failures.length ? execution.running ? 'supervision' : 'service' : 'progress'
       }
       const identity = [sessionId, state?.source?.messageId || plan?.source?.messageId, plan ? plan.createdAt : execution?.startedAt,
@@ -1938,30 +1942,34 @@ window.__ModuleLoader__.load({
           : resolution ? h('p', { className: 'ddf-chat-live-meta' }, t('relation.title') + '：' + t('relation.' + resolution.relation)) : null)
     }
 
-    function DecisionDetails({ t, decision, current = true, preparing = false, resolution, pending = [] }) {
+    function DecisionDetails({ t, decision, current = true, preparing = false, historical = false, resolution, pending = [] }) {
       if (!decision) return h('div', { className: 'ddf-decision' }, h(AssociationDetails, { t, resolution, pending }), h('p', { className: 'ddf-chat-live-meta' }, t(preparing ? 'decision.pending' : 'decision.unrecorded')))
       return h('div', { className: 'ddf-decision' },
         h(AssociationDetails, { t, resolution, pending }),
-        h('p', { className: 'ddf-decision-choice' }, t('decision.title') + '：' + t('decision.' + decision.mode)),
+        h('p', { className: 'ddf-decision-choice' }, t(historical ? 'decision.previous' : 'decision.title') + '：' + t('decision.' + decision.mode)),
         !current && !pending.length ? h('p', null, t('decision.revised')) : null,
         h('p', null, t('decision.reason') + '：' + decision.reason),
         h('p', { className: 'ddf-chat-live-meta' }, decision.model?.model || '—',
           decision.at ? ' · ' + t('decision.at') + '：' + new Date(decision.at).toLocaleTimeString() : ''))
     }
 
-    function CoordinatorProgress({ t, state, error }) {
+    function CoordinatorProgress({ t, state, previousPlan, error }) {
       const execution = state?.execution
       if (!execution || !execution.running && !execution.unresolvedChanges?.length) return null
       const failures = execution.unresolvedChanges ?? [], activity = execution.activity
       const current = activity?.kind === 'tool' ? liveToolLabel(t, activity.tool)
         : activity?.kind ? t('supervision.activity.' + activity.kind) : t('live.unknown')
       const calls = Number.isFinite(execution.toolCalls) ? execution.toolCalls : null
+      const direct = (state.turnStats?.direct ?? state.direct ?? 0) > 0
+      const previousDecision = previousPlan && state.decision?.mode === 'delegate' && (!Number.isFinite(state.decision.at)
+        || !Number.isFinite(previousPlan.completion?.at) || state.decision.at <= previousPlan.completion.at)
       return h('section', { className: 'ddf-chat-notice ddf-chat-live ddf-coordinator', 'data-kind': failures.length ? execution.running ? 'supervision' : 'service' : 'progress', role: failures.length && !execution.running ? 'alert' : 'status' },
         h('style', null, CHAT_NOTICE_STYLES),
         error ? h('p', null, t('direct.stale')) : null,
         h('div', { className: 'ddf-execution-row', 'data-section': 'current' },
           h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.execution')),
-            h('p', { className: 'ddf-execution-status' }, t(failures.length ? execution.running ? 'direct.repairing' : 'direct.incomplete' : state.decision?.mode === 'direct' ? 'direct.title' : 'direct.preparing'))),
+            h('p', { className: 'ddf-execution-status' }, t(failures.length ? execution.running ? 'direct.repairing' : 'direct.incomplete'
+              : direct || state.decision?.mode === 'direct' ? 'direct.title' : previousPlan ? 'dock.coordinator' : 'direct.preparing'))),
           h('div', { className: 'ddf-execution-content' },
             h('dl', { className: 'ddf-execution-metrics' },
               h('div', null, h('dt', null, t('dock.activity')), h('dd', { 'data-metric': 'activity' }, execution.running ? current : t('direct.incomplete'),
@@ -1974,8 +1982,10 @@ window.__ModuleLoader__.load({
         h('div', { className: 'ddf-execution-row', 'data-section': 'decision' },
           h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.decision'))),
           h('div', { className: 'ddf-execution-content' },
-            h(DecisionDetails, { t, decision: state.decision, current: state.decisionCurrent !== false, preparing: execution.running, resolution: state.messageResolution, pending: state.pendingMessages }),
-            state.decision?.mode === 'delegate' && state.decisionCurrent !== false ? h('p', { className: 'ddf-chat-live-meta' }, t('decision.notStarted'))
+            h(DecisionDetails, { t, decision: state.decision, current: state.decisionCurrent !== false, preparing: execution.running, historical: previousDecision, resolution: state.messageResolution, pending: state.pendingMessages }),
+            previousDecision ? h('p', { className: 'ddf-chat-live-meta' }, t(previousPlan.completion?.outcome === 'completed' ? 'decision.previousComplete' : 'decision.previousEnded'),
+              direct ? t('decision.currentDirect') : '')
+              : state.decision?.mode === 'delegate' && state.decisionCurrent !== false ? h('p', { className: 'ddf-chat-live-meta' }, t('decision.notStarted'))
               : state.route?.route && state.route.route !== 'direct' ? h('p', { className: 'ddf-chat-live-meta' }, t('direct.advice')) : null)),
         failures.length ? h('div', { className: 'ddf-execution-row', 'data-section': 'issues' },
           h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.issues'))),
@@ -1988,11 +1998,15 @@ window.__ModuleLoader__.load({
     function CoordinationIssueNotice({ t, plan }) {
       const issue = plan?.coordinationIssue
       if (!issue || issue.resolvedAt || plan.completion) return null
+      const nextAction = String(issue.nextAction ?? '').trim()
+      const message = String(issue.message ?? '').trim()
+      const prefix = nextAction && message.endsWith(nextAction) ? message.slice(0, -nextAction.length).trimEnd() : null
+      const reason = prefix !== null && (!prefix || /[。！？!?；;：:\n]$/.test(prefix)) ? prefix : message
       return h('section', { className: 'ddf-chat-notice', 'data-kind': 'coordination', role: 'status' },
         h('strong', { className: 'ddf-chat-notice-heading' }, h('span', { className: 'ddf-coordination-symbol', 'aria-hidden': true }, '!'),
           t(issue.role === 'coordinator' || !issue.role ? 'coordination.coordinator' : 'coordination.worker')),
-        h('p', null, issue.tool + '：' + issue.message),
-        h('p', { className: 'ddf-coordination-next' }, h('strong', null, t('view.next') + '：'), issue.nextAction))
+        h('p', null, issue.tool + (reason ? '：' + reason : '')),
+        nextAction ? h('p', { className: 'ddf-coordination-next' }, h('strong', null, t('view.next') + '：'), nextAction) : null)
     }
 
     function ChatPlanNotice({ t, plan, openView, error }) {

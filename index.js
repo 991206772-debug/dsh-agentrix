@@ -1176,7 +1176,7 @@ export function apply(ctx) {
             const choice = orchestration.decisionCurrent(agentId) ? '本需求已记录执行方式：' + decision.mode + '。范围未变无需重复记录。'
               : current.mode === 'auto' ? '当前判断尚未记录；auto 普通操作可直接执行，主控用 delegation_decide 补充真实理由。委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run。'
                 : '本需求尚未记录判断或范围已补充；新委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run；直接执行先记录 direct。'
-            const checks = !summary ? orchestration.checkGuidance(agentId) : ''
+            const checks = orchestration.checkGuidance(agentId)
             return [DISCIPLINE, pending, choice, checks, missing, unresolved, summary].filter(Boolean).join('\n\n')
           } catch {
             return DISCIPLINE

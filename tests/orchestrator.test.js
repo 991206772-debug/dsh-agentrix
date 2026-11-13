@@ -3520,6 +3520,73 @@ test('supplements are explicitly forwarded with acceptance criteria or acknowled
   assert.equal(f.snapshot().status, 'accepted')
 })
 
+test('a continued message can be explicitly forwarded after inbox retargeting without replacing its worker', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const childId = f.children[0].id
+  const message = { id: 'continued-design', source: { kind: 'user' }, content: [{ type: 'text', text: '设计稿要素已补在文件夹，请继续原任务。' }] }
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, inserted: [message] } })
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' } })
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', start: 0, inserted: [message] } })
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', start: 0, removedCount: 1, inserted: [] } })
+  f.emit('session/event', f.parent, { type: 'user/message', data: message })
+  const continued = await f.execute('delegation_decide', { relation: 'continue', messageId: message.id })
+  assert.equal(f.snapshot().inputs?.length ?? 0, 0, 'a plain continuation does not force extra handling')
+  assert.equal(continued.nextAction.type, 'wait')
+  const result = await f.execute('delegation_control', { action: 'steer', taskId: 'a', inputIds: [message.id],
+    message: '继续原任务并核对新增设计材料。', additionalCriteria: ['新增设计材料已作为规格来源交叉核对'] })
+  assert.equal(result.messageId, 'message')
+  assert.equal(f.calls[1][1], childId)
+  assert.match(f.calls[1][2][0].text, /设计稿要素已补在文件夹/)
+  assert.equal(f.snapshot().inputs[0].status, 'forwarded')
+  assert.equal(f.snapshot().tasks[0].criteria.length, 2)
+  assert.equal(f.snapshot().tasks[0].childId, childId)
+  assert.equal(f.snapshot().tasks[0].attempts, 1)
+  assert.equal(f.pending.length, 1)
+  await assert.rejects(f.execute('delegation_control', { action: 'steer', taskId: 'a', inputIds: [message.id],
+    message: '再次发送', additionalCriteria: ['不应重复'] }), /已转交.*不要重复/)
+  assert.match(f.snapshot().coordinationIssue.nextAction, /已转交.*不要重复/)
+  assert.doesNotMatch(f.snapshot().coordinationIssue.nextAction, /等待原执行者/)
+})
+
+test('a failed handoff of a continued message remains pending and can retry the same worker', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const message = { id: 'continue-send-failure', source: { kind: 'user' }, content: [{ type: 'text', text: '补充资料已到，请一并核对。' }] }
+  f.emit('session/event', f.parent, { type: 'user/message', data: message })
+  await f.execute('delegation_decide', { relation: 'continue', messageId: message.id })
+  const send = f.ctx.subagents.sendMessage
+  f.ctx.subagents.sendMessage = async () => { throw new Error('temporary inbox failure') }
+  const args = { action: 'steer', taskId: 'a', inputIds: [message.id], message: '核对补充资料。', additionalCriteria: ['补充资料已核对'] }
+  await assert.rejects(f.execute('delegation_control', args), /temporary inbox failure/)
+  assert.equal(f.snapshot().inputs[0].status, 'received')
+  assert.equal(JSON.parse(await readFile(f.file, 'utf8')).plans[0].inputs[0].status, 'received')
+  assert.doesNotMatch(f.snapshot().coordinationIssue.nextAction, /等待原执行者/)
+  f.ctx.subagents.sendMessage = send
+  await f.execute('delegation_control', args)
+  assert.equal(f.snapshot().inputs[0].status, 'forwarded')
+  assert.equal(f.snapshot().tasks[0].attempts, 1)
+  assert.equal(f.pending.length, 1)
+})
+
+test('explicit handoff rejects withdrawn, question and other-request message ids with actionable feedback', async () => {
+  const f = await fixture(); await f.plan([card('a')]); await f.execute('delegation_run')
+  const steer = id => f.execute('delegation_control', { action: 'steer', taskId: 'a', inputIds: [id], message: '尝试转交', additionalCriteria: ['新增要求'] })
+  await assert.rejects(steer('not-in-this-session'), /不存在于本会话/)
+  const question = { id: 'just-a-question', source: { kind: 'user' }, content: [{ type: 'text', text: '进度怎么样？' }] }
+  f.emit('session/event', f.parent, { type: 'user/message', data: question })
+  await f.execute('delegation_decide', { relation: 'question', messageId: question.id })
+  await assert.rejects(steer(question.id), /question.*update/)
+  const removed = { id: 'removed-supplement', source: { kind: 'user' }, content: [{ type: 'text', text: '这条先不发' }] }
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', start: 0, inserted: [removed] } })
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-step', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' } })
+  await assert.rejects(steer(removed.id), /已撤回.*不能转交/)
+  const other = { id: 'unrelated-demand', source: { kind: 'user' }, content: [{ type: 'text', text: '另一个需求修改便签' }] }
+  f.emit('session/event', f.parent, { type: 'user/message', data: other })
+  await f.execute('delegation_decide', { relation: 'new', messageId: other.id, mode: 'direct', reason: '独立的新需求直接处理。' })
+  await assert.rejects(steer(other.id), /其他需求.*不能转交/)
+  assert.equal(f.snapshot().inputs?.length ?? 0, 0)
+  assert.equal(f.calls.length, 1)
+})
+
 test('a supplement arriving during acceptance defers the receipt and reaches bounded rework after reload', async () => {
   const message = { id: 'delivery-guidance', source: { kind: 'user' }, content: [{ type: 'text', text: '交付操作员不懂技术，需要页面引导。' }] }
   let inserted = false
@@ -3978,6 +4045,86 @@ test('unmanaged child messaging remains visible and is not blocked by managed re
   f.engine.refreshCoordinationTools(child)
   assert.deepEqual(restrictions, [])
   assert.equal(f.engine.guardChild({ agent: child, name: 'send_message' }), undefined)
+})
+
+test('coordinator executes declared independent writes with a single expiring native permit', async () => {
+  const f = await fixture(); f.parent.session.header.cwd = f.directory
+  await f.plan([card('docs', { writes: ['docs/result.md'] })]); await f.execute('delegation_run')
+  const calls = []
+  f.ctx.tools.execute = async exec => { calls.push(exec); assert.equal(f.engine.allowsVerification(exec), true)
+    return { isError: false, value: { exitCode: 0 }, content: [{ type: 'text', text: 'app created' }] } }
+  const args = { tool: 'pwsh', arguments: { command: 'create app', description: '搭建独立应用', workdir: f.directory }, writes: ['app'] }
+  const result = await f.execute('delegation_execute', args)
+  assert.equal(result.passed, true)
+  assert.deepEqual(result.writes, [path.join(f.directory, 'app')])
+  assert.equal(calls.length, 1)
+  assert.equal(f.engine.allowsVerification(calls[0]), false)
+  assert.equal(f.snapshot().tasks[0].status, 'running')
+  assert.equal(f.pending.length, 1)
+  assert.match(f.engine.coordinatorWriteBlock({ agent: f.parent, name: 'pwsh', arguments: args.arguments }), /未执行/)
+  for (const writes of [['docs'], ['docs/result.md'], ['.']]) await assert.rejects(f.execute('delegation_execute', { ...args, writes }), /重叠/)
+  await assert.rejects(f.execute('delegation_execute', { ...args, arguments: { ...args.arguments, run_in_background: true } }), /前台/)
+  await assert.rejects(f.execute('delegation_execute', { ...args, writes: [] }), /范围|路径/)
+  await assert.rejects(f.execute('delegation_execute', args, f.children[0]), /子 Agent|主控/)
+  assert.equal(calls.length, 1)
+})
+
+test('coordinator declared writes reject junction aliases of protected files', async () => {
+  const f = await fixture(); f.parent.session.header.cwd = f.directory
+  const docs = path.join(f.directory, 'docs'), alias = path.join(f.directory, 'app')
+  await mkdir(docs); await symlink(docs, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  await f.plan([card('docs', { writes: ['docs/result.md'] })])
+  await assert.rejects(f.execute('delegation_execute', { tool: 'pwsh', writes: ['app'], arguments: { command: 'create app', workdir: f.directory } }), /重叠/)
+})
+
+test('strict and fixed coordinator commands require classification only when new messages are pending', async () => {
+  for (const mode of ['strict', 'fixed']) {
+    const f = await fixture({ mode }); f.parent.session.header.cwd = f.directory
+    await f.plan([card('docs', { writes: ['docs/result.md'] })])
+    let calls = 0
+    f.ctx.tools.execute = async () => { calls++; return { isError: false, value: { exitCode: 0 }, content: [] } }
+    const args = { tool: 'pwsh', writes: ['app'], arguments: { command: 'create app', workdir: f.directory } }
+    assert.equal((await f.execute('delegation_execute', args)).passed, true, 'the current delegate decision permits disjoint coordinator work')
+    const message = { id: 'pending-local-' + mode, source: { kind: 'user' }, content: [{ type: 'text', text: '请把新增设计材料一并考虑。' }] }
+    f.emit('session/event', f.parent, { type: 'user/message', data: message })
+    assert.equal(f.engine.decisionCurrent(f.parent.id), false)
+    await assert.rejects(f.execute('delegation_execute', args), /关联|判断/)
+    assert.equal(calls, 1, 'unclassified messages must not reach the native shell in strict or fixed mode')
+    await f.execute('delegation_decide', { relation: 'continue', messageId: message.id })
+    assert.equal((await f.execute('delegation_execute', args)).passed, true, 'classification restores the original delegate decision without switching to direct')
+    assert.equal(calls, 2)
+  }
+})
+
+test('coordinator local commands serialize and cancellation aborts the native invocation', async () => {
+  const f = await fixture(); f.parent.session.header.cwd = f.directory
+  await f.plan([card('docs', { writes: ['docs/result.md'] })]); await f.execute('delegation_run')
+  const entered = Promise.withResolvers()
+  f.ctx.tools.execute = async exec => { entered.resolve(exec); await new Promise(resolve => exec.signal.addEventListener('abort', resolve, { once: true }))
+    return { isError: false, value: { exitCode: 0 }, content: [] } }
+  const args = { tool: 'pwsh', writes: ['app'], arguments: { command: 'create app', workdir: f.directory } }
+  const operation = f.execute('delegation_execute', args)
+  const failed = assert.rejects(operation, /取消|中止/)
+  const invocation = await entered.promise
+  await assert.rejects(f.execute('delegation_execute', args), /正在执行/)
+  await f.cancel()
+  await failed
+  assert.equal(invocation.signal.aborted, true)
+  assert.equal(f.engine.allowsVerification(invocation), false)
+})
+
+test('coordinator local commands prevent acceptance from finishing before the command settles', async () => {
+  const f = await fixture(); f.parent.session.header.cwd = f.directory
+  await f.plan([card('docs', { writes: ['docs/result.md'] })]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'docs' })
+  const gate = Promise.withResolvers(), entered = Promise.withResolvers()
+  f.ctx.tools.execute = async () => { entered.resolve(); await gate.promise; return { isError: false, value: { exitCode: 0 }, content: [] } }
+  const operation = f.execute('delegation_execute', { tool: 'pwsh', writes: ['app'], arguments: { command: 'create app', workdir: f.directory } })
+  await entered.promise
+  await assert.rejects(f.execute('delegation_review', { taskId: 'docs', verdict: 'accept', findings: [{ criterion: 0, finding: '符合要求', evidence: [proof.results[0].ref] }] }), /主控.*命令|命令.*执行/)
+  assert.equal(f.snapshot().completion, null)
+  gate.resolve(); assert.equal((await operation).passed, true)
 })
 
 test('legacy managed workers retain their original native messaging contract', async () => {
