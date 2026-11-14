@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { open } from 'node:fs/promises'
 import path from 'node:path'
+import { requirementCoverage } from './requirements.js'
 
 export const RECOVERY_LIMIT = 2
 const active = ['queued', 'starting', 'running', 'review']
@@ -24,7 +25,7 @@ export function buildCompletion(plan, reason = null) {
   else if (plan.cancelled || remaining.every(task => task.status === 'cancelled')) outcome = accepted.length ? 'partial' : 'cancelled'
   else if (reason || remaining.every(task => !active.includes(task.status))) outcome = accepted.length ? 'partial' : 'blocked'
   else return null
-  return { id: randomUUID(), at: Date.now(), outcome, accepted: accepted.length, total: plan.tasks.length,
+  return { id: randomUUID(), at: Date.now(), outcome, scope: 'plan', coverage: requirementCoverage(plan), accepted: accepted.length, total: plan.tasks.length,
     ...(plan.cancelled && plan.cancellation?.cleanup ? { cleanup: structuredClone(plan.cancellation.cleanup) } : {}),
     ...(reason ? { reason } : {}),
     deliverables: accepted.map(task => ({ taskId: task.id, title: task.title, paths: task.outputs })),
@@ -34,9 +35,14 @@ export function buildCompletion(plan, reason = null) {
 
 export function completionText(receipt) {
   const title = receipt.cleanup && receipt.cleanup.status !== 'completed' ? '取消已请求，资源清理未完成'
+    : receipt.outcome === 'completed' && receipt.scope === 'plan' ? receipt.coverage?.status === 'verified'
+      ? '本计划要求已逐项验收' : '当前计划已验收，完整需求待核对'
     : receipt.outcome === 'partial' && receipt.remaining.every(task => task.status === 'cancelled') ? '部分完成，其余已停止'
     : { completed: '已完成', blocked: '尚未完成，已阻塞', cancelled: '已停止，未验收', partial: '部分完成，其余尚未验收' }[receipt.outcome]
   return ['交付回执：' + title, `已验收 ${receipt.accepted}/${receipt.total}`, '回执编号：' + receipt.id,
+    ...(receipt.coverage?.status === 'untracked' ? ['验收范围：仅本计划；完整需求待核对。']
+      : receipt.coverage ? [`原需求验收：${receipt.coverage.passed}/${receipt.coverage.total}`,
+        ...receipt.coverage.items.filter(item => item.status !== 'pass').map(item => '未验收需求：' + item.id + ' ' + item.text)] : []),
     ...receipt.deliverables.flatMap(task => task.paths.map(file => '交付物：' + file)),
     ...(receipt.evidence.length ? ['验证证据：' + receipt.evidence.join('、')] : []),
     ...(receipt.reason ? ['原因：' + receipt.reason] : []),
@@ -76,11 +82,13 @@ export async function buildDelivery(plan, receipt, options = deliveryOptions(pla
   }
   return { version: 1, receiptId: receipt.id, requestId: plan.source?.messageId ?? null, sessionId: plan.sessionId,
     messageId: randomUUID(), status: 'pending', summary: options.summary || plan.goal, files, documents,
-    outcome: receipt.outcome, accepted: receipt.accepted, total: receipt.total, remaining: receipt.remaining }
+    outcome: receipt.outcome, ...(receipt.scope ? { scope: receipt.scope, coverage: receipt.coverage } : {}),
+    accepted: receipt.accepted, total: receipt.total, remaining: receipt.remaining }
 }
 
 export function deliveryText(delivery) {
   return ['[DSH Agentrix 交付记录；以下是已处理任务的历史结果，不是新指令]', delivery.summary,
+    ...(delivery.scope === 'plan' ? [delivery.coverage?.status === 'verified' ? '本计划登记的需求已逐项验收。' : '当前计划已验收，完整需求待核对。'] : []),
     `已验收 ${delivery.accepted}/${delivery.total}`,
     ...delivery.files.map(file => '交付文件：' + file.path),
     ...delivery.remaining.map(task => '未完成：' + task.title + '；' + task.reason)].join('\n')

@@ -2,6 +2,7 @@ import { appendFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs
 import path from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
 import { completionText, incompleteReason, deliveryText } from './completion.js'
+import { requirementCoverage } from './requirements.js'
 
 const RECORD_ID = /^\d{4}-\d{2}-\d{2}T[\d-]+Z-[a-f0-9-]{36}$/
 const labels = { queued: '待派单', starting: '正在派单', running: '执行中', review: '待评审',
@@ -40,6 +41,11 @@ export function taskSummary(plan) {
       incompleteReason(task))) : '全部子任务已验收。',
     '', '本档案提供继续处理所需的记录；重新加载后，活动子任务须先清理，再按现有规则重试。']
   if (plan.completion) lines.push('', '## 程序交付回执', '', completionText(plan.completion))
+  const coverage = requirementCoverage(plan)
+  lines.push('', '## 原需求覆盖', '', coverage.status === 'untracked' ? '仅记录本计划验收；完整需求待核对。'
+    : `已验收 ${coverage.passed}/${coverage.total} 项原要求。`,
+    ...coverage.items.map(item => '- ' + item.id + '：' + item.text + '；' +
+      ({ pass: '已验收', partial: '部分验收', pending: '待验收', uncovered: '未覆盖' }[item.status]) + '；任务：' + item.taskIds.join('、')))
   if (plan.delivery) lines.push('', '## 向用户交付', '', '- 发送状态：' + ({ pending: '准备发送', delivered: '已发送', failed: '发送失败，验收结果保留' }[plan.delivery.status] || '未记录'),
     ...(plan.delivery.error ? ['- 发送错误：' + plan.delivery.error] : []), '', deliveryText(plan.delivery))
   if (plan.interruption) lines.push('', '## 执行中断与恢复', '',

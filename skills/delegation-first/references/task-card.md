@@ -20,15 +20,23 @@
 | `reviewPolicy` | 接口可选，新任务应显式填写：`coordinator` 主控验证验收，`independent` 额外独立审查；按错误后果选择。两项审查字段均省略时兼容 complex 自动审查的旧约定 |
 | `reviewReason` | 指定 `reviewPolicy` 时必填，非空且最多 1000 字，说明风险与审查必要性；高风险工作使用 independent |
 | `criteria` | 能逐条核对的用户要求与必要正确性验证；主控建议不自动成为硬性标准 |
+| `requirementIds` | 登记计划级 `requirements` 后，按 `criteria` 顺序引用原需求编号；相同原文可省略由程序匹配 |
+| `acceptance` | 可选，逐条指定 `criterionId`、最低证据类型及 `checks` 下标；登记原需求后可由程序生成 |
 | `checks` | 主控实际执行的验证步骤，每项有 `tool`、`arguments`；合并固定检查，未变更且已成功时不重复自测 |
 
 验证工具支持 `read`、`grep`、`glob`、`pwsh`、`bash`。`checks.arguments` 必须使用当前工具定义的字段名、类型及全部必填项；建计划前的运行提示会列出当前工具的必填项，不把 `file_path` 改成 `path`，也不遗漏 Shell 工具要求的说明字段。参数错误会按任务和检查编号一次列出已发现的缺项、类型错误或不接受的字段；校验通过前不会保存新计划或派发。shell 用前台命令。代码任务通常同时安排读取交付物和运行相关测试。
+
+多功能或完整交付时，计划级 `requirements` 登记全部原始必需要求，每项含固定 `id`、原要求 `text`、最低证据 `evidence`。`static` 用于静态内容核对；构建、测试、真实模型与业务运行用 `execution`，安排有结果断言的前台命令。任务必须覆盖全部编号，同一需求后续计划不能删除、改写或降低原要求。用户补充追加编号，原执行者继续处理。简单任务可省略需求清单，但回执只证明本计划验收，不证明完整需求完成。
 
 执行者用配置的 worker；独立审查沿用该次派发时记录的主控模型和思考强度，无需额外配置。主控应先确定方案，把足够明确的指令交给执行者，不通过修改 complexity 偷换执行模型。
 
 ```json
 {
   "goal": "补充登录失败场景验证",
+  "requirements": [
+    {"id": "R1", "text": "覆盖密码错误和账号锁定两条路径", "evidence": "execution"},
+    {"id": "R2", "text": "相关测试退出码为 0", "evidence": "execution"}
+  ],
   "directory": "./project",
   "relation": "new",
   "start": true,
@@ -46,6 +54,7 @@
     "reviewPolicy": "independent",
     "reviewReason": "覆盖登录与账号锁定等权限边界，由独立审查核对覆盖范围，主控运行测试并验收",
     "criteria": ["覆盖密码错误和账号锁定两条路径", "相关测试退出码为 0"],
+    "requirementIds": ["R1", "R2"],
     "checks": [
       {"tool": "read", "arguments": {"file_path": "tests/login.failures.test.js"}},
       {"tool": "pwsh", "arguments": {"description": "Run login failure tests", "command": "node --test tests/login.failures.test.js"}}

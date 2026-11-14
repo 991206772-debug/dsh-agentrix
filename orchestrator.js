@@ -6,6 +6,8 @@ import { buildCompletion, completionText, incompleteReason, RECOVERY_LIMIT, deli
 import { startSupervision, observeTool, observeUsage, observeRequest, SUPERVISION_POLICY } from './supervision.js'
 import { createUsageLedger } from './usage.js'
 import { createRuntimeStore } from './runtime-store.js'
+import { evidenceKind, assertCriterionEvidence, snapshotArtifacts, assertArtifactsCurrent } from './verification.js'
+import { normalizeRequirements, preserveRequirements, requirementCoverage, extendRequirements } from './requirements.js'
 
 export const DEFAULT_OPTIONS = Object.freeze({
   maxParallel: 4, maxAttempts: 5, maxActivations: 64, taskTimeoutMinutes: 120,
@@ -39,7 +41,11 @@ const brief = (value, limit = 3000) => String(value ?? '').slice(0, limit)
 const textOf = content => (content ?? []).filter(block => block?.type === 'text').map(block => block.text).join('\n')
 const messageOf = error => brief(error?.message ?? error)
 const isServiceIssue = issue => ['MODEL_SERVICE_QUOTA', 'MODEL_SERVICE_RATE_LIMIT', 'MODEL_SERVICE_REQUEST_REFUSED'].includes(issue?.code)
-const criteriaOf = task => task.criteria.map((text, criterion) => ({ id: 'C' + (criterion + 1), criterion, text }))
+const criteriaOf = task => task.criteria.map((text, criterion) => {
+  const id = 'C' + (criterion + 1), acceptance = task.acceptance?.find(item => item.criterionId === id)
+  return { id, criterion, text, ...(task.requirementIds?.[criterion] ? { requirementId: task.requirementIds[criterion] } : {}),
+    ...(acceptance ? { evidence: acceptance.evidence, checks: [...acceptance.checks] } : {}) }
+})
 const requiresAudit = task => task.reviewPolicy === undefined ? task.complexity === 'complex' : task.reviewPolicy === 'independent'
 function taskPromptScope(task) {
   const fixes = Boolean(task.reworkContext?.reportPath && !task.reworkContext.expanded && task.reworkIds?.length)
@@ -127,7 +133,7 @@ function compactResult(value) {
   if (value.source) result.source = compactMessage(value.source)
   if (value.pendingMessages) result.pendingMessages = value.pendingMessages.map(compactMessage)
   if (value.plan) result.plan = { sessionId: value.plan.sessionId, goal: brief(value.plan.goal, 300), status: value.plan.status,
-    decision: value.plan.decision, nextAction: value.plan.nextAction, pendingMessages: value.plan.pendingMessages?.map(compactMessage),
+    decision: value.plan.decision, coverage: value.plan.coverage, nextAction: value.plan.nextAction, pendingMessages: value.plan.pendingMessages?.map(compactMessage),
     activationBudget: value.plan.activationBudget, dispatchWait: value.plan.dispatchWait,
     interruption: value.plan.interruption,
     ...(value.plan.cancellation ? { cancellation: { reason: value.plan.cancellation.reason, at: value.plan.cancellation.at, cleanup: value.plan.cancellation.cleanup } } : {}),
@@ -248,7 +254,10 @@ function validatePlan(args, stored = false) {
       scope: requireText(input.scope, '边界'), outputs: strings(input.outputs, '交付物'), writes: strings(input.writes, '可修改路径', true),
       dependsOn: strings(input.dependsOn ?? [], '依赖', true), complexity: input.complexity, ...review,
       complexityReason: input.complexityReason == null ? null : requireText(input.complexityReason, '档位依据', 1000), modelRoute: null,
-      criteria: strings(input.criteria, '验收标准'), checks, status: 'queued', attempts: 0,
+      criteria: strings(input.criteria, '验收标准'),
+      ...(input.acceptance !== undefined ? { acceptance: input.acceptance } : {}),
+      ...(input.requirementIds !== undefined ? { requirementIds: input.requirementIds } : {}),
+      checks, status: 'queued', attempts: 0,
       protocolVersion: 2, execution: null, issues: [], reworkIds: [], report: '', error: null, feedback: '', evidence: [], review: null, childId: null, model: null, progress: null }
   })
   const ids = new Set(tasks.map(task => task.id))
@@ -265,7 +274,7 @@ function validatePlan(args, stored = false) {
     stack.delete(task.id); visited.add(task.id)
   }
   tasks.forEach(visit)
-  return { goal, tasks }
+  return { goal, ...normalizeRequirements(args.requirements, tasks) }
 }
 
 const normalizedPath = value => path.resolve(value).replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
@@ -324,6 +333,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const stagedResults = new Map(), pendingTransports = new Map(), committing = new Set()
   const waitingParents = new Map()
   const verifyingTasks = new WeakSet()
+  const acceptanceChecks = new WeakSet()
   const coordinatorCommands = new Map()
   const coordinationFailures = new Set(), coordinationCalls = new Map(), coordinationRestrictions = new Map()
   const toolDefinitions = new Map(), reportSchemas = new Map()
@@ -513,6 +523,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return { sessionId, source: clone(sourceOf(sessionId)), revision: clone(revisionOf(sessionId)),
       decision: decisionFor(sessionId), decisionCurrent: decisionCurrent(sessionId),
       messageResolution: clone(entry?.messageResolution ?? null), pendingMessages: clone(pendingMessages(sessionId)),
+      requirements: clone(entry?.requirements ?? null),
       planMatchesRequest: Boolean(plan && isCurrentPlan(plan)) }
   }
   function nextAction(plan, sessionId = plan?.sessionId, completion = plan?.completion) {
@@ -530,6 +541,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (!plan.cancelled && plan.interruption && !plan.interruption.resumedAt) return { type: 'run', message: '执行已中断，进度保留。用户明确继续后调用 delegation_run，沿用原计划恢复未完成任务；已返回报告继续验证验收，不必新建计划。' }
     if (plan.cancelled && plan.cancellation?.cleanup?.status !== 'completed' && plan.cancellation?.cleanup) return {
       type: 'handle_failure', message: '用户取消已记录，资源清理未完成。处理清理错误后再次调用 delegation_cancel 重试清理；无需新增取消消息，不启动新代理。' }
+    if (completion?.outcome === 'completed' && completion.scope === 'plan' && completion.coverage?.status !== 'verified') return {
+      type: 'finished', message: '当前计划已验收，完整需求待核对。对照原始用户要求核对交付范围，遗漏项继续处理；不要把子计划回执当作全部需求完成，也不要重复启动已验收任务。' }
     if (completion || plan.cancelled) return { type: 'finished', message: '以程序交付回执为准；不要重复启动或清理。' }
     if (unresolvedInputs(plan).length) return { type: 'handle_input', message: '先处理用户补充，沿用原代理同步要求。' }
     const returned = plan.tasks.filter(task => task.status === 'review' && !task.pendingAcceptance)
@@ -579,7 +592,13 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return criteria
   }
   function forwardInputs(plan, task, inputs, criteria, message, messageId) {
-    task.criteria.push(...criteria.filter(criterion => !task.criteria.includes(criterion)))
+    const additions = [...new Set(criteria)].filter(criterion => !task.criteria.includes(criterion))
+    extendRequirements(plan, task, additions)
+    task.criteria.push(...additions)
+    if (plan.requirements) {
+      const entry = decisions.get(plan.sessionId)
+      if (entry?.requirements?.requestId === plan.source?.messageId) entry.requirements.items = clone(plan.requirements)
+    }
     if (criteria.length) { task.evidence = []; task.review = null; task.checks.forEach(check => { check.result = null }) }
     for (const input of inputs) Object.assign(input, { status: 'forwarded', taskId: task.id, handledAt: Date.now(), resolution: message, messageId, additionalCriteria: criteria })
     if (inputs.length) remember(plan, 'plan.input_forwarded', '用户补充已同步至任务 ' + task.id, task, { inputIds: inputs.map(input => input.id) })
@@ -932,7 +951,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (!persist && pendingMessages(plan.sessionId).length) copy.pendingMessages = clone(pendingMessages(plan.sessionId))
     if (copy.decision) copy.decisionCurrent = ['accepted', 'cancelled'].includes(planStatus(plan)) || decisionCurrent(plan.sessionId)
     if (['accepted', 'cancelled'].includes(planStatus(plan))) copy.dispatchWait = null
-    return { ...copy, status: planStatus(plan), ...(!persist ? { nextAction: nextAction(plan) } : {}) }
+    return { ...copy, status: planStatus(plan), ...(!persist ? { coverage: requirementCoverage(plan), nextAction: nextAction(plan) } : {}) }
   }
   const snapshot = () => [...plans.values()].map(plan => snapshotPlan(plan))
   const completionStage = plan => JSON.stringify(targetsOf(plan).map(task =>
@@ -1269,6 +1288,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const decision = changes ? { mode: args.mode, reason, requestId: source.messageId, revisionId: revision.messageId, at, model } : entry.decision ?? null
     const resolution = { messageId: message?.messageId ?? revision.messageId, requestId: source.messageId, relation, at, model, ...(reason ? { reason } : {}) }
     const next = { ...entry, source: clone(source), revision: clone(revision), decision, messageResolution: resolution }
+    if (relation === 'new' && entry.source?.messageId !== source.messageId) delete next.requirements
     if (message && next.argumentRecovery?.requestId === message.messageId) next.argumentRecovery = { ...next.argumentRecovery, requestId: source.messageId }
     if (message) {
       next.messages = entry.messages.map(item => item.messageId === message.messageId ? { ...item, resolution } : item)
@@ -2050,7 +2070,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (!Number.isInteger(args.checkIndex) || !task.checks[args.checkIndex]) throw new Error('验证步骤编号无效（从 0 开始）')
     const check = task.checks[args.checkIndex]
     if (check.verifying) throw new Error('该验证步骤正在执行')
-    if (task.pendingAcceptance) throw new Error('验收结果正在确认，不能同时更换验证证据')
+    if (task.pendingAcceptance || acceptanceChecks.has(task)) throw new Error('验收结果正在确认，不能同时更换验证证据')
     invalidateCompletion(plan)
     check.verifying = true
     check.result = null; task.review = null
@@ -2064,8 +2084,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       // Shell success requires an actual exit code. A background job or missing status is inconclusive.
       const passed = !result.isError && (!shell || exitCode === 0)
       const output = textOf(result.content) || JSON.stringify(value) || ''
-      const evidence = { callId, ref: 'E' + randomUUID().replaceAll('-', '').slice(0, 12), tool: check.tool, passed, at: Date.now(), attempt: task.attempts,
+      const evidence = { callId, ref: 'E' + randomUUID().replaceAll('-', '').slice(0, 12), tool: check.tool, evidenceKind: evidenceKind(check.tool), passed, at: Date.now(), attempt: task.attempts,
         summary: brief(output, 2000), truncated: output.length > 2000, outputCharacters: output.length, ...(shell ? { exitCode: exitCode ?? null } : {}) }
+      evidence.artifacts = await snapshotArtifacts(task.outputs, plan.cwd ?? parent.session?.header?.cwd)
+      if (exec.signal?.aborted) throw exec.signal.reason ?? new Error('验证已取消')
+      if (plan.cancelled || task.status === 'cancelled') throw new Error('任务已取消，本次验证不登记为成功')
       if (evidence.truncated) {
         try { evidence.outputPath = await records.writeVerification(plan, task, callId, output) }
         catch (error) { throw new Error('完整验证输出保存失败，本次验证未登记；处理存储问题后重新验证：' + messageOf(error)) }
@@ -2077,8 +2100,26 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       remember(plan, 'task.verified', '主 Agent 验证' + (passed ? '通过：' : '未通过：') + check.tool,
         task, { evidence })
       await save()
-      return { ...evidence, criteria: criteriaOf(task), nextAction: '按 C1、C2 等 criterionId 逐条填写 finding，在 evidence 中直接引用 ref；不要拼接 callId 或更改编号。' }
+      return { ...evidence, criteria: criteriaOf(task), nextAction: '按 C1、C2 等 criterionId 逐条填写 finding，在 evidence 中直接引用 ref；不要拼接 callId 或更改编号。' +
+        (task.acceptance ? '每项填写 status:pass/partial/fail/unverified，只有全部 pass 且绑定检查通过才可 accept。' : '') }
     } finally { delete check.verifying }
+  }
+  async function checkAcceptedArtifacts(plan, current, cwd) {
+    if (!plan.tasks.every(task => task === current || task.status === 'accepted' || task.pendingAcceptance)) return
+    for (const task of plan.tasks.filter(task => task !== current && task.status === 'accepted')) {
+      try { await assertArtifactsCurrent(task, cwd) }
+      catch (error) {
+        task.status = 'review'; task.review = null; task.evidence = []
+        task.checks.forEach(check => { check.result = null })
+        const audit = requiresAudit(task) || Boolean(task.audit)
+        task.audit = null
+        if (audit) queueAudit(task)
+        invalidateCompletion(plan)
+        remember(plan, 'task.evidence_stale', '已验收任务的产物变化，保留原报告并重新验证：' + messageOf(error), task)
+        await save(); await pump()
+        throw new Error(`先前任务 ${task.id} 的验收证据已失效；保留原执行结果，使用 delegation_verify 重新验证，无需重开执行者。`)
+      }
+    }
   }
   async function review(args, exec) {
     const { plan, parent } = ownPlan(exec), task = taskOf(plan, args.taskId)
@@ -2087,7 +2128,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (task.status !== 'review') throw new Error('只能评审已经返回结果的任务')
     args = { ...args, findings: reviewFindings(task, args.findings), issues: reviewFindings(task, args.issues),
       resolutions: Array.isArray(args.resolutions) ? args.resolutions.map(item => ({ ...item, evidence: reviewEvidence(task, item.evidence) })) : args.resolutions }
-    if (task.pendingAcceptance) throw new Error('当前验收正在通过工具管线确认，不能重复提交')
+    if (task.pendingAcceptance || acceptanceChecks.has(task)) throw new Error('当前验收正在通过工具管线确认，不能重复提交')
     if (verifyingTasks.has(task) || task.checks.some(check => check.verifying)) throw new Error('请等待正在执行的验证完成')
     if (args.verdict === 'rework') {
       const inputs = selectInputs(plan, args.inputIds), criteria = additionalCriteria(task, args, inputs)
@@ -2144,12 +2185,20 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         if (!Number.isInteger(finding.criterion) || !task.criteria[finding.criterion] || seen.has(finding.criterion)) throw new Error('验收标准编号缺失或重复；请直接使用 criterionId：' + criteriaOf(task).map(item => item.id).join('、'))
         seen.add(finding.criterion)
         requireText(finding.finding, '验收结论', 1000)
+        assertCriterionEvidence(task, finding)
         if (!Array.isArray(finding.evidence) || !finding.evidence.length || !finding.evidence.every(id => task.evidence.some(item => item.callId === id && item.passed && item.attempt === task.attempts))) throw new Error('验收证据必须引用本次主控验证实际返回的 callId 或 ref，不能附带说明；当前可用：' + evidenceChoices(task))
       }
       const closeIssues = () => { if (task.audit) return; for (const resolution of resolutions) {
         const issue = task.issues.find(item => item.id === resolution.id)
         issue.status = 'addressed'; issue.resolutionEvidence = clone(resolution.evidence); issue.reviewedAttempt = task.attempts
       } }
+      acceptanceChecks.add(task)
+      try {
+        await assertArtifactsCurrent(task, plan.cwd ?? parent.session?.header?.cwd)
+        await checkAcceptedArtifacts(plan, task, plan.cwd ?? parent.session?.header?.cwd)
+      }
+      finally { acceptanceChecks.delete(task) }
+      if (plan.cancelled || task.status !== 'review') throw new Error('验收期间任务状态发生变化，本次不能确认完成')
       const acceptedReview = { findings: clone(args.findings), ...(args.concernsResolution ? { concernsResolution: args.concernsResolution } : {}), at: Date.now() }
       if (plan.protocolVersion >= 2) {
         if (typeof exec.concludeTurn !== 'function') throw new Error('DSH 未提供 concludeTurn，不能保证验收后自动结束')
@@ -2165,6 +2214,15 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
             if (unresolvedInputs(plan).length) {
               delete task.pendingAcceptance
               remember(plan, 'task.acceptance_deferred', '验收期间收到用户补充，原结果尚未验收', task)
+              await save(); return
+            }
+            try {
+              await assertArtifactsCurrent(task, plan.cwd ?? parent.session?.header?.cwd)
+              await checkAcceptedArtifacts(plan, task, plan.cwd ?? parent.session?.header?.cwd)
+            }
+            catch (error) {
+              delete task.pendingAcceptance
+              remember(plan, 'task.acceptance_deferred', messageOf(error), task)
               await save(); return
             }
             closeIssues(); task.review = acceptedReview; task.status = 'accepted'; delete task.pendingAcceptance
@@ -2225,7 +2283,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     if (args.action === 'steer') {
       const target = task.audit?.status === 'running' ? task.audit : task
       if (target.status !== 'running') throw new Error('只能向正在执行的子任务发送纠偏消息')
-      if (target.execution || task.pendingAcceptance || verifyingTasks.has(task) || task.checks.some(check => check.verifying)) throw new Error('报告或验证正在确认；请等待结果，核对补充要求后再决定返工')
+      if (target.execution || task.pendingAcceptance || acceptanceChecks.has(task) || verifyingTasks.has(task) || task.checks.some(check => check.verifying)) throw new Error('报告或验证正在确认；请等待结果，核对补充要求后再决定返工')
       const inputs = selectInputs(plan, args.inputIds), criteria = additionalCriteria(task, args, inputs)
       const message = [requireText(args.message, '纠偏内容'), ...inputs.map(input => '用户补充：' + input.text),
         ...(criteria.length ? ['新增验收标准：', ...criteria] : [])].join('\n')
@@ -2544,6 +2602,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   })
   routeTool('delegation_plan', '主控提交可验证的任务拆分。有待关联消息时 decisionReason 必填；从 direct 改为 delegate 使用 relation:update，并在派发前简短说明变化理由。提供 start:true 可保存决定、计划并按配置派发。子工程用 directory 明确根目录。同类工作合批，有独立价值才拆分；审查按风险用 reviewPolicy/reviewReason 单独说明，不按执行复杂度增加流程。省略审查方式仍沿用 complex 独立审查的旧约定；省略 start 或 false 仅保存。', {
     goal: string, relation: { type: 'string', enum: ['new', 'continue', 'update', 'question'], description: 'new 确认新需求；continue 沿用原执行方式和计划；范围、方案或 direct/delegate 方式变化用 update 并说明理由；question 只关联提问。' },
+    requirements: { ...array({ ...object({ id: string, text: string, evidence: { type: 'string', enum: ['static', 'execution'] } }), required: ['id', 'text', 'evidence'] }),
+      description: '多功能或完整交付时登记全部原始必需要求，固定id/text，不自行删减。static只需静态核对；构建、测试、模型调用和业务运行用execution，实际检查须执行有断言的命令。tasks.requirementIds逐项关联。省略只验收当前计划，不证明完整需求完成。' },
     messageId: { ...string, description: '本会话真实用户消息编号；多条待关联消息时必填，不能伪造。' },
     directory: { type: 'string', description: '工程根目录，省略沿用父会话目录；子工程须显式指定，相对值基于父会话目录。统一用于相对 writes/outputs、子代理工作目录和主控检查；继续已有计划不能更换目录。' },
     start: { type: 'boolean', description: 'true 表示建计划后立即校验模型、权限与预算并派发；省略或 false 仅建立计划。' },
@@ -2556,6 +2616,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       reviewPolicy: { type: 'string', enum: ['coordinator', 'independent'], description: '新任务显式填写，并提供 reviewReason。coordinator：主控实际验证并验收；independent：额外独立审查。按错误后果选择，权限、数据破坏、并发等高风险用 independent；复杂度或发布要求本身不代表高风险。' },
       reviewReason: { type: 'string', description: '指定 reviewPolicy 时必填，说明风险和所选审查方式的必要性；最多 1000 字。' },
       criteria: { ...array(string), description: '只包含用户要求和必要的正确性验证；主控的实施或写作建议不自动成为硬性验收标准。' },
+      requirementIds: { ...array(string), description: '登记requirements时按criteria顺序逐条引用固定需求id，长度相同；原要求原文与criteria完全一致时可省略由程序匹配。' },
+      acceptance: { ...array({ ...object({ criterionId: string, evidence: { type: 'string', enum: ['static', 'execution'] }, checks: array({ type: 'integer' }) }), required: ['criterionId', 'evidence', 'checks'] }),
+        description: '需要精确绑定时逐条指定C1/C2、最低证据类型及checks下标（从0开始）。登记requirements时省略将自动按原要求绑定本任务检查；execution至少需要实际shell成功结果。' },
       checks: { ...array({ ...object({ tool: { type: 'string', enum: CHECK_TOOLS }, arguments: { type: 'object', additionalProperties: true } }), required: ['tool', 'arguments'] }),
         description: 'arguments 必须使用对应原生工具定义的字段名、类型和全部必填项。合并可一起执行的固定检查；相关产物与要求未变化且已成功时复用结果，不重复校准同一指标。' } }),
       required: ['id', 'title', 'instructions', 'scope', 'outputs', 'writes', 'complexity', 'criteria', 'checks'] }),
@@ -2577,6 +2640,10 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const errors = pendingMessages(parent.id).length && args.decisionReason === undefined
       ? ['建立计划前须明确消息关联，decisionReason 必填；一并提供真实 messageId 和 relation。若从 direct 改为 delegate，请用 relation:update 并说明理由；continue 只沿用原执行方式'] : []
     const validated = validatePlan(args)
+    const original = decisions.get(parent.id)?.requirements
+    const nextMessageId = args.messageId ?? (pendingMessages(parent.id).length === 1 ? pendingMessages(parent.id)[0].messageId : null)
+    const newRequest = args.relation === 'new' && nextMessageId && nextMessageId !== sourceOf(parent.id)?.messageId
+    if (original && !newRequest && original.requestId === sourceOf(parent.id)?.messageId) preserveRequirements(original.items, validated.requirements)
     const cwd = await planDirectory(args, parent, validated.tasks)
     validateChecks(validated.tasks, parent, exec.toolSet, errors)
     if (args.decisionReason !== undefined) await recordDecision({ mode: 'delegate', reason: args.decisionReason, relation: args.relation, messageId: args.messageId }, exec)
@@ -2588,6 +2655,12 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     if (cwd) for (const task of validated.tasks) task.writes = task.writes.map(value => path.resolve(cwd, value))
     const source = sourceOf(parent.id)
+    if (validated.requirements) {
+      if (!source?.messageId) throw new Error('登记原需求需要本会话真实用户消息来源；先用 delegation_decide 关联需求')
+      const entry = decisions.get(parent.id) ?? { sessionId: parent.id, source: clone(source), revision: clone(source) }
+      entry.requirements = { requestId: source.messageId, items: clone(validated.requirements) }
+      decisions.set(parent.id, entry)
+    }
     const routing = getRoute(parent.id)
     const sessionTitle = service('sessionTitle')?.get(parent.session)?.title
     const plan = { ...validated, protocolVersion: 2, decisionProtocolVersion: 2, messageResolution: clone(decisions.get(parent.id)?.messageResolution ?? null), decision: decisionCurrent(parent.id) ? decisionFor(parent.id) : null,
@@ -2720,7 +2793,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     issues: array({ ...object({ criterion: { type: 'integer', description: '旧格式，从 0 开始；优先使用 criterionId。' }, criterionId: { type: 'string', description: '验证结果提供的标准编号，例如 C1。' }, severity: { type: 'string', enum: ['critical', 'important', 'minor'] }, finding: string, evidence: array(string) }), required: ['severity', 'finding', 'evidence'] }),
     resolutions: { ...array({ ...object({ id: string, status: { type: 'string', enum: ['ADDRESSED'] }, evidence: array(string) }), required: ['id', 'status', 'evidence'] }),
       description: '无独立审查时，引用本次验证证据确认原问题。独立审查通过后通常省略；重复提供仅能确认本次独审已明确 ADDRESSED 的同一问题，不覆盖审查证据。' },
-    findings: array({ ...object({ criterion: { type: 'integer', description: '旧格式，从 0 开始；优先使用 criterionId。' }, criterionId: { type: 'string', description: '直接复制 C1、C2 等标准编号，不能自行重新编号。' }, finding: { type: 'string', description: '主控根据实际验证给出的逐条结论；程序不会代填通过。' }, evidence: array({ type: 'string', description: '直接复制本任务本次 delegation_verify 返回的 ref，不添加前缀、文件说明或引号。' }) }), required: ['finding', 'evidence'] }),
+    findings: array({ ...object({ criterion: { type: 'integer', description: '旧格式，从 0 开始；优先使用 criterionId。' }, criterionId: { type: 'string', description: '直接复制 C1、C2 等标准编号，不能自行重新编号。' },
+      status: { type: 'string', enum: ['pass', 'partial', 'fail', 'unverified'], description: '有acceptance或原需求清单时必填；仅全部pass允许accept。部分实现、未验证须如实记录并继续处理。' },
+      finding: { type: 'string', description: '主控根据实际验证给出的逐条结论；程序不会代填通过。' }, evidence: array({ type: 'string', description: '直接复制本任务本次 delegation_verify 返回的 ref，不添加前缀、文件说明或引号。' }) }), required: ['finding', 'evidence'] }),
   }, ['taskId', 'verdict'], review)
   routeTool('delegation_control', 'steer 同步给原代理；用户补充须关联 inputIds 并提供 additionalCriteria。新增执行要求示例：{action:"steer",taskId,inputIds,additionalCriteria,message}；仅告知、无影响或已由主控处理示例：{action:"acknowledge",inputIds,message}，不发信、不改变原验收标准，也无需 taskId。stop 仅取消；retry 须处理真实原因。', {
     taskId: string, action: { type: 'string', enum: ['steer', 'stop', 'retry', 'acknowledge'], description: 'steer 发送实际执行要求；仅告知、无影响或已由主控处理时用 acknowledge 记录处理说明，不要求原执行者重复处理。' }, message: string, reason: string,

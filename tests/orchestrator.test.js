@@ -21,6 +21,89 @@ const card = (id, overrides = {}) => ({
   criteria: ['交付物存在且内容符合要求'], checks: [{ tool: 'read', arguments: { path: 'result.txt' } }], ...overrides,
 })
 
+test('a plan cannot omit an original requirement from its task coverage', async () => {
+  const f = await fixture()
+  await assert.rejects(f.execute('delegation_plan', {
+    goal: '实现检索与真实改写', decisionReason: '两个功能由执行者实现，主控验证。',
+    requirements: [
+      { id: 'R1', text: '资料检索已接入聊天', evidence: 'execution' },
+      { id: 'R2', text: '真实模型完成改写', evidence: 'execution' },
+    ],
+    tasks: [card('retrieval', { criteria: ['资料检索已接入聊天'], requirementIds: ['R1'],
+      checks: [{ tool: 'pwsh', arguments: { command: 'node retrieval.test.js' } }] })],
+  }), /R2.*未覆盖|未覆盖.*R2/)
+  assert.equal(f.snapshot(), undefined)
+  assert.equal(f.pending.length, 0)
+})
+
+test('replacing a plan in the same request preserves original requirement identities after reload', async () => {
+  const f = await fixture()
+  const requirements = [{ id: 'R1', text: '检索接入聊天', evidence: 'static' }, { id: 'R2', text: '真实改写', evidence: 'static' }]
+  await f.execute('delegation_plan', { goal: '实现两个要求', decisionReason: '执行者实现，主控核对。', requirements,
+    tasks: [card('a', { criteria: requirements.map(item => item.text), requirementIds: ['R1', 'R2'] })] })
+  await f.cancel({ reason: '取消本次执行计划，稍后继续原需求' })
+  await f.reload()
+  await assert.rejects(f.execute('delegation_plan', { goal: '只实现检索', relation: 'update', decisionReason: '继续原需求。', requirements: requirements.slice(0, 1),
+    tasks: [card('a', { criteria: ['检索接入聊天'], requirementIds: ['R1'] })] }), /R2.*不能.*删|不能.*删.*R2/)
+  assert.equal(f.snapshot().tasks[0].criteria.length, 2)
+})
+
+test('a completed subplan without original requirement coverage has only a plan receipt', async () => {
+  const f = await fixture()
+  await f.plan([card('a')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'a' })
+  await f.execute('delegation_review', { taskId: 'a', verdict: 'accept', findings: [
+    { criterionId: 'C1', finding: '已核对本任务交付物', evidence: [proof.results[0].ref] },
+  ] })
+  assert.equal(f.snapshot().completion.scope, 'plan')
+  assert.equal(f.snapshot().completion.coverage.status, 'untracked')
+  const output = f.render('delegation_status', {}, await f.execute('delegation_status'))
+  assert.match(output, /当前计划|本计划/)
+  assert.match(output, /完整需求.*待核对|未登记.*需求/)
+})
+
+test('a supplement extends the original requirement ledger and preserves acceptance bindings on reload', async () => {
+  const f = await fixture()
+  await f.execute('delegation_plan', { goal: '完成文章', decisionReason: '执行者写作，主控核对。',
+    requirements: [{ id: 'R1', text: '正文内容正确', evidence: 'static' }],
+    tasks: [card('article', { criteria: ['正文内容正确'], requirementIds: ['R1'] })] })
+  await f.execute('delegation_run')
+  const childId = f.snapshot().tasks[0].childId
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'supplement', source: { kind: 'user' }, content: [{ type: 'text', text: '请加一段使用说明' }] } })
+  await f.execute('delegation_decide', { relation: 'update', messageId: 'supplement', mode: 'delegate', reason: '在原文补充说明。' })
+  await f.execute('delegation_control', { action: 'steer', taskId: 'article', inputIds: ['supplement'], message: '原文补充使用说明。', additionalCriteria: ['正文包含使用说明'] })
+  assert.equal(f.snapshot().tasks[0].childId, childId)
+  assert.equal(f.snapshot().requirements.length, 2)
+  assert.equal(f.snapshot().tasks[0].acceptance.length, 2)
+  assert.deepEqual(f.snapshot().tasks[0].requirementIds, ['R1', 'R2'])
+  await f.reload()
+  assert.equal(f.snapshot().requirements[1].text, '正文包含使用说明')
+  assert.equal((await f.execute('delegation_status')).context.requirements.items.length, 2)
+})
+
+test('original requirements need their own bound evidence before the request receipt is verified', async () => {
+  const f = await fixture()
+  await writeFile(path.join(f.directory, 'result.txt'), 'verified document')
+  const requirements = [{ id: 'R1', text: '正文完整', evidence: 'static' }, { id: 'R2', text: '相关验证已实际执行', evidence: 'execution' }]
+  await f.execute('delegation_plan', { directory: f.directory, goal: '交付并验证正文', decisionReason: '执行者整理内容，主控验证。', requirements,
+    tasks: [card('article', { criteria: requirements.map(item => item.text), requirementIds: ['R1', 'R2'],
+      acceptance: [{ criterionId: 'C1', evidence: 'static', checks: [0] }, { criterionId: 'C2', evidence: 'execution', checks: [1] }],
+      checks: [{ tool: 'read', arguments: { path: 'result.txt' } }, { tool: 'pwsh', arguments: { command: 'node check-document.js' } }] })] })
+  await f.execute('delegation_run'); await f.complete(0, { stopReason: 'completed', output: [] })
+  assert.equal(f.snapshot().coverage.status, 'pending')
+  const proof = await f.execute('delegation_verify', { taskId: 'article' })
+  await f.execute('delegation_review', { taskId: 'article', verdict: 'accept', findings: proof.results.map((result, index) => ({
+    criterionId: 'C' + (index + 1), status: 'pass', finding: '已依据对应验证结果核对', evidence: [result.ref],
+  })) })
+  assert.equal(f.snapshot().completion.coverage.status, 'verified')
+  assert.deepEqual(f.snapshot().completion.coverage.items.map(item => [item.id, item.status]), [['R1', 'pass'], ['R2', 'pass']])
+  const archive = await f.engine.readArchive(f.snapshot().archive.id)
+  assert.match(archive.markdown, /R1：正文完整；已验收/)
+  await f.reload()
+  assert.equal(f.snapshot().coverage.passed, 2)
+})
+
 test('managed read guidance precedes shell attempts and a supplement steers the same worker', async () => {
   const f = await fixture(); await f.plan([card('ui', { writes: ['client.js'], outputs: ['client.js'] })]); await f.execute('delegation_run')
   const childId = f.snapshot().tasks[0].childId
@@ -4307,4 +4390,151 @@ test('legacy managed workers retain their original native messaging contract', a
   assert.ok(restrictions.every(names => !names.includes('send_message')))
   assert.equal(f.engine.guardCoordination({ agent: child, name: 'send_message', arguments: { target: 'parent' } }), undefined)
   assert.equal(f.engine.guardChild({ agent: child, name: 'send_message' }), undefined)
+})
+
+test('partial criterion findings cannot become accepted even with successful tool evidence', async () => {
+  const f = await fixture(); await f.plan([card('partial')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'partial' })
+  await assert.rejects(f.execute('delegation_review', { taskId: 'partial', verdict: 'accept', findings: [{
+    criterionId: 'C1', status: 'partial', finding: '仅完成部分要求，实际业务仍未验证', evidence: [proof.results[0].ref],
+  }] }), /status|未通过|部分|验收结论/)
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+  assert.equal(f.snapshot().completion, null)
+})
+
+test('verification evidence identifies static reads and actual command execution separately', async () => {
+  const f = await fixture(); await f.plan([card('typed', { checks: [
+    { tool: 'read', arguments: { path: 'result.txt' } },
+    { tool: 'pwsh', arguments: { command: 'node --test' } },
+  ] })]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'typed' })
+  assert.equal(proof.results[0].evidenceKind, 'static')
+  assert.equal(proof.results[1].evidenceKind, 'execution')
+})
+
+test('changing a verified output invalidates acceptance without restarting the worker', async () => {
+  const f = await fixture(); f.parent.session.header.cwd = f.directory
+  await writeFile(path.join(f.directory, 'result.txt'), 'verified version')
+  await f.plan([card('changed')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'changed' })
+  await writeFile(path.join(f.directory, 'result.txt'), 'changed after verification')
+  await assert.rejects(f.execute('delegation_review', { taskId: 'changed', verdict: 'accept', findings: [{
+    criterionId: 'C1', finding: '旧验证不再覆盖当前产物', evidence: [proof.results[0].ref],
+  }] }), /产物.*变化|变化.*产物|重新验证/)
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+  assert.equal(f.snapshot().completion, null)
+  const fresh = await f.execute('delegation_verify', { taskId: 'changed' })
+  await f.execute('delegation_review', { taskId: 'changed', verdict: 'accept', findings: [{
+    criterionId: 'C1', finding: '当前产物已重新核对', evidence: [fresh.results[0].ref],
+  }] })
+  assert.equal(f.snapshot().tasks[0].status, 'accepted')
+  assert.equal(f.pending.length, 1)
+})
+
+test('criterion acceptance requires every bound check and actual execution evidence', async () => {
+  const f = await fixture(); f.parent.session.header.cwd = f.directory
+  await writeFile(path.join(f.directory, 'result.txt'), 'verified output')
+  await f.plan([card('bound', { checks: [
+    { tool: 'read', arguments: { path: 'result.txt' } },
+    { tool: 'pwsh', arguments: { command: 'node --test' } },
+  ], acceptance: [{ criterionId: 'C1', evidence: 'execution', checks: [0, 1] }] })])
+  await f.execute('delegation_run'); await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'bound' })
+  const finding = { criterionId: 'C1', status: 'pass', finding: '按约定验证', evidence: [proof.results[0].ref] }
+  await assert.rejects(f.execute('delegation_review', { taskId: 'bound', verdict: 'accept', findings: [finding] }), /绑定|execution|实际执行/)
+  await f.execute('delegation_review', { taskId: 'bound', verdict: 'accept', findings: [{
+    ...finding, evidence: proof.results.map(item => item.ref),
+  }] })
+  assert.equal(f.snapshot().tasks[0].status, 'accepted')
+})
+
+test('artifact freshness checks keep concurrent acceptance from replacing the same pending review', async () => {
+  const f = await fixture(); f.parent.session.header.cwd = f.directory
+  const output = path.join(f.directory, 'result.txt')
+  await writeFile(output, 'verified output')
+  await f.plan([card('locked')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'locked' })
+  const args = { taskId: 'locked', verdict: 'accept', findings: [{ criterionId: 'C1', finding: '当前版本符合要求', evidence: [proof.results[0].ref] }] }
+  const entered = Promise.withResolvers(), release = Promise.withResolvers(), original = fs.promises.open
+  fs.promises.open = async (file, ...rest) => {
+    if (String(file) === output && rest[0] === 'r') { entered.resolve(); await release.promise }
+    return original(file, ...rest)
+  }
+  syncBuiltinESMExports()
+  try {
+    const first = f.execute('delegation_review', args)
+    await entered.promise
+    const duplicate = assert.rejects(f.execute('delegation_review', args), /正在|重复|等待/)
+    release.resolve()
+    await first; await duplicate
+    assert.equal(f.snapshot().tasks[0].status, 'accepted')
+  } finally { release.resolve(); fs.promises.open = original; syncBuiltinESMExports() }
+})
+
+test('an output changed during acceptance confirmation cannot publish a completed receipt', async () => {
+  let changed = false
+  const f = await fixture({ async beforeResult(exec) {
+    if (exec.name === 'delegation_review' && !changed) {
+      changed = true
+      await writeFile(path.join(f.directory, 'result.txt'), 'changed before commit')
+    }
+  } })
+  f.parent.session.header.cwd = f.directory
+  await writeFile(path.join(f.directory, 'result.txt'), 'verified output')
+  await f.plan([card('late-change')]); await f.execute('delegation_run')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  const proof = await f.execute('delegation_verify', { taskId: 'late-change' })
+  await f.execute('delegation_review', { taskId: 'late-change', verdict: 'accept', findings: [{
+    criterionId: 'C1', finding: '核对验证时的产物', evidence: [proof.results[0].ref],
+  }] })
+  assert.equal(f.snapshot().tasks[0].status, 'review')
+  assert.equal(f.snapshot().tasks[0].pendingAcceptance, undefined)
+  assert.equal(f.snapshot().completion, null)
+  assert.equal(f.engine.storageError, null)
+})
+
+test('final requirement coverage cannot verify an earlier accepted output that has since changed', async () => {
+  const f = await fixture()
+  await writeFile(path.join(f.directory, 'article.txt'), 'verified article')
+  await writeFile(path.join(f.directory, 'guide.txt'), 'verified guide')
+  await f.execute('delegation_plan', { directory: f.directory, goal: '交付正文和说明', decisionReason: '两份文件分别核对并验收。',
+    requirements: [{ id: 'R1', text: '正文内容正确', evidence: 'static' }, { id: 'R2', text: '使用说明正确', evidence: 'static' }],
+    tasks: [card('article', { outputs: ['article.txt'], criteria: ['正文内容正确'], requirementIds: ['R1'],
+      checks: [{ tool: 'read', arguments: { path: 'article.txt' } }] }),
+    card('guide', { outputs: ['guide.txt'], criteria: ['使用说明正确'], requirementIds: ['R2'],
+      checks: [{ tool: 'read', arguments: { path: 'guide.txt' } }] })],
+  })
+  await f.execute('delegation_run'); await f.complete(0, { stopReason: 'completed', output: [] })
+  const first = await f.execute('delegation_verify', { taskId: 'article' })
+  await f.execute('delegation_review', { taskId: 'article', verdict: 'accept', findings: [{
+    criterionId: 'C1', status: 'pass', finding: '正文当前版本已核对', evidence: [first.results[0].ref],
+  }] })
+  assert.equal(f.snapshot().tasks[0].status, 'accepted')
+  await writeFile(path.join(f.directory, 'article.txt'), 'changed after its task was accepted')
+  await f.complete(1, { stopReason: 'completed', output: [] })
+  const second = await f.execute('delegation_verify', { taskId: 'guide' })
+  let acceptanceError
+  try {
+    await f.execute('delegation_review', { taskId: 'guide', verdict: 'accept', findings: [{
+      criterionId: 'C1', status: 'pass', finding: '说明当前版本已核对', evidence: [second.results[0].ref],
+    }] })
+  } catch (error) { acceptanceError = error }
+  if (acceptanceError) assert.match(acceptanceError.message, /产物.*变化|重新验证|证据.*失效/)
+  const final = f.snapshot()
+  assert.notEqual(final.coverage.status, 'verified', 'earlier accepted evidence must still match the final delivered files')
+  assert.notEqual(final.completion?.coverage.status, 'verified')
+  assert.equal(final.tasks[0].status, 'review')
+  const refreshed = await f.execute('delegation_verify', { taskId: 'article' })
+  await f.execute('delegation_review', { taskId: 'article', verdict: 'accept', findings: [{
+    criterionId: 'C1', status: 'pass', finding: '已重新核对当前正文', evidence: [refreshed.results[0].ref],
+  }] })
+  await f.execute('delegation_review', { taskId: 'guide', verdict: 'accept', findings: [{
+    criterionId: 'C1', status: 'pass', finding: '说明版本保持有效', evidence: [second.results[0].ref],
+  }] })
+  assert.equal(f.snapshot().completion.coverage.status, 'verified')
+  assert.equal(f.pending.length, 2, 'refreshing evidence must not create another executor')
 })

@@ -298,7 +298,7 @@ window.__ModuleLoader__.load({
       const receipt = plan?.completion
       const decision = plan?.decision ?? session?.decision
       const outcomes = ['completed', 'partial', 'blocked', 'cancelled']
-      if (receipt) return outcomes.includes(receipt.outcome) ? receipt.outcome : 'unknown'
+      if (receipt) return planCoveragePending(receipt) ? 'plan_completed' : outcomes.includes(receipt.outcome) ? receipt.outcome : 'unknown'
       if (plan) return plan.cancelled ? 'cancelled' : 'running'
       if (decision?.mode === 'direct') return 'direct'
       if (session?.pendingMessages?.length) return 'pending'
@@ -1102,6 +1102,7 @@ window.__ModuleLoader__.load({
     }
 
     function chatStatusKey(plan) {
+      if (planCoveragePending(plan?.completion)) return 'plan_completed'
       if (plan?.completion) return { completed: 'completed', cancelled: 'stopped', blocked: 'blocked', partial: 'partial' }[plan.completion.outcome]
       const remaining = (plan?.tasks ?? []).filter(task => task.status !== 'accepted')
       if (plan?.cancelled || remaining.length > 0 && remaining.every(task => task.status === 'cancelled')) return 'stopped'
@@ -1125,6 +1126,7 @@ window.__ModuleLoader__.load({
 .ddf-chat-progress[data-status="running"] .ddf-chat-summary { color:var(--dsw-alias-brand-primary,#4f6ef7); }
 .ddf-chat-progress[data-status="failed"] .ddf-chat-summary,.ddf-chat-progress[data-status="blocked"] .ddf-chat-summary { color:var(--dsw-alias-state-error-primary,#f54a45); }
 .ddf-chat-progress[data-status="completed"] .ddf-chat-summary { color:var(--dsw-alias-state-success-primary,#1f9d55); }
+.ddf-chat-progress[data-status="plan_completed"] .ddf-chat-summary { color:var(--dsw-alias-state-warning-primary,#d48806); }
 .ddf-chat-dot { width:5px; height:5px; border-radius:50%; background:currentColor; flex:none; }
 .ddf-chat-summary-text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 `
@@ -1304,8 +1306,13 @@ window.__ModuleLoader__.load({
 }
 `
 
+    function planCoveragePending(receipt) {
+      return receipt?.scope === 'plan' && receipt.outcome === 'completed' && receipt.coverage?.status !== 'verified'
+    }
+
     function completionLabel(t, receipt) {
       if (receipt.cleanup && receipt.cleanup.status !== 'completed') return t('completion.cleanupPending')
+      if (planCoveragePending(receipt)) return t('completion.planCompleted')
       const stopped = receipt.outcome === 'partial' && receipt.remaining.length > 0 && receipt.remaining.every(task => task.status === 'cancelled')
       return t('completion.' + (stopped ? 'partialStopped' : receipt.outcome))
     }
@@ -1348,6 +1355,7 @@ window.__ModuleLoader__.load({
       if ((plan.cancellation?.cleanup ?? receipt.cleanup)?.status && (plan.cancellation?.cleanup ?? receipt.cleanup).status !== 'completed') return t('completion.cleanupNext')
       const service = serviceProblem(plan)
       if (service) return service.action
+      if (planCoveragePending(receipt)) return t('completion.planNext')
       if (receipt.outcome === 'blocked') {
         const limit = state?.limits?.maxAttempts
         const exhausted = Number.isInteger(limit) && receipt.remaining.some(item => {
@@ -1363,6 +1371,7 @@ window.__ModuleLoader__.load({
     const RECEIPT_STYLES = `
 .ddf-receipt { box-sizing:border-box; min-width:0; margin:12px 0; padding:14px 16px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-left:3px solid var(--dsw-alias-border-l2,#c9cdd4); border-radius:7px; background:var(--dsw-alias-bg-layer-1,#fff); color:var(--dsw-alias-label-primary,#1f2329); font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif; overflow-wrap:anywhere; }
 .ddf-receipt[data-outcome="completed"] { border-left-color:var(--dsw-alias-state-success-primary,#1f9d55); }
+.ddf-receipt[data-outcome="plan_completed"] { border-left-color:var(--dsw-alias-state-warning-primary,#d48806); }
 .ddf-receipt[data-outcome="blocked"] { border-left-color:var(--dsw-alias-state-error-primary,#f54a45); }
 .ddf-receipt p { margin:6px 0; white-space:pre-wrap; }
 .ddf-receipt ul { margin:6px 0; padding-left:20px; }
@@ -1467,7 +1476,7 @@ window.__ModuleLoader__.load({
 
     /** Tone of the single page badge / conclusion card for a view state. */
     function acceptanceViewTone(view) {
-      return { direct: 'blue', running: 'blue', completed: 'green', partial: 'amber', blocked: 'red', cancelled: 'gray', empty: 'gray', pending: 'gray', unknown: 'gray' }[view] || 'gray'
+      return { direct: 'blue', running: 'blue', completed: 'green', plan_completed: 'amber', partial: 'amber', blocked: 'red', cancelled: 'gray', empty: 'gray', pending: 'gray', unknown: 'gray' }[view] || 'gray'
     }
 
     /** One task's real status, shared by the chips and the task cards. */
@@ -1494,7 +1503,25 @@ window.__ModuleLoader__.load({
       }
       const source = criteria.length ? criteria : checks.length ? checks.map(check => check.tool || t('acc.verify.tool')) : [t('acc.noCriteria')]
       return source.map((criterion, index) => {
-        const check = checks[index], finding = findings.find(item => item.criterion === index)
+        const criterionId = 'C' + (index + 1)
+        const finding = findings.find(item => item.criterion === index || item.criterionId === criterionId)
+        if (task.acceptance) {
+          const acceptance = task.acceptance.find(item => item.criterionId === criterionId)
+          const bound = (acceptance?.checks ?? []).map(index => checks[index])
+          const current = check => check?.result && (!Number.isInteger(check.result.attempt) || check.result.attempt === task.attempts) ? check.result : null
+          const verification = bound.map(check => {
+            const result = current(check)
+            return (check?.tool || t('acc.verify.tool')) + ' · ' + t(!result ? 'acc.verify.waiting' : result.passed ? 'acc.verify.checkSucceeded' : 'acc.verify.checkFailed')
+              + (time(result?.at) ? ' · ' + time(result.at) : '') + (result?.summary ? ' · ' + result.summary : '')
+          }).join('；') || t('acc.verify.noCheck')
+          const failed = bound.some(check => current(check)?.passed === false) || finding?.status === 'fail'
+          const passed = finding?.status === 'pass' && bound.length > 0 && bound.every(check => current(check)?.passed === true)
+          const partial = !failed && !passed && finding?.status === 'partial'
+          const name = criterionId + ' · ' + (task.requirementIds?.[index] ? task.requirementIds[index] + ' · ' : '') + String(criterion).replace(/^C\d+\s+/, '')
+          return { name, verification, result: t(failed ? 'acc.result.failed' : passed ? 'acc.result.passed' : partial ? 'coverage.partial' : 'acc.result.awaitingAcceptance'),
+            cls: failed ? 'bad' : passed ? 'ok' : 'wait' }
+        }
+        const check = checks[index]
         let verification, result, cls
         if (check?.result) {
           verification = (check.tool || t('acc.verify.tool')) + (time(check.result.at) ? ' · ' + time(check.result.at) : '')
@@ -1511,6 +1538,18 @@ window.__ModuleLoader__.load({
         }
         return { name: /^C\d+\s/.test(String(criterion)) ? String(criterion) : 'C' + (index + 1) + ' ' + criterion, verification, result, cls }
       })
+    }
+
+    function requirementStatus(t, status) {
+      return t('coverage.' + (['pass', 'partial', 'pending', 'uncovered'].includes(status) ? status : 'pending'))
+    }
+
+    function RequirementCoverage({ t, coverage }) {
+      if (!coverage?.items?.length) return null
+      return h('details', { className: 'ddf-board-diagnostics', 'data-requirement-coverage': '' },
+        h('summary', null, t('coverage.title') + ' · ' + coverage.passed + '/' + coverage.total),
+        h('ul', { className: 'ddf-acc-list' }, ...coverage.items.map(item => h('li', { key: item.id, 'data-requirement-id': item.id },
+          h('code', null, item.id), ' · ', item.text, ' · ', h('span', null, requirementStatus(t, item.status))))))
     }
 
     /**
@@ -1627,10 +1666,12 @@ window.__ModuleLoader__.load({
           heading: fill(t('acc.running.heading'), { returned, total: tasks.length }),
           sub: fill(t('acc.running.sub'), { total: tasks.length, running, waiting, review }),
           line: t('acc.running.line'), next: t('acc.running.next'), foot: t('acc.running.foot'), chips })
-      } else if (view === 'completed') {
-        Object.assign(model, { tone: 'green', icon: '✓', heading: t('acc.completed.heading'),
+      } else if (view === 'completed' || view === 'plan_completed') {
+        const scoped = view === 'plan_completed'
+        Object.assign(model, { tone: scoped ? 'amber' : 'green', icon: scoped ? '!' : '✓', heading: t(scoped ? 'completion.planCompleted' : 'acc.completed.heading'),
           sub: fill(t('acc.completed.sub'), { accepted: receipt?.accepted ?? accepted, total: receipt?.total ?? tasks.length, files: files.length }),
-          line: t('acc.completed.line'), next: t('acc.completed.next'), foot: t('acc.completed.foot'), receipt: receiptLabel })
+          line: t(scoped ? 'acc.planCompleted.line' : 'acc.completed.line'), next: scoped ? completionNext(t, plan) : t('acc.completed.next'),
+          foot: t(scoped ? 'acc.planCompleted.foot' : 'acc.completed.foot'), receipt: receiptLabel })
         model.sections = [{ label: t('acc.files'), count: files.length, kind: 'files', items: files.map(path => ({ path })) }, evidenceSection]
       } else if (view === 'partial') {
         Object.assign(model, { tone: 'amber', icon: '!', heading: fill(t('acc.partial.heading'), { accepted: receipt?.accepted ?? accepted, total: receipt?.total ?? tasks.length }),
@@ -1660,6 +1701,11 @@ window.__ModuleLoader__.load({
         else if (section.kind === 'evidence') for (const item of section.items) lines.push('- ' + (item.ok ? '✓' : '✕') + ' ' + item.name + (item.meta ? ' · ' + item.meta : ''))
         else if (section.kind === 'list') for (const item of section.items) lines.push('- ' + item)
         else for (const [key, value] of section.rows ?? []) lines.push('- **' + key + '**：' + value)
+      }
+      const coverage = plan?.coverage ?? receipt?.coverage
+      if (coverage?.items?.length) {
+        lines.push('', '### ' + t('coverage.title') + ' (' + coverage.passed + '/' + coverage.total + ')')
+        for (const item of coverage.items) lines.push('- ' + item.id + ' · ' + item.text + ' · ' + requirementStatus(t, item.status))
       }
       lines.push('', '> ' + t('view.next') + '：' + model.next)
       if (model.foot) lines.push('', model.foot)
@@ -1699,7 +1745,7 @@ window.__ModuleLoader__.load({
         h('strong', null, t('completion.cleanupPending')), h('p', null, t('completion.cleanupNext')), cleanupItems)
       if (!receipt) return null
       const service = serviceProblem(plan)
-      return h('section', { className: 'ddf-receipt', 'data-outcome': receipt.outcome, role: 'status' },
+      return h('section', { className: 'ddf-receipt', 'data-outcome': planCoveragePending(receipt) ? 'plan_completed' : receipt.outcome, role: 'status' },
         h('style', null, RECEIPT_STYLES),
         h('strong', null, t('completion.title') + ' · ' + completionLabel(t, receipt)),
         service ? h('p', null, h('strong', null, service.message), service.code === 'MODEL_SERVICE_REQUEST_REFUSED' ? '' : ' · ' + service.details) : null,
@@ -2925,6 +2971,13 @@ window.__ModuleLoader__.load({
       'acc.eyebrow': '本次需求', 'acc.readonly': '只读',
       'acc.badge.empty': '尚无需求记录', 'acc.badge.pending': '待确认需求归属', 'acc.badge.direct': '主控直接执行',
       'acc.badge.running': '执行中', 'acc.badge.completed': '已完成', 'acc.badge.partial': '部分完成，其余未验收',
+      'acc.badge.plan_completed': '计划已验收，需求待核对',
+      'chat.plan_completed': '计划已验收，需求待核对',
+      'completion.planCompleted': '当前计划已验收，完整需求待核对',
+      'completion.planNext': '回到聊天，按原始需求核对未覆盖、部分完成或尚未验证的项目，并继续处理。',
+      'acc.planCompleted.line': '当前计划内的任务已验收；完整需求仍需逐项核对，不能据此认定全部需求完成。',
+      'acc.planCompleted.foot': '此回执只确认当前计划的验收结果。',
+      'coverage.title': '原始需求验收', 'coverage.pass': '已验收', 'coverage.partial': '部分完成', 'coverage.pending': '待验收', 'coverage.uncovered': '未覆盖',
       'acc.badge.blocked': '尚未完成，已阻塞', 'acc.badge.cancelled': '已取消（未验收）', 'acc.badge.unknown': '记录未完整',
       'acc.requestMessage': '需求消息 #{id}', 'acc.receiptMeta': '回执 #{id}', 'acc.lastRead': '最后读取 {time}',
       'acc.copyConclusion': '复制结论', 'acc.copyDone': '结论已复制', 'acc.copyFailed': '复制失败，请选中内容手动复制',
@@ -2975,6 +3028,7 @@ window.__ModuleLoader__.load({
       'acc.noTasksHint': '主控没有建立托管子代理计划，因此没有任务验收标准与验收记录。直接执行的操作记录见「协作动态」。',
       'acc.criteria': '验收标准', 'acc.verification': '实际验证', 'acc.conclusion': '结论',
       'acc.result.passed': '✓ 通过', 'acc.result.failed': '✕ 未通过', 'acc.result.wait': '待验证',
+      'acc.result.awaitingAcceptance': '待验收', 'acc.verify.checkSucceeded': '检查成功', 'acc.verify.checkFailed': '检查失败',
       'acc.result.running': '进行中', 'acc.result.pending': '未开始', 'acc.result.stopped': '已停止',
       'acc.verify.waiting': '等待主控实际验证', 'acc.verify.running': '执行中，尚未提交报告',
       'acc.verify.waitingDependency': '等待前置任务：{tasks}', 'acc.verify.stopped': '未执行：{reason}',
@@ -2998,6 +3052,13 @@ window.__ModuleLoader__.load({
       'acc.eyebrow': 'This request', 'acc.readonly': 'Read-only',
       'acc.badge.empty': 'No request recorded', 'acc.badge.pending': 'Request attribution pending', 'acc.badge.direct': 'Coordinator executed directly',
       'acc.badge.running': 'In progress', 'acc.badge.completed': 'Completed', 'acc.badge.partial': 'Partially completed, rest not accepted',
+      'acc.badge.plan_completed': 'Plan accepted; request verification pending',
+      'chat.plan_completed': 'Plan accepted; request verification pending',
+      'completion.planCompleted': 'Current plan accepted; full request verification pending',
+      'completion.planNext': 'Return to chat, check the original requirements for uncovered, partial or unverified items, and continue that work.',
+      'acc.planCompleted.line': 'Tasks in this plan were accepted. The full request still needs requirement-by-requirement verification.',
+      'acc.planCompleted.foot': 'This receipt confirms acceptance of the current plan only.',
+      'coverage.title': 'Original requirement acceptance', 'coverage.pass': 'Accepted', 'coverage.partial': 'Partially completed', 'coverage.pending': 'Awaiting acceptance', 'coverage.uncovered': 'Uncovered',
       'acc.badge.blocked': 'Incomplete, blocked', 'acc.badge.cancelled': 'Cancelled (not accepted)', 'acc.badge.unknown': 'Incomplete record',
       'acc.requestMessage': 'Request message #{id}', 'acc.receiptMeta': 'Receipt #{id}', 'acc.lastRead': 'Last read {time}',
       'acc.copyConclusion': 'Copy conclusion', 'acc.copyDone': 'Conclusion copied', 'acc.copyFailed': 'Copy failed. Select the text and copy manually.',
@@ -3054,6 +3115,7 @@ window.__ModuleLoader__.load({
       'acc.noTasksHint': 'The coordinator created no managed child-agent plan, so there are no acceptance criteria or records. Direct execution activity is in Collaboration activity.',
       'acc.criteria': 'Acceptance criteria', 'acc.verification': 'Actual verification', 'acc.conclusion': 'Result',
       'acc.result.passed': '✓ Passed', 'acc.result.failed': '✕ Failed', 'acc.result.wait': 'Awaiting verification',
+      'acc.result.awaitingAcceptance': 'Awaiting acceptance', 'acc.verify.checkSucceeded': 'Check succeeded', 'acc.verify.checkFailed': 'Check failed',
       'acc.result.running': 'In progress', 'acc.result.pending': 'Not started', 'acc.result.stopped': 'Stopped',
       'acc.verify.waiting': 'Awaiting actual coordinator verification', 'acc.verify.running': 'Running; report not submitted',
       'acc.verify.waitingDependency': 'Waiting for prerequisite: {tasks}', 'acc.verify.stopped': 'Not executed: {reason}',
@@ -3372,7 +3434,7 @@ window.__ModuleLoader__.load({
         t('acc.readonly'),
         updatedAt ? fill(t('acc.lastRead'), { time: new Date(updatedAt).toLocaleTimeString() }) : null,
       ].filter(Boolean)
-      const copyButton = loaded && ['completed', 'partial'].includes(view) ? h('button', { type: 'button',
+      const copyButton = loaded && ['completed', 'plan_completed', 'partial'].includes(view) ? h('button', { type: 'button',
         className: 'ddf-board-action ddf-acc-primary', 'data-copy-conclusion': '', onClick: () => onCopyConclusion(conclusion.markdown) },
         t(copyState === 'copied' ? 'acc.copyDone' : copyState === 'failed' ? 'acc.copyFailed' : 'acc.copyConclusion')) : null
       // Retained compact progress line: real counts only, never a percentage.
@@ -3405,7 +3467,8 @@ window.__ModuleLoader__.load({
       // no longer a primary header action; the primary action is Copy conclusion.
       const drawerToggle = h('button', { type: 'button', className: 'ddf-board-action', 'data-drawer-toggle': '', 'aria-expanded': detailsOpen,
         'aria-controls': 'ddf-focus-task-drawer', ref: drawerButtonRef, onClick: onToggleDetails }, t(detailsOpen ? 'focus.close' : 'focus.tasks'))
-      const tasksFold = fold('tasks', t('acc.fold.tasks'), tasksMeta, ['running', 'completed', 'partial'].includes(view), [
+      const tasksFold = fold('tasks', t('acc.fold.tasks'), tasksMeta, ['running', 'completed', 'plan_completed', 'partial'].includes(view), [
+        h(RequirementCoverage, { t, coverage: plan?.coverage ?? receipt?.coverage }),
         ...(tasks.length ? orderedTasks.map((task, index) => h(AcceptanceTaskCard, { key: task.id, t, task, plan, defaultOpen: index === 0 }))
           : [h('p', { className: 'ddf-acc-muted' }, t('acc.noTasksHint'))]),
         drawerToggle,

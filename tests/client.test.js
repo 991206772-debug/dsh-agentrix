@@ -296,6 +296,123 @@ test('completed conclusion shows receipt, deliverables, evidence and a three-col
   } finally { view.close(); f.close() }
 })
 
+test('a scoped plan receipt keeps full-request verification pending in the page, receipt and copied conclusion', async () => {
+  const request = { messageId: 'scoped-req', text: '实现资料检索与 AI 改写' }
+  const coverage = { status: 'untracked', passed: 0, total: 0, items: [] }
+  const plan = { sessionId: 'session-current', source: request, goal: '提取接口约定', status: 'accepted', coverage,
+    tasks: [{ id: 'interfaces', title: '提取接口约定', status: 'accepted', criteria: [], checks: [], outputs: [] }],
+    completion: { id: 'scoped-receipt', at: 1000, outcome: 'completed', scope: 'plan', coverage,
+      accepted: 1, total: 1, deliverables: [], evidence: [], remaining: [] } }
+  const copied = []
+  const f = await sidebarFixture(undefined, { clipboard: async text => { copied.push(text) }, fetchState: async () => ({ ok: true,
+    json: async () => structuredClone({ ok: true, sessionId: plan.sessionId, plans: [plan], sessions: [{ sessionId: plan.sessionId, source: request }] }) }) })
+  const view = f.mountView(plan.sessionId)
+  try {
+    await view.flush()
+    const card = view.nodes('section').find(node => node.props?.['data-acceptance-conclusion'])
+    assert.equal(card.props['data-acceptance-conclusion'], 'plan_completed')
+    assert.equal(card.props['data-tone'], 'amber')
+    assert.match(flatten(card), /当前计划已验收，完整需求待核对/)
+    const receipt = view.nodes('details').find(node => node.props?.['data-acceptance-fold'] === 'receipt')
+    assert.match(flatten(receipt), /当前计划已验收，完整需求待核对/)
+    assert.doesNotMatch(view.text(), /无需处理|主控已逐条验证并验收全部任务/)
+    const button = view.nodes('button').find(node => node.props?.['data-copy-conclusion'] === '')
+    assert.ok(button)
+    await button.props.onClick(); await view.flush()
+    assert.match(copied[0], /## 当前计划已验收，完整需求待核对/)
+    assert.match(copied[0], /> 下一步：.*原始需求/)
+    assert.doesNotMatch(copied[0], /无需处理/)
+  } finally { view.close(); f.close() }
+})
+
+test('requirement coverage preserves original ids, text and acceptance states in the page and copied conclusion', async () => {
+  const request = { messageId: 'coverage-req', text: '实现资料检索、改写、导出并重开' }
+  const coverage = { status: 'partial', passed: 1, total: 4, items: [
+    { id: 'FR-001', text: '资料检索接入聊天', evidence: 'execution', status: 'pass', taskIds: ['search'] },
+    { id: 'FR-002', text: '改写调用真实模型', evidence: 'execution', status: 'partial', taskIds: ['rewrite'] },
+    { id: 'FR-003', text: '导出文件内容正确', evidence: 'execution', status: 'pending', taskIds: ['export'] },
+    { id: 'FR-004', text: '重新打开内容保留', evidence: 'execution', status: 'uncovered', taskIds: [] },
+  ] }
+  const plan = { sessionId: 'session-current', source: request, goal: '当前实现阶段', status: 'accepted', coverage, tasks: [],
+    completion: { id: 'coverage-receipt', at: 1000, outcome: 'completed', scope: 'plan', coverage,
+      accepted: 0, total: 0, deliverables: [], evidence: [], remaining: [] } }
+  const copied = []
+  const f = await sidebarFixture(undefined, { clipboard: async text => { copied.push(text) }, fetchState: async () => ({ ok: true,
+    json: async () => structuredClone({ ok: true, sessionId: plan.sessionId, plans: [plan], sessions: [{ sessionId: plan.sessionId, source: request }] }) }) })
+  const view = f.mountView(plan.sessionId)
+  try {
+    await view.flush()
+    const list = view.nodes('details').find(node => node.props?.['data-requirement-coverage'] === '')
+    assert.ok(list)
+    assert.match(flatten(list), /原始需求验收.*1\/4/)
+    for (const item of coverage.items) {
+      const row = view.nodes('li').find(node => node.props?.['data-requirement-id'] === item.id)
+      assert.ok(row)
+      assert.ok(flatten(row).includes(item.text))
+    }
+    for (const label of ['已验收', '部分完成', '待验收', '未覆盖']) assert.ok(flatten(list).includes(label))
+    await view.nodes('button').find(node => node.props?.['data-copy-conclusion'] === '').props.onClick(); await view.flush()
+    assert.match(copied[0], /FR-002.*改写调用真实模型.*部分完成/)
+    assert.match(copied[0], /FR-004.*重新打开内容保留.*未覆盖/)
+    coverage.status = 'verified'; coverage.passed = 4; coverage.items.forEach(item => { item.status = 'pass' })
+    await view.tick()
+    const card = view.nodes('section').find(node => node.props?.['data-acceptance-conclusion'])
+    assert.equal(card.props['data-acceptance-conclusion'], 'completed')
+    assert.equal(card.props['data-tone'], 'green')
+    assert.doesNotMatch(flatten(card), /完整需求待核对/)
+  } finally { view.close(); f.close() }
+})
+
+test('criterion rows follow explicit check bindings and require a formal pass instead of treating tool success as acceptance', async () => {
+  const request = { messageId: 'criterion-binding', text: '实现模型改写并整理接口说明' }
+  const task = { id: 'rewrite', title: '模型改写与说明', status: 'review', attempts: 1,
+    criteria: ['模型改写可用', '接口说明存在'], requirementIds: ['FR-001', 'FR-002'],
+    acceptance: [{ criterionId: 'C2', evidence: 'static', checks: [0] }, { criterionId: 'C1', evidence: 'execution', checks: [1] }],
+    checks: [{ tool: 'read', result: { passed: false, attempt: 1, summary: '说明文件不存在' } },
+      { tool: 'pwsh', result: { passed: true, attempt: 1, summary: '实际模型请求成功' } }],
+    review: { findings: [{ criterion: 0, status: 'partial', finding: '需要继续处理失败路径', evidence: ['model-proof'] }] } }
+  const plan = { sessionId: 'session-current', source: request, status: 'running', tasks: [task] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true,
+    json: async () => structuredClone({ ok: true, sessionId: plan.sessionId, plans: [plan], sessions: [{ sessionId: plan.sessionId, source: request }] }) }) })
+  const view = f.mountView(plan.sessionId)
+  const rows = () => view.nodes('tr').filter(node => node.children.some(child => child?.type === 'td'))
+  try {
+    await view.flush()
+    const first = rows()[0], second = rows()[1]
+    assert.match(flatten(first), /C1.*FR-001.*模型改写可用/)
+    assert.match(flatten(first), /pwsh.*检查成功.*实际模型请求成功/)
+    assert.doesNotMatch(flatten(first), /read|说明文件不存在|✓ 通过/)
+    assert.match(flatten(first), /部分完成/)
+    assert.match(flatten(second), /C2.*FR-002.*接口说明存在.*read.*说明文件不存在.*未通过/)
+    assert.doesNotMatch(flatten(second), /pwsh|实际模型请求成功/)
+    delete task.review.findings[0].status
+    await view.tick()
+    assert.match(flatten(rows()[0]), /检查成功.*待验收/)
+    assert.doesNotMatch(flatten(rows()[0]), /✓ 通过/)
+    task.review.findings[0].status = 'pass'
+    await view.tick()
+    assert.match(flatten(rows()[0]), /✓ 通过/)
+  } finally { view.close(); f.close() }
+})
+
+test('scoped receipt summaries use the same pending-request meaning in chat and the English acceptance page', async () => {
+  const request = { messageId: 'scoped-en', text: 'Implement retrieval and rewrite' }
+  const coverage = { status: 'pending', passed: 0, total: 1, items: [{ id: 'FR-001', text: 'Use a real model', status: 'pending', taskIds: ['model'] }] }
+  const plan = { sessionId: 'session-current', protocolVersion: 2, source: request, status: 'accepted', coverage,
+    tasks: [{ id: 'model', status: 'accepted', criteria: [], checks: [], outputs: [] }],
+    completion: { id: 'en-scoped', outcome: 'completed', scope: 'plan', coverage, accepted: 1, total: 1, deliverables: [], evidence: [], remaining: [] } }
+  const f = await sidebarFixture(undefined, { language: 'en', fetchState: async () => ({ ok: true,
+    json: async () => structuredClone({ ok: true, sessionId: plan.sessionId, plans: [plan], sessions: [{ sessionId: plan.sessionId, source: request }] }) }) })
+  const action = f.mountAction(plan.sessionId), view = f.mountView(plan.sessionId)
+  try {
+    await action.flush(); await view.flush()
+    assert.match(action.text(), /Plan accepted; request verification pending/)
+    assert.match(view.text(), /Current plan accepted; full request verification pending/)
+    assert.match(view.text(), /Original requirement acceptance.*FR-001.*Use a real model.*Awaiting acceptance/)
+    assert.doesNotMatch(view.text(), /Nothing to do|completion\.plan|coverage\./)
+  } finally { action.close(); view.close(); f.close() }
+})
+
 test('partial conclusion lists unfinished work bound to task names from the receipt', async () => {
   const request = { messageId: 'partial-req', text: '生成成片与报告' }
   const plan = { sessionId: 'session-current', source: request, goal: '生成成片与报告', status: 'blocked', tasks: [

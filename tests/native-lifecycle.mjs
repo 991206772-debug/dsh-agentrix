@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { apply } from '../index.js'
 
@@ -23,6 +24,7 @@ const Spawn = await native('dsh-subagent-spawn-in-process')
 const directory = await mkdtemp(path.join(os.tmpdir(), 'dsh-completion-native-'))
 const truncateOutput = process.argv.includes('--truncate-output')
 const coordinatorReview = process.argv.includes('--coordinator-review')
+const requirementContract = process.argv.includes('--requirements')
 const continuous = process.argv.includes('--continuous')
 const benchmark = process.argv.includes('--benchmark')
 const baseline = process.argv.includes('--benchmark-baseline')
@@ -232,7 +234,7 @@ class ScriptedAdapter extends LlmAdapter {
           dependsOn: index ? [ids[index - 1]] : [], complexity: ergonomics && index === 2 ? 'complex' : 'routine', criteria: ergonomics ? ['文件包含 verified', '读取证据可定位'] : ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: deliverablePath } }],
         })) })
         else if (phase === 1) block = tool('delegation_run', {})
-        else if (current?.status === 'review' && (!current.checks[0].result || !current.audit || current.audit.status === 'completed')) block = !current.checks[0].result
+        else if (current?.status === 'review' && !current.pendingAcceptance && (!current.checks[0].result || !current.audit || current.audit.status === 'completed')) block = !current.checks[0].result
           ? tool('delegation_verify', { taskId: current.id, checkIndex: 0 })
           : tool('delegation_review', { taskId: current.id, verdict: 'accept', findings: ergonomics ? current.criteria.map((_text, index) => ({ criterionId: 'C' + (index + 1), finding: '已实际读取并核对', evidence: [current.checks[0].result.ref] })) : [{ criterion: 0, finding: '已实际读取并核对', evidence: [current.checks[0].result.callId] }] })
         else if (ergonomics) {
@@ -254,7 +256,12 @@ class ScriptedAdapter extends LlmAdapter {
           : tool('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '原任务产物已实际核对', evidence: [task.checks[0].result.callId] }] })
         else block = { type: 'text', text: plan.completion ? '原任务已验收，新便签也已核对。' : '等待原任务的报告与独立审查通知。' }
       }
-      else if (!task) block = tool('delegation_plan', { goal: '高模型规划、低模型执行、高模型审查与验收', decisionReason: '核对工作由执行模型完成，主控保留独立上下文做验证和验收。', tasks: [{ id: 'a', title: '检查隔离产物', instructions: coordinationConflict ? '读取 input.txt 后生成 result.txt 并正式报告' : '只读取隔离文件并正式报告', scope: '隔离目录', outputs: [deliverablePath], writes: coordinationConflict || activeNewRequest ? [deliverablePath] : [], complexity: 'complex', ...(coordinatorReview ? { reviewPolicy: 'coordinator', reviewReason: '隔离只读核对，由主控验证验收即可。' } : {}), criteria: ['文件包含 verified'], checks: [{ tool: 'read', arguments: { path: deliverablePath } }] }] })
+      else if (!task) block = tool('delegation_plan', { goal: '高模型规划、低模型执行、高模型审查与验收', decisionReason: '核对工作由执行模型完成，主控保留独立上下文做验证和验收。',
+        ...(requirementContract ? { directory, requirements: [{ id: 'R1', text: '文件包含 verified', evidence: 'execution' }] } : {}),
+        tasks: [{ id: 'a', title: '检查隔离产物', instructions: coordinationConflict ? '读取 input.txt 后生成 result.txt 并正式报告' : '只读取隔离文件并正式报告', scope: '隔离目录', outputs: [deliverablePath], writes: coordinationConflict || activeNewRequest ? [deliverablePath] : [], complexity: 'complex', ...(coordinatorReview ? { reviewPolicy: 'coordinator', reviewReason: '隔离只读核对，由主控验证验收即可。' } : {}), criteria: ['文件包含 verified'],
+          ...(requirementContract ? { requirementIds: ['R1'] } : {}),
+          checks: [{ tool: 'read', arguments: { path: deliverablePath } },
+            ...(requirementContract ? [{ tool: 'pwsh', arguments: { command: "if ((Get-Content -Raw -LiteralPath './result.txt') -notmatch 'verified') { exit 1 }", workdir: directory } }] : [])] }] })
       else if (phase === 1) block = tool('delegation_run', {})
       else if (coordinationConflict && phase === 2) block = tool('write', { file_path: deliverablePath, content: 'unverified coordinator output' })
       else if (coordinationConflict && phase === 3) block = tool('delegation_verify', { taskId: 'a', checkIndex: 0 })
@@ -284,10 +291,10 @@ class ScriptedAdapter extends LlmAdapter {
         await until(async () => (await state()).plans[0].tasks[0].audit?.status === 'completed', 'review report returned before scripted coordinator quota error')
         throw new LlmError('429: exceed quota limit', 'QUOTA')
       }
-      else if (task.status === 'review' && !task.checks[0].result) block = tool('delegation_verify', { taskId: 'a', checkIndex: 0 })
+      else if (task.status === 'review' && !task.checks[0].result) block = tool('delegation_verify', { taskId: 'a', ...(requirementContract ? {} : { checkIndex: 0 }) })
       else if (task.status === 'review') block = tool('delegation_review', { taskId: 'a', verdict: 'accept',
         ...(finalDelivery ? { delivery: { summary: '隔离正文已验收并交付。', inlineFiles: [fixturePath] } } : {}),
-        findings: task.criteria.map((_criterion, criterion) => ({ criterion, finding: '已读取隔离文件并核对要求', evidence: [task.checks[0].result.callId] })) })
+        findings: task.criteria.map((_criterion, criterion) => ({ criterion, ...(requirementContract ? { status: 'pass' } : {}), finding: '已读取隔离文件并核对要求', evidence: (requirementContract ? task.checks : [task.checks[0]]).map(check => check.result.callId) })) })
       else if ((truncateOutput || supplement) && task.status === 'running') block = { type: 'text', text: '等待原子代理报告和独立审查返回。' }
       else throw new Error('Unexpected coordinator request after terminal tool: ' + task.status)
     } else if (requestRefusal && request.model === 'low-worker') {
@@ -351,6 +358,16 @@ try {
   await until(() => ctx.get('agentLoop') && ctx.get('subagents'), 'native services')
   ctx.tools.setExecutor(new NativeToolExecutor(ctx))
   ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter())
+  if (requirementContract) ctx.tools.register(defineTool({ name: 'pwsh', description: 'Assert the isolated output content',
+    parameters: { command: { type: 'string' }, workdir: { type: 'string' } },
+    output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: value.text }] },
+    async execute(args) {
+      assert.equal(args.workdir, directory)
+      const result = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', args.command], {
+        cwd: directory, encoding: 'utf8', windowsHide: true, timeout: 10000,
+      })
+      return { exitCode: result.status, text: result.stdout + result.stderr }
+    } }))
   ctx.tools.register(defineTool({ name: 'read', description: 'Read isolated fixture', parameters: { path: { type: 'string' } },
     output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: value.text }] },
     async execute(args, exec) {
@@ -615,6 +632,15 @@ try {
     console.log('PASS: native coordinator QUOTA error preserves returned worker and review reports without automatic redispatch or fabricated acceptance')
   } else {
   assert.equal(plan.completion?.outcome, 'completed', JSON.stringify(plan))
+  if (requirementContract) {
+    assert.equal(plan.completion.scope, 'plan')
+    assert.equal(plan.completion.coverage.status, 'verified')
+    assert.equal(plan.completion.coverage.items[0].id, 'R1')
+    assert.equal(plan.tasks[0].checks[1].result.evidenceKind, 'execution')
+    assert.equal(plan.tasks[0].checks[1].result.exitCode, 0)
+    assert.equal(plan.tasks[0].checks[1].result.artifacts.status, 'tracked')
+    console.log('PASS: native requirement coverage uses an actual command assertion and current output fingerprint')
+  }
   assert.equal(plan.tasks[0].execution.commitState, 'committed')
   assert.equal(plan.tasks[0].recovery?.used ?? 0, truncateOutput || continuous || supplement || switchCoordinator || coordinationConflict || earlyEvidence || progressReview ? 0 : 1)
   assert.equal(plan.tasks[0].release.status, 'released')

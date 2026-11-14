@@ -28,7 +28,7 @@
   "description": "DSH Agentrix: native multi-agent planning, role-based execution and review, and evidence-based acceptance.",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node --check index.js && node --check orchestrator.js && node --check runtime-store.js && node --check supervision.js && node --check usage.js && node --check completion.js && node --check task-records.js && node --check client.js"
+    "check": "node --check index.js && node --check orchestrator.js && node --check requirements.js && node --check verification.js && node --check runtime-store.js && node --check supervision.js && node --check usage.js && node --check completion.js && node --check task-records.js && node --check client.js"
   },
   "exports": {
     ".": "./index.js",
@@ -44,6 +44,8 @@
     "supervision.js",
     "usage.js",
     "completion.js",
+    "requirements.js",
+    "verification.js",
     "task-records.js",
     "client.js",
     "cordis.patch.yml",

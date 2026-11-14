@@ -16,6 +16,12 @@ assert.ok(['direct', 'auto-simple', 'auto-followup', 'auto-readonly', 'parallel-
 const workflow = scenario.startsWith('workflow-'), delegatedWorkflow = workflow && scenario !== 'workflow-direct'
 const extendedWorkflow = scenario === 'workflow-contracts'
 const explicitDelegation = process.env.AGENTRIX_LIVE_DELEGATION === 'explicit'
+const requirementContract = process.env.AGENTRIX_LIVE_REQUIREMENTS === '1'
+assert.ok(!requirementContract || scenario === 'parallel-supplement', 'Requirement coverage acceptance uses the reviewed parallel supplement fixture')
+const requirementCommands = {
+  fruit: "$expected=@('apple=3','banana=2','cherry=1'); if($env:AGENTRIX_WORKFLOW_SUPPLEMENTED -eq '1'){$expected+='total=6'}; $want=($expected -join [char]10)+[char]10; if([System.IO.File]::ReadAllText('fruit.txt') -cne $want){throw 'fruit output mismatch'}",
+  colors: "$want=(@('blue=#0000ff','red=#ff0000') -join [char]10)+[char]10; if([System.IO.File]::ReadAllText('colors.txt') -cne $want){throw 'colors output mismatch'}",
+}
 assert.ok(!explicitDelegation || delegatedWorkflow, 'Explicit delegation requires a delegated workflow scenario')
 const simple = ['direct', 'auto-simple', 'auto-followup', 'auto-readonly'].includes(scenario)
 const providerName = process.env.AGENTRIX_PROVIDER, coordinatorModel = process.env.AGENTRIX_COORDINATOR_MODEL, workerModel = process.env.AGENTRIX_WORKER_MODEL
@@ -187,6 +193,7 @@ ctx.plugin(await native('dsh-tool-skill'))
     allowedCommands.add(`& (Microsoft.PowerShell.Core\\Get-Command git -CommandType Application | Microsoft.PowerShell.Utility\\Select-Object -First 1).Source --no-optional-locks -c core.fsmonitor=false --no-pager -C ${literalDirectory} status --short --branch --untracked-files=normal | Microsoft.PowerShell.Utility\\Select-Object -First 200`)
   }
   if (workflow) for (const module of ['contacts', 'orders', 'all']) allowedCommands.add(workflowFixture.testCommand(module))
+  if (requirementContract) for (const command of Object.values(requirementCommands)) allowedCommands.add(command)
   // These two read-only fixture checks are exact literals; do not allow arbitrary shell prefixes.
   const sumComparison = "$c=[System.IO.File]::ReadAllText((Join-Path (Get-Location) '__fixture__.txt')); $s=((Get-Content (Join-Path (Get-Location) '__fixture__.json') -Raw | ConvertFrom-Json) | Measure-Object -Sum).Sum; Write-Output (\"expected_sum=\" + $s); Write-Output (\"content=[\" + $c + \"]\"); Write-Output (\"length=\" + $c.Length); Write-Output (\"format_match=\" + ($c -eq (\"sum=\" + $s + \"`n\") -or $c -eq (\"sum=\" + $s + \"`r`n\")))"
   for (const fixture of ['a', 'b']) allowedCommands.add(sumComparison.replaceAll('__fixture__', fixture))
@@ -273,6 +280,7 @@ try {
     prompt = '请分别交给执行模型计算 a.json 和 b.json 两份数组的总和，生成 a.txt 和 b.txt，文件只写“sum=总数”并换行。两项独立并行处理，逐项核对后交付。' +
       (scenario === 'rework' ? 'a.txt 交付前还需要由独立审查者核对计算和格式，b.txt 由主控核对即可。' : '')
   }
+  if (requirementContract) prompt += '请在托管计划的 requirements 中登记两份输出的原始要求，保留固定编号并逐项关联任务，按文件实际内容逐项验收；中途补充也保留在同一需求清单。只有登记的各项要求都有对应证据并通过验收后再交付。只处理这两份文件和给定断言，检查通过后及时报告，不追加环境、BOM或全项目检查。测试环境只允许以下两条固定内容断言，使用 pwsh 且 workdir 为当前工作目录，不能自行改写命令：\nfruit.txt：\n' + requirementCommands.fruit + '\ncolors.txt：\n' + requirementCommands.colors
   ;(result.userMessages ??= []).push({ at: Date.now(), text: prompt })
   const initialProject = workflow ? await Promise.all(['README.md', ...workflowFixture.allowedFiles].map(file => readFile(path.join(project, file), 'utf8'))) : null
   parent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }))
@@ -485,6 +493,15 @@ try {
       })
     }
   }
+  if (requirementContract) check('Original requirements and the supplement retain bound current evidence in the final plan receipt', () => {
+    const plan = final.plans[0]
+    assert.equal(plan.completion.scope, 'plan')
+    assert.equal(plan.completion.coverage.status, 'verified')
+    assert.ok(plan.requirements.length >= 3, 'Both original outputs and the supplement must be tracked')
+    assert.ok(plan.tasks.every(task => task.acceptance?.length === task.criteria.length &&
+      task.review.findings.every(finding => finding.status === 'pass') &&
+      task.checks.every(check => check.result.artifacts?.status === 'tracked')))
+  })
   result.passed = true; result.finalState = final
 } catch (error) {
   result.error = redact(error.stack ?? error)

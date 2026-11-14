@@ -592,6 +592,62 @@ test('direct execution exposes current activity without creating a managed plan 
   } finally { await h.close() }
 })
 
+test('a completed parallel tool keeps the remaining tool visible until it also settles', async () => {
+  const h = await host(); await h.state()
+  try {
+    h.turn('并行核对两份资料')
+    assert.equal(h.call('read', 'read-first', h.agent, { file_path: 'first.md' }), undefined)
+    assert.equal(h.call('grep', 'grep-second', h.agent, { path: 'second.md' }), undefined)
+    h.result('grep', { isError: false, content: [] }, 'grep-second')
+    let state = await h.state()
+    assert.equal(state.execution.activity.kind, 'tool')
+    assert.equal(state.execution.activity.tool, 'read')
+    assert.equal(state.execution.activity.target, 'first.md')
+    assert.equal(state.execution.lastResult.tool, 'grep')
+    assert.equal(state.execution.toolCalls, 2)
+    h.result('read', { isError: false, content: [] }, 'read-first')
+    state = await h.state()
+    assert.equal(state.execution.activity.kind, 'waiting_model')
+    assert.equal(state.execution.lastResult.tool, 'read')
+  } finally { await h.close() }
+})
+
+test('a permitted coordinator command exposes its native shell activity without consuming direct work allowance', async () => {
+  const h = await host(); await h.state()
+  const started = Promise.withResolvers(), release = Promise.withResolvers()
+  let command
+  try {
+    h.agent.session = { header: { cwd: home } }
+    h.turn('后端由执行者处理，主控独立修改前端')
+    await h.definitions.get('delegation_plan').execute({ goal: '前后端分别实现', relation: 'new', decisionReason: '后端委派，主控完成独立前端范围。',
+      tasks: [{ id: 'backend', title: '后端', instructions: '实现后端接口', scope: 'backend.js', outputs: ['backend.js'], writes: ['backend.js'],
+        complexity: 'routine', criteria: ['接口符合约定'], checks: [{ tool: 'read', arguments: { file_path: 'backend.js' } }] }] },
+    { agent: h.agent, callId: 'plan-coordinator-command' })
+    h.ctx.tools.execute = async exec => {
+      assert.equal(h.call(exec.name, exec.callId, exec.agent, exec.arguments), undefined)
+      started.resolve()
+      await release.promise
+      const result = { isError: false, value: { exitCode: 0 }, content: [] }
+      h.result(exec.name, result, exec.callId)
+      return result
+    }
+    command = h.definitions.get('delegation_execute').execute({ tool: 'pwsh', arguments: { command: 'build frontend', workdir: home }, writes: ['frontend.js'] },
+      { agent: h.agent, callId: 'coordinator-command', signal: new AbortController().signal })
+    await Promise.race([started.promise, command.then(() => { throw new Error('native command must start before completing') })])
+    let state = await h.state()
+    assert.equal(state.execution.activity.kind, 'tool')
+    assert.equal(state.execution.activity.tool, 'pwsh')
+    assert.equal(state.execution.toolCalls, 1)
+    assert.equal(state.turnStats.direct, 0, 'permitted managed commands do not consume direct work allowance')
+    assert.equal(state.turnStats.delegated, 0)
+    release.resolve()
+    assert.equal((await command).passed, true)
+    state = await h.state()
+    assert.equal(state.execution.activity.kind, 'waiting_model')
+    assert.equal(state.execution.lastResult.tool, 'pwsh')
+  } finally { release.resolve(); await command?.catch(() => {}); await h.close() }
+})
+
 test('actual request tool removal and restoration are visible without blocking direct work', async () => {
   const h = await host(); await h.state(); h.turn('生成分享文档')
   await h.decide('当前委派入口不可用，主控生成文档并核对交付内容。')

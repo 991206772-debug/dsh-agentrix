@@ -502,7 +502,10 @@ export function apply(ctx) {
     state.isCoordinator = !role.worker
     if (!state.isCoordinator) return undefined
     const name = String(exec?.name ?? '')
-    if (orchestration.allowsVerification(exec)) return undefined
+    if (orchestration.allowsVerification(exec)) {
+      observeCoordinatorCall(exec, state)
+      return undefined
+    }
     if (current.enabled && current.delegationTools.includes(name)) {
       state.denied++; state.turnDenied++
       const message = '[DSH Agentrix] 请用 delegation_plan({decisionReason,start:true,...}) 一次建卡并派发，应用角色模型、并发限制和验收流程。已有未启动计划才用 delegation_run。读取与准备工具仍可继续使用。'
@@ -574,7 +577,8 @@ export function apply(ctx) {
       const text = (result.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n')
       const failed = Boolean(result.isError || Number(result.value?.exitCode ?? 0) !== 0 || /\[exit code: [1-9]\d*\]/.test(text))
       execution.lastActivityAt = now
-      execution.activity = { kind: 'waiting_model', at: now }
+      const active = [...state.activeCalls.values()].findLast(item => item.turn === state.turn)
+      execution.activity = active ? { kind: 'tool', tool: active.tool, target: active.target, at: now } : { kind: 'waiting_model', at: now }
       execution.lastResult = { tool: call.tool, target: call.target, at: now, failed }
       if (CHANGE_TOOLS.includes(exec.name)) {
         if (failed) {
