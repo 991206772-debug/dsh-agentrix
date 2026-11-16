@@ -321,7 +321,7 @@ function routeWarnings(route, tasks) {
 }
 
 /** DSH owns Agent lifetimes and tool execution. This module owns task state and acceptance. */
-export function createOrchestrator({ ctx, file, getConfig, getSource = () => null, getRevision = getSource, getRoute = () => null, onRequestResolved = () => {}, onDelegated = () => {} }) {
+export function createOrchestrator({ ctx, file, getConfig, getSource = () => null, getRevision = getSource, getRoute = () => null, onRequestResolved = () => {}, onDelegated = () => {}, onChange = () => {} }) {
   const usageLedger = createUsageLedger()
   const runtimeStore = createRuntimeStore(file)
   const decisions = new Map(), decisionWrites = new Set()
@@ -362,10 +362,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     entry.messages ??= []
     const existing = entry.messages.find(item => item.messageId === String(message.id))
     if (existing) {
-      if (existing.withdrawn && !existing.resolution) { existing.withdrawn = false; existing.target = target; waitingParents.get(sessionId)?.wake.resolve(); backgroundSave() }
+      if (existing.withdrawn && !existing.resolution) { existing.withdrawn = false; existing.target = target; waitingParents.get(sessionId)?.wake.resolve(); backgroundSave(); onChange(sessionId) }
       return
     }
     entry.messages.push({ messageId: String(message.id), text, at: Date.now(), target })
+    onChange(sessionId)
     waitingParents.get(sessionId)?.wake.resolve()
     backgroundSave()
   }
@@ -1120,6 +1121,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     pendingRecords.get(plan.archive.id).events.push(event)
     if (!type.startsWith('plan.coordination_')) resolveCoordinationIssue(plan)
     refreshCoordinationTools()
+    onChange(plan.sessionId)
   }
   const save = () => {
     if (recoveryFailed) return Promise.reject(new Error(`任务文件恢复失败，保留原文件：${storageError}`))
@@ -1862,6 +1864,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       }
       if (handle) scheduleSupervision(childPlan, task, handle)
       backgroundSave()
+      onChange(childPlan.sessionId)
     }
   }
   // Native local activations return only output + stopReason. Capture the
@@ -2012,6 +2015,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
     backgroundSave()
     const stream = trackOutput(request.sessionId, next())
+    onChange(plan.sessionId)
     if (!stream?.[Symbol.asyncIterator]) return stream
     return (async function* () {
       let received = false
@@ -2021,6 +2025,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
           received = true
           task.supervision.activity = { kind: 'model', at: Date.now() }
           backgroundSave()
+          onChange(plan.sessionId)
         }
         yield chunk
       }
@@ -2873,7 +2878,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       if (COORDINATOR_TOOLS.has(exec.name)) return '[DSH Agentrix] 此入口仅供主控。子代理读取使用 read/grep/glob，阶段进度使用 delegation_checkpoint，最终结果使用 delegation_report。'
       if (['subagent', 'subagent_fork', 'spawn_teammate', ...(getConfig().delegationTools ?? [])].includes(exec.name)) return '[DSH Agentrix] 执行者和审查者不能继续委派。'
       if (expected.task.role === 'reviewer' && !REVIEW_TOOLS.has(exec.name)) return '[DSH Agentrix] 独立审查只允许只读检索、阶段记录和最终报告；命令与实际验证由主控执行。'
-      if (task.supervision) { task.supervision.lastActivityAt = Date.now(); task.supervision.activity = { kind: 'tool', tool: exec.name, at: Date.now() }; backgroundSave() }
+      if (task.supervision) { task.supervision.lastActivityAt = Date.now(); task.supervision.activity = { kind: 'tool', tool: exec.name, at: Date.now() }; backgroundSave(); onChange(expected.plan.sessionId) }
     },
     async history(before) { await ready; if (writing) await writing; return records.history(before) },
     async readDelivery(sessionId, seq) {

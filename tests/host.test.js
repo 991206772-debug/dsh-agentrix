@@ -1,5 +1,6 @@
 import { test, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { mkdir, mkdtemp, readFile, rm, rmdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -319,6 +320,75 @@ test('multiple pending messages require an actual message id rather than silentl
     await decide({ messageId: '2', relation: 'continue' })
     assert.equal((await h.state()).decisionCurrent, true)
   } finally { await h.close() }
+})
+
+test('state separates the latest real user message from the original request and decision', async () => {
+  const h = await host(); await h.state()
+  try {
+    h.turn('先评审，不改代码', 'review'); await h.decide('只读评审，不写代码。')
+    h.turn('选择 B，开始实施', 'implement')
+    let row = await h.state()
+    assert.equal(row.latestMessage?.messageId, 'implement')
+    assert.equal(row.latestMessage.text, '选择 B，开始实施')
+    assert.ok(Number.isFinite(row.latestMessage.at))
+    assert.equal(row.source.messageId, 'review')
+    assert.equal(row.decisionCurrent, false)
+    await h.decide('开始修改并验证原方案。', 'continue')
+    row = await h.state()
+    assert.equal(row.latestMessage.messageId, 'implement')
+    assert.equal(row.messageResolution.reason, '开始修改并验证原方案。')
+    assert.equal(row.decision.reason, '只读评审，不写代码。', 'display changes must not rewrite historical decisions')
+  } finally { await h.close() }
+})
+
+test('state events notify only the changed session at input, tool and model boundaries and release connections', async () => {
+  const h = await host(); await h.state()
+  const open = async sessionId => {
+    const response = new EventEmitter()
+    response.chunks = []; response.ends = 0
+    response.writeHead = (status, headers) => { response.status = status; response.headers = headers }
+    response.write = chunk => { response.chunks.push(chunk); return true }
+    response.end = () => { response.ends++; response.emit('close') }
+    const handler = h.routes.get('/dsh-delegation-first/api/events')
+    assert.equal(typeof handler, 'function', 'a session-scoped live event route must be registered')
+    await handler({ method: 'GET', url: '/dsh-delegation-first/api/events?sessionId=' + sessionId }, response)
+    return response
+  }
+  const wait = () => new Promise(resolve => setTimeout(resolve, 60))
+  const changes = response => response.chunks.filter(chunk => chunk.startsWith('data:')).length
+  let root, other
+  try {
+    root = await open('root'); other = await open('other')
+    assert.equal(root.status, 200)
+    assert.match(root.headers['content-type'], /text\/event-stream/)
+    h.turn('运行长命令', 'new-input'); await wait()
+    assert.equal(changes(root), 1, 'input and turn-start changes are coalesced')
+    assert.equal(changes(other), 0)
+    await h.decide(); await wait()
+    assert.equal(changes(root), 2)
+    h.call('pwsh', 'long-command', h.agent, { command: 'node long-check.mjs' }); await wait()
+    assert.equal(changes(root), 3)
+    assert.equal((await h.state()).execution.activity.kind, 'tool')
+    await wait()
+    assert.equal((await h.state()).execution.activity.kind, 'tool', 'quiet tools remain active until their actual result')
+    h.result('pwsh', { isError: false, content: [] }, 'long-command'); await wait()
+    assert.equal(changes(root), 4)
+    const stream = h.stream({ sessionId: 'root', provider: 'local', model: 'coordinator' }, async function* () {
+      yield { type: 'block-start' }; yield { type: 'block-delta' }; yield { type: 'block-delta' }
+    })
+    await wait()
+    assert.equal((await h.state()).execution.activity.kind, 'waiting_model_response')
+    for await (const chunk of stream) {}
+    await wait()
+    assert.equal((await h.state()).execution.activity.kind, 'model')
+    assert.equal(changes(root), 6, 'token chunks must not each trigger a refresh')
+    assert.doesNotMatch(root.chunks.join(''), /运行长命令|long-check|coordinator/, 'notifications contain no task text or credentials')
+    root.emit('close')
+    h.turn('连接关闭后的消息'); await wait()
+    assert.equal(changes(root), 6)
+    await h.close()
+    assert.equal(other.ends, 1, 'plugin teardown closes its open SSE responses')
+  } finally { root?.emit('close'); other?.emit('close'); await h.close() }
 })
 
 test('a new plan must bind the actual request before it is saved, with inline confirmation supported', async () => {

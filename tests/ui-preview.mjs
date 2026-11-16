@@ -9,7 +9,8 @@ if (!assetDirectory) throw new Error('Provide a directory containing react.js an
 const invalid = process.argv.includes('--invalid')
 const loadError = process.argv.includes('--load-error')
 const nextRequest = process.argv.includes('--next-request')
-const directProgress = process.argv.includes('--direct-progress')
+const staleDecision = process.argv.includes('--stale-decision')
+const directProgress = process.argv.includes('--direct-progress') || staleDecision
 const coordinationConflict = process.argv.includes('--coordination-conflict')
 const mixedRefusal = process.argv.includes('--mixed-refusal')
 const focusBoard = process.argv.includes('--focus-board')
@@ -153,6 +154,14 @@ if (process.argv.includes('--model-relationship')) {
   directSession.pendingMessages = [{ messageId: 'next-demo', text: '另外开一个新任务：核对另一份文档，原任务继续保留。' }]
   directSession.decisionCurrent = false
 }
+if (staleDecision) Object.assign(directSession, {
+  source: { messageId: 'review-demo', text: '先评审工作台，暂时不改代码。' }, requestBindingVersion: 2,
+  latestMessage: { messageId: 'implement-demo', text: '选择 B，开始实施工作台配色方案。', at: Date.now() },
+  pendingMessages: [{ messageId: 'implement-demo', text: '选择 B，开始实施工作台配色方案。' }],
+  decision: { mode: 'direct', reason: '只读评审，不写代码。', at: Date.now() - 60000 }, decisionCurrent: false,
+  execution: { running: true, startedAt: Date.now(), toolCalls: 57, model: { model: 'demo/coordinator' },
+    activity: { kind: 'tool', tool: 'edit', target: 'src/theme.js' }, unresolvedChanges: [] },
+})
 if (process.argv.includes('--long-progress')) {
   directSession.execution.activity = { kind: 'tool', tool: 'grep', target: 'src/api-client.js' }
   directSession.execution.toolCalls = 12
@@ -272,6 +281,8 @@ window.__ModuleLoader__ = {load({factory}) {
   document.querySelectorAll('[data-session]').forEach(button=>button.onclick=()=>{selected=button.dataset.session;panel=null;renderView()});
   document.querySelectorAll('[data-pending]').forEach(button=>button.onclick=()=>{pending=button.dataset.pending;renderView()});
   document.querySelector('[data-return-conversation]').onclick=()=>{panel=null;renderView()};
+  const continueButton=document.querySelector('[data-fixture-continue]');
+  if(continueButton)continueButton.onclick=()=>fetch('/fixture/continue',{method:'POST'});
   renderView();
 }};`
 const html = `<!doctype html><html lang="zh"><meta charset="utf-8"><title>DSH Agentrix · 隔离界面验证</title>
@@ -281,12 +292,27 @@ ${process.argv.includes('--dark') ? ':root{--dsw-alias-bg-layer-1:#141414;--dsw-
 ${process.argv.includes('--fidelity') ? 'body{background:#e9ebef}.notice,.sessions,#sidebar{display:none}.layout{display:block;width:980px;max-width:100%;height:760px;margin:24px auto;background:#fff;border:1px solid #d8dce2;border-radius:14px;box-shadow:0 18px 48px rgba(24,32,44,.13);overflow:hidden;box-sizing:border-box}#root{height:100%;overflow:hidden}@media(max-width:1040px){.layout{height:720px}}' : ''}</style>
 <div class="notice">隔离界面验证 · 全部为测试数据 · 未连接 DSH</div>
 <nav class="sessions" aria-label="测试会话"><button data-session="session-demo-login">登录需求</button><button data-session="session-demo-research">调研需求</button><button data-session="session-empty-preview">空会话</button>${process.argv.includes('--receipts') ? '<button data-session="session-stopped-preview">停止回执</button>' : ''}</nav>
-<nav class="sessions" aria-label="宿主交互测试"><button data-pending="approval">审批测试</button><button data-pending="question">提问测试</button><button data-pending="plan-review">计划确认测试</button><button data-return-conversation>返回测试会话</button></nav>
+<nav class="sessions" aria-label="宿主交互测试"><button data-pending="approval">审批测试</button><button data-pending="question">提问测试</button><button data-pending="plan-review">计划确认测试</button><button data-return-conversation>返回测试会话</button>${staleDecision ? '<button data-fixture-continue>模拟主控确认继续</button>' : ''}</nav>
 <div class="layout"><nav id="sidebar"></nav><div id="root"></div></div><div id="overlay"></div>
 <script src="/react.js"></script><script src="/react-dom.js"></script><script>${bootstrap}</script><script src="/client.js"></script></html>`
+const streams = new Map()
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url, 'http://localhost')
+    if (url.pathname.endsWith('/api/events')) {
+      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+      const id = url.searchParams.get('sessionId'), clients = streams.get(id) ?? new Set()
+      streams.set(id, clients); clients.add(response)
+      response.once('close', () => { clients.delete(response); if (!clients.size) streams.delete(id) })
+      response.write(': connected\n\n'); return
+    }
+    if (staleDecision && url.pathname === '/fixture/continue' && request.method === 'POST') {
+      directSession.pendingMessages = []; directSession.decisionCurrent = true
+      directSession.messageResolution = { relation: 'continue', at: Date.now(), reason: '沿用主控直接执行，开始修改配色并执行验证。' }
+      directSession.execution.toolCalls++
+      for (const client of streams.get(directSession.sessionId) ?? []) client.write('data: {}\n\n')
+      response.end('{}'); return
+    }
     if (url.pathname === '/') { response.setHeader('content-type', 'text/html; charset=utf-8'); response.end(html); return }
     if (url.pathname === '/client.js') { response.setHeader('content-type', 'text/javascript'); response.end(await readFile(new URL('../client.js', import.meta.url))); return }
     if (['/react.js', '/react-dom.js'].includes(url.pathname)) { response.setHeader('content-type', 'text/javascript');
@@ -326,4 +352,4 @@ const server = http.createServer(async (request, response) => {
   } catch (error) { response.statusCode = 500; response.end(JSON.stringify({ ok: false, error: error.message })) }
 })
 server.listen(Number(process.argv[3]) || 0, '127.0.0.1', () => console.log(`PREVIEW_URL=http://127.0.0.1:${server.address().port}`))
-process.on('SIGINT', () => server.close())
+process.on('SIGINT', () => { for (const clients of streams.values()) for (const response of clients) response.end(); server.close() })

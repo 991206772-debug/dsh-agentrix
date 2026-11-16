@@ -27,8 +27,9 @@ window.__ModuleLoader__.load({
     const PANEL_ORDER = 22
     /** The panel is a live monitor: three seconds keeps it readable, not busy. */
     const POLL_MS = 3000
-    /** The inline chat summary only polls while the latest reply has active state. */
+    /** Polling covers old hosts and disconnected event streams. */
     const CHAT_POLL_MS = 2000
+    const LIVE_POLL_MS = 10000
     /** How long the "saved" confirmation stays on the button. */
     const SAVED_HOLD_MS = 2400
 
@@ -276,6 +277,13 @@ window.__ModuleLoader__.load({
         && (!Number.isFinite(plan.decision?.at) || !Number.isFinite(decision.at) || decision.at >= plan.decision.at) ? session : plan
     }
 
+    function decisionReasonOf(t, state) {
+      if (state?.decisionCurrent === false) return t(state.pendingMessages?.length ? 'decision.newMessage' : 'decision.revised')
+      const resolution = state?.messageResolution, decision = state?.decision
+      return (['continue', 'question'].includes(resolution?.relation) && resolution.reason && resolution.at > (decision?.at ?? 0)
+        ? resolution.reason : decision?.reason) || t('acc.direct.noReason')
+    }
+
     /**
      * One source of truth for the P0 acceptance page. The header badge, the
      * conclusion card, the "next step" line and the task list all derive from
@@ -367,7 +375,7 @@ window.__ModuleLoader__.load({
       'view.staleTitle': '任务状态尚未更新', 'view.staleHint': '下方保留上次读取的结果，最新进度请到聊天确认。',
       'view.retry': '重新读取', 'view.retrying': '正在读取…', 'view.loadDetails': '查看原因',
       'view.lastRead': '上次读取 {time}',
-      'view.footNote': '会话验收页每 3 秒只读取当前会话状态。',
+      'view.footNote': '会话验收页按事件更新，并保留定时读取作为补偿。',
       'view.coordinator': '主控 · 当前会话', 'view.returnedLabel': '结果已返回',
       'view.statAccepted': '已验收', 'view.statAttempts': '启动尝试', 'view.remaining': '剩余 {count}',
       'view.legacyHost': '插件服务仍在使用旧版，已筛选当前会话的记录。重新加载“DSH Agentrix”后可启用新版需求关联。',
@@ -471,7 +479,7 @@ window.__ModuleLoader__.load({
       'view.staleTitle': 'Task status has not updated', 'view.staleHint': 'The last successful result is shown below. Check the chat for the latest progress.',
       'view.retry': 'Retry', 'view.retrying': 'Reading…', 'view.loadDetails': 'View reason',
       'view.lastRead': 'Last read {time}',
-      'view.footNote': 'This acceptance view reads only the current conversation, every 3 seconds.',
+      'view.footNote': 'This acceptance view updates on events, with periodic reads as a fallback.',
       'view.coordinator': 'Coordinator · this conversation', 'view.returnedLabel': 'Results returned',
       'view.statAccepted': 'Accepted', 'view.statAttempts': 'Startup attempts', 'view.remaining': '{count} left',
       'view.legacyHost': 'An older plugin service is running. Records have been filtered to this conversation. Reload DSH Agentrix to enable original request tracking.',
@@ -734,6 +742,8 @@ window.__ModuleLoader__.load({
       'decision.reason': '判断理由', 'decision.pending': '等待主控记录执行方式和理由', 'decision.unrecorded': '主控判断未记录',
       'decision.revised': '需求已补充，等待主控更新判断', 'decision.notStarted': '已决定委派，尚未启动子代理', 'decision.at': '判断时间',
       'decision.previous': '上次执行判断', 'decision.previousComplete': '上次委派已完成。', 'decision.previousEnded': '上次委派已结束。',
+      'decision.newMessage': '收到新消息，待主控确认当前判断', 'decision.continued': '沿用执行方式', 'decision.explanation': '本次说明',
+      'request.latest': '最新指令', 'request.original': '原始需求',
       'decision.currentDirect': '当前由主控直接处理；当前阶段的执行判断尚未更新。',
       'decision.plan': '建计划时的判断', 'decision.concurrent': '主控直接处理当前工作，原委派任务继续保留，仍须监督和验收。',
       'view.modelNoPlanHint': '主控按上下文判断是否委派；程序展示已记录的决定和实际活动。没有托管计划时，不会显示子代理进度或验收回执。', 'relation.title': '消息与需求的关联', 'relation.pending': '待主控确认消息关联', 'relation.new': '新需求', 'relation.continue': '继续原需求',
@@ -741,6 +751,8 @@ window.__ModuleLoader__.load({
       'direct.unavailable': '委派入口不可用', 'direct.checkPlugin': '请检查 DSH Agentrix 插件是否启用，以及宿主的子代理功能是否可用；当前没有通过这些入口启动协作。',
       'direct.backendMissing': 'Agentrix 插件服务不可用', 'direct.backendHint': '请检查插件是否启用；进度恢复前无法确认当前执行情况。',
       'direct.stale': '进度暂时无法更新，以下为最近记录',
+      'sync.live': '实时更新', 'sync.connecting': '正在连接实时更新，暂用轮询', 'sync.polling': '轮询更新',
+      'sync.reconnecting': '实时连接中断，正在轮询更新', 'sync.updated': '最后更新：{time}',
       'coordination.incomplete': '尚未完成', 'coordination.coordinator': '主控操作未执行', 'coordination.worker': '协作操作未执行',
       'coordination.active': '原生优先执行策略已生效（v7）', 'coordination.pending': '协作执行策略等待加载', 'runtime.build': '运行逻辑标识',
       'completion.cleanupPending': '取消已请求，资源清理未完成', 'completion.cleanupNext': '取消已记录。处理清理错误后，让主控重试取消清理；无需新增取消消息，不会启动新代理。',
@@ -768,6 +780,8 @@ window.__ModuleLoader__.load({
       'decision.reason': 'Reason', 'decision.pending': 'Waiting for the coordinator to record its execution choice and reason', 'decision.unrecorded': 'Coordinator decision not recorded',
       'decision.revised': 'Request updated; waiting for a revised decision', 'decision.notStarted': 'Delegation chosen; no child agent has started', 'decision.at': 'Decision time',
       'decision.previous': 'Previous execution decision', 'decision.previousComplete': 'The previous delegation is complete.', 'decision.previousEnded': 'The previous delegation has ended.',
+      'decision.newMessage': 'New message received; waiting for the coordinator to confirm the current decision', 'decision.continued': 'Continuing execution mode', 'decision.explanation': 'Latest explanation',
+      'request.latest': 'Latest instruction', 'request.original': 'Original request',
       'decision.currentDirect': 'The coordinator is now handling work directly; the execution decision for this stage has not been updated.',
       'decision.plan': 'Decision when planning', 'decision.concurrent': 'The coordinator handles the current work directly. Existing delegated tasks remain in place and still require supervision and acceptance.',
       'view.modelNoPlanHint': 'The coordinator decides from context; the plugin shows its recorded choice and observed activity. Without a managed plan there is no child progress or acceptance receipt.', 'relation.title': 'Message relationship', 'relation.pending': 'Waiting for coordinator to classify the message', 'relation.new': 'New request', 'relation.continue': 'Continue the current request',
@@ -775,6 +789,8 @@ window.__ModuleLoader__.load({
       'direct.unavailable': 'Delegation tools unavailable', 'direct.checkPlugin': 'Check that DSH Agentrix is enabled and the host supports subagents. These entry points have not started collaboration.',
       'direct.backendMissing': 'Agentrix plugin service unavailable', 'direct.backendHint': 'Check that the plugin is enabled. Current execution cannot be confirmed until progress is available.',
       'direct.stale': 'Progress could not be refreshed; the last record is shown',
+      'sync.live': 'Live updates', 'sync.connecting': 'Connecting live updates; polling for now', 'sync.polling': 'Polling updates',
+      'sync.reconnecting': 'Live connection interrupted; polling for updates', 'sync.updated': 'Last updated: {time}',
       'coordination.incomplete': 'Not completed', 'coordination.coordinator': 'Coordinator operation did not succeed', 'coordination.worker': 'Coordination operation did not succeed',
       'coordination.active': 'Native-first execution policy active (v7)', 'coordination.pending': 'Coordination policy awaiting reload', 'runtime.build': 'Loaded runtime identity',
       'completion.cleanupPending': 'Cancellation requested; resource cleanup incomplete', 'completion.cleanupNext': 'Cancellation is recorded. Resolve the cleanup error and retry cancellation cleanup; no new cancellation message or agent is needed.',
@@ -1009,61 +1025,105 @@ window.__ModuleLoader__.load({
       })
     }
 
-    const EMPTY_CHAT_RESULT = { sessionId: null, data: null, error: '', loading: true }
+    const EMPTY_CHAT_RESULT = { sessionId: null, data: null, error: '', loading: true, updatedAt: null, connection: 'polling' }
 
-    /** All chat slots share one request and polling timer per visible session. */
+    /** All progress surfaces share one snapshot, event stream and fallback timer per visible session. */
     function createChatProgress() {
       const sessions = new Map()
-      const clearTimer = entry => { window.clearInterval(entry.timer); entry.timer = null }
+      const publish = entry => { for (const notify of entry.listeners) notify(entry.result) }
+      const clearTimer = entry => { window.clearInterval(entry.timer); entry.timer = null; entry.interval = null }
+      const syncTimer = entry => {
+        const { connection, error } = entry.result
+        if (entry.terminal && !entry.watchers && !error && ['live', 'polling'].includes(connection)) { clearTimer(entry); return }
+        const interval = connection === 'live' && !error ? LIVE_POLL_MS : CHAT_POLL_MS
+        if (entry.interval === interval) return
+        clearTimer(entry); entry.interval = interval
+        entry.timer = window.setInterval(() => { void refresh(entry) }, interval)
+      }
       const remove = entry => {
-        sessions.delete(entry.sessionId); clearTimer(entry); entry.controller?.abort(); entry.listeners.clear()
+        sessions.delete(entry.sessionId); clearTimer(entry); entry.controller?.abort()
+        if (entry.events) { entry.events.onopen = entry.events.onmessage = entry.events.onerror = null; entry.events.close() }
+        entry.listeners.clear()
+      }
+      const invalidate = entry => {
+        entry.dirty = true
+        if (entry.controller || entry.queued) return
+        entry.queued = true
+        void Promise.resolve().then(() => {
+          entry.queued = false
+          if (entry.dirty && sessions.get(entry.sessionId) === entry) void refresh(entry)
+        })
       }
       const refresh = async entry => {
         if (entry.controller || sessions.get(entry.sessionId) !== entry) return
+        entry.dirty = false
         const controller = new AbortController(); entry.controller = controller
         try {
           const data = await getState(AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]), entry.sessionId)
           if (controller.signal.aborted || sessions.get(entry.sessionId) !== entry) return
-          entry.result = { sessionId: entry.sessionId, data, error: '', errorStatus: null, loading: false }
+          entry.result = { ...entry.result, data, error: '', errorStatus: null, loading: false, updatedAt: Date.now() }
           const plan = currentPlanOf(data, entry.sessionId)
-          const route = plan?.routing ?? data.sessions?.find(item => item.sessionId === entry.sessionId)?.route
           const execution = data.sessions?.find(item => item.sessionId === entry.sessionId)?.execution
           entry.terminal = Boolean(plan && !execution?.running && !execution?.unresolvedChanges?.length
             && (plan.protocolVersion >= 2 ? plan.completion : ['accepted', 'cancelled'].includes(plan.status)))
-          if (entry.terminal) clearTimer(entry)
-          else if (entry.timer === null) entry.timer = window.setInterval(() => { void refresh(entry) }, CHAT_POLL_MS)
         } catch (error) {
           if (controller.signal.aborted || sessions.get(entry.sessionId) !== entry) return
           entry.result = { ...entry.result, loading: false, error: error.message || String(error), errorStatus: error.status }
         } finally { if (entry.controller === controller) entry.controller = null }
-        for (const notify of entry.listeners) notify(entry.result)
+        syncTimer(entry); publish(entry)
+        if (entry.dirty) invalidate(entry)
+      }
+      const connect = entry => {
+        if (typeof window.EventSource !== 'function') return
+        entry.result = { ...entry.result, connection: 'connecting' }
+        try {
+          const events = entry.events = new window.EventSource(api('dsh-delegation-first/api/events?sessionId=' + encodeURIComponent(entry.sessionId)))
+          events.onmessage = () => invalidate(entry)
+          events.onopen = () => {
+            entry.result = { ...entry.result, connection: 'live' }; syncTimer(entry); publish(entry); invalidate(entry)
+          }
+          events.onerror = () => {
+            entry.result = { ...entry.result, connection: 'reconnecting' }; syncTimer(entry); publish(entry)
+          }
+        } catch { entry.result = { ...entry.result, connection: 'reconnecting' } }
       }
       return {
-        subscribe(sessionId, notify) {
+        subscribe(sessionId, notify, watchTerminal = false) {
           let entry = sessions.get(sessionId)
           if (!entry) {
             entry = { sessionId, listeners: new Set(), result: { ...EMPTY_CHAT_RESULT, sessionId },
-              controller: null, timer: null, terminal: false }
+              controller: null, timer: null, interval: null, terminal: false, events: null, dirty: false, queued: false, watchers: 0 }
             sessions.set(sessionId, entry)
           }
           const first = entry.listeners.size === 0
-          entry.listeners.add(notify); notify(entry.result)
+          entry.listeners.add(notify); if (watchTerminal) entry.watchers++; notify(entry.result)
           if (first || entry.terminal) {
-            if (entry.timer === null) entry.timer = window.setInterval(() => { void refresh(entry) }, CHAT_POLL_MS)
+            if (first) connect(entry)
+            syncTimer(entry)
             void refresh(entry)
           }
-          return () => { if (entry.listeners.delete(notify) && entry.listeners.size === 0) remove(entry) }
+          return () => {
+            if (!entry.listeners.delete(notify)) return
+            if (watchTerminal) entry.watchers--
+            if (!entry.listeners.size) remove(entry)
+            else syncTimer(entry)
+          }
+        },
+        refresh(sessionId) {
+          const entry = sessions.get(sessionId)
+          if (!entry) return
+          entry.result = { ...entry.result, loading: true }; publish(entry); invalidate(entry)
         },
         dispose() { for (const entry of sessions.values()) remove(entry) },
       }
     }
 
-    function useChatProgress(progress, sessionId, latest, identity) {
+    function useChatProgress(progress, sessionId, latest, identity, watchTerminal = false) {
       const [result, setResult] = useState(EMPTY_CHAT_RESULT)
       useEffect(() => {
         if (!sessionId || !latest) return undefined
-        return progress.subscribe(sessionId, setResult)
-      }, [progress, sessionId, latest, identity])
+        return progress.subscribe(sessionId, setResult, watchTerminal)
+      }, [progress, sessionId, latest, identity, watchTerminal])
       return result.sessionId === sessionId ? result : EMPTY_CHAT_RESULT
     }
 
@@ -1555,7 +1615,7 @@ window.__ModuleLoader__.load({
     /**
      * Inline task accordion inside "Tasks and evidence". `open` is only a
      * default for the first task: React does not re-apply an unchanged prop on
-     * later renders, so a user's manual open/close survives the 3-second poll.
+     * later renders, so a user's manual open/close survives progress refreshes.
      * The three-column criteria table lives in the collapsed body.
      */
     function AcceptanceTaskCard({ t, task, plan, defaultOpen }) {
@@ -1647,6 +1707,8 @@ window.__ModuleLoader__.load({
       else if (view === 'direct') {
         Object.assign(model, { tone: 'blue', icon: '→', heading: t('acc.direct.heading'), sub: t('acc.direct.sub'),
           line: t('acc.direct.line'), next: t('acc.direct.next'), foot: t('acc.direct.foot') })
+        if (execution?.running) Object.assign(model, { heading: t('dock.coordinator'),
+          line: t(session?.decisionCurrent === false ? 'decision.newMessage' : 'acc.direct.working'), next: t('acc.direct.wait') })
         const calls = Number.isFinite(execution?.toolCalls) ? execution.toolCalls
           : Number.isFinite(session?.turnStats?.direct) ? session.turnStats.direct : 0
         const summaryRows = execution ? [
@@ -1656,9 +1718,10 @@ window.__ModuleLoader__.load({
         ] : [[t('acc.direct.calls'), t('acc.direct.noExecution')]]
         model.sections = [
           { label: t('acc.direct.sectionDecision'), kind: 'kv', rows: [
-            [t('acc.direct.mode'), t('acc.direct.directMode')],
-            [t('acc.direct.reason'), decision?.reason || t('acc.direct.noReason')],
-            [t('acc.direct.request'), request?.text || plan?.source?.text || t('acc.direct.noRequest')] ] },
+            [t('acc.direct.mode'), t(session?.decisionCurrent === false ? 'decision.newMessage' : 'acc.direct.directMode')],
+            [t('acc.direct.reason'), decisionReasonOf(t, session)],
+            [t(session?.latestMessage?.messageId && session.latestMessage.messageId !== request?.messageId ? 'request.latest' : 'acc.direct.request'),
+              session?.latestMessage?.text || request?.text || plan?.source?.text || t('acc.direct.noRequest')] ] },
           { label: t('acc.direct.sectionSummary'), kind: 'kv', rows: summaryRows }
         ]
       } else if (view === 'running') {
@@ -1983,6 +2046,7 @@ window.__ModuleLoader__.load({
       }
       const identity = [sessionId, state?.source?.messageId || plan?.source?.messageId, plan ? plan.createdAt : execution?.startedAt,
         backendMissing ? 'backend' : missing ? 'unavailable' : plan ? 'plan' : failures.length ? 'change-failed' : 'direct', plan ? '' : failures.map(item => item.callId).join(',')].join(':')
+      if (result.error || result.connection === 'reconnecting') indicators.push({ kind: 'connection', text: t(result.error ? 'direct.stale' : 'sync.reconnecting') })
       const label = [summary, ...indicators.map(item => item.text), t('dock.details')].join('，')
       return h('div', { className: 'ddf-chat-dock', 'data-tone': tone, ref: dockRef }, h('style', null, CHAT_NOTICE_STYLES),
         h('details', { className: 'ddf-dock-disclosure', key: identity, onToggle: fitDetails },
@@ -1993,7 +2057,7 @@ window.__ModuleLoader__.load({
                 : h('small', null, item.prefix), h('strong', null, item.value), item.unit ? h('small', null, item.unit) : null]))),
             h('span', { className: 'ddf-dock-toggle', 'aria-hidden': 'true' })),
           h('div', { className: 'ddf-dock-details', role: 'region', 'aria-label': t('dock.details') },
-            h('div', { className: 'ddf-dock-panel-head' }, h('strong', null, t('dock.details'))), content)))
+            h('div', { className: 'ddf-dock-panel-head' }, h('strong', null, t('dock.details'))), h(ProgressFreshness, { t, result }), content)))
     }
 
     function AssociationDetails({ t, resolution, pending = [] }) {
@@ -2002,15 +2066,28 @@ window.__ModuleLoader__.load({
           : resolution ? h('p', { className: 'ddf-chat-live-meta' }, t('relation.title') + '：' + t('relation.' + resolution.relation)) : null)
     }
 
+    function ProgressFreshness({ t, result }) {
+      return h('div', { className: 'ddf-chat-live-meta', 'data-progress-sync': result.error ? 'stale' : result.connection, role: 'status' },
+        t(result.error ? 'direct.stale' : 'sync.' + result.connection),
+        result.updatedAt ? ' · ' + fill(t('sync.updated'), { time: new Date(result.updatedAt).toLocaleTimeString() }) : '')
+    }
+
     function DecisionDetails({ t, decision, current = true, preparing = false, historical = false, label, resolution, pending = [] }) {
       if (!decision) return h('div', { className: 'ddf-decision' }, h(AssociationDetails, { t, resolution, pending }), h('p', { className: 'ddf-chat-live-meta' }, t(preparing ? 'decision.pending' : 'decision.unrecorded')))
-      return h('div', { className: 'ddf-decision' },
-        h(AssociationDetails, { t, resolution, pending }),
-        h('p', { className: 'ddf-decision-choice' }, t(label || (historical ? 'decision.previous' : 'decision.title')) + '：' + t('decision.' + decision.mode)),
-        !current && !pending.length ? h('p', null, t('decision.revised')) : null,
+      const continued = ['continue', 'question'].includes(resolution?.relation) && resolution.reason && resolution.at > (decision.at ?? 0)
+      const previous = !current || historical || continued
+      const record = h('div', null,
+        h('p', { className: previous ? 'ddf-chat-live-meta' : 'ddf-decision-choice' }, t(label || (previous ? 'decision.previous' : 'decision.title')) + '：' + t('decision.' + decision.mode)),
         h('p', null, t('decision.reason') + '：' + decision.reason),
         h('p', { className: 'ddf-chat-live-meta' }, decision.model?.model || '—',
           decision.at ? ' · ' + t('decision.at') + '：' + new Date(decision.at).toLocaleTimeString() : ''))
+      return h('div', { className: 'ddf-decision' },
+        h(AssociationDetails, { t, resolution, pending }),
+        !current ? h('p', null, t(pending.length ? 'decision.newMessage' : 'decision.revised')) : null,
+        continued ? h('div', null,
+          current && !historical ? h('p', { className: 'ddf-decision-choice' }, t('decision.continued') + '：' + t('decision.' + decision.mode)) : null,
+          h('p', null, t('decision.explanation') + '：' + resolution.reason)) : null,
+        previous ? h('details', { 'data-decision-history': 'previous' }, h('summary', null, t(label || 'decision.previous')), record) : record)
     }
 
     function CoordinatorProgress({ t, state, previousPlan, error }) {
@@ -2050,8 +2127,11 @@ window.__ModuleLoader__.load({
         failures.length ? h('div', { className: 'ddf-execution-row', 'data-section': 'issues' },
           h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.issues'))),
           h('div', { className: 'ddf-execution-content' }, ...failures.map(item => h('p', { key: item.callId }, (item.target || item.tool) + '：' + item.reason)))) : null,
+        state.latestMessage?.text && state.latestMessage.messageId !== state.source?.messageId ? h('div', { className: 'ddf-execution-row', 'data-section': 'latest-message' },
+          h('div', { className: 'ddf-execution-label' }, h('h3', null, t('request.latest'))),
+          h('div', { className: 'ddf-execution-content' }, h('p', { className: 'ddf-source' }, state.latestMessage.text))) : null,
         state.source?.text ? h('div', { className: 'ddf-execution-row', 'data-section': 'request' },
-          h('div', { className: 'ddf-execution-label' }, h('h3', null, t('view.request'))),
+          h('div', { className: 'ddf-execution-label' }, h('h3', null, t(state.latestMessage?.messageId && state.latestMessage.messageId !== state.source.messageId ? 'request.original' : 'view.request'))),
           h('div', { className: 'ddf-execution-content' }, h('p', { className: 'ddf-source' }, state.source.text))) : null)
     }
 
@@ -2071,7 +2151,9 @@ window.__ModuleLoader__.load({
 
     function ChatPlanNotice({ t, plan, state, openView, error }) {
       return h('div', null,
-        h(CoordinationIssueNotice, { t, plan }), h(ChatPlanBody, { t, plan, state, openView, error }))
+        h(CoordinationIssueNotice, { t, plan }),
+        !plan?.completion && plan?.cancellation?.cleanup && plan.cancellation.cleanup.status !== 'completed' ? h(CompletionReceipt, { t, plan }) : null,
+        h(ChatPlanBody, { t, plan, state, openView, error }))
     }
 
     function ChatPlanBody({ t, plan, state, openView, error }) {
@@ -2827,11 +2909,8 @@ window.__ModuleLoader__.load({
             h('p', { className: 'ddf-board-decision-signals' }, plan ? reasons || t('plans.modelReasonUnknown') : semantic ? pending.map(message => message.text).join('；') : signalsText(t, difficulty))),
           h('div', { className: 'ddf-board-decision-routes' },
             h('div', null, h('h2', null, t('decision.title')),
-              h('strong', { className: 'ddf-board-decision-route' }, t(decision ? 'decision.' + decision.mode : 'decision.unrecorded')),
-              decision ? h('p', { className: 'ddf-board-decision-note' }, decision.reason) : null,
+              DecisionDetails({ t, decision, current: decisionCurrent, resolution: decisionState?.messageResolution, pending: decisionState?.pendingMessages }),
               concurrent ? h('p', { className: 'ddf-board-decision-note' }, t('decision.concurrent')) : null,
-              !decisionCurrent && decision && !pending.length ? h('p', { className: 'ddf-board-decision-note' }, t('decision.revised')) : null,
-              plan && semantic ? h(AssociationDetails, { t, resolution: session.messageResolution, pending }) : null,
               plan ? h('p', { className: 'ddf-board-decision-note' }, t(tasks.some(task => requiresAudit(task) || task.audit) ? 'view.complexAudit' : 'view.routineAcceptance')) : null),
             h('div', { className: 'ddf-board-decision-actual' }, h('h2', null, t('view.actualArrangement')), h('strong', null, actual),
               dependent.length ? h('p', { className: 'ddf-board-decision-note' }, fill(t('view.boardDependency'), {
@@ -2988,6 +3067,7 @@ window.__ModuleLoader__.load({
       'acc.unknown.heading': '记录未完整', 'acc.unknown.line': '当前会话的需求记录不足以给出验收结论，可能是历史会话或记录未保留。',
       'acc.unknown.next': '回到聊天核对当前需求；如需归档可「整理与导出」。', 'acc.unknown.foot': '结论只能来自程序回执，不由报告或工具返回推断。',
       'acc.direct.heading': '主控直接完成', 'acc.direct.sub': '本次需求未建立托管计划',
+      'acc.direct.working': '主控正在处理，以下展示实际执行记录。', 'acc.direct.wait': '等待当前执行结束；补充要求请在聊天发送。',
       'acc.direct.line': '主控按上下文判断直接处理；以下是已记录的执行摘要，不产生托管验收回执。',
       'acc.direct.next': '内容已在聊天核验；如需回看过程，展开下方协作动态；如需长期归档，可「整理与导出」。',
       'acc.direct.foot': '直接执行不产生托管验收回执，不能替代对文件内容的确认。',
@@ -3001,7 +3081,7 @@ window.__ModuleLoader__.load({
       'acc.running.sub': '任务 {total} · 执行中 {running} · 等待 {waiting} · 待验收 {review}',
       'acc.running.line': '主控正在等待执行者提交报告；报告返回后会实际验证并逐条验收。',
       'acc.running.next': '等待执行者返回报告；主控验证后会在这里显示验收结论。补充要求请在聊天发送。',
-      'acc.running.foot': '本页只读，每 3 秒读取一次；页面进度不会推进主控动作。',
+      'acc.running.foot': '本页只读，按实际事件更新；页面进度不会推进主控动作。',
       'acc.completed.heading': '已完成', 'acc.completed.sub': '已验收 {accepted}/{total} · {files} 个产物已交付',
       'acc.completed.line': '主控已逐条验证并验收全部任务，交付文件与验收依据见下方。',
       'acc.completed.next': '无需处理。结果已在聊天交付；如需归档，可「整理与导出」。',
@@ -3045,7 +3125,7 @@ window.__ModuleLoader__.load({
       'acc.receiptRows.id': '回执编号', 'acc.receiptRows.at': '生成时间', 'acc.receiptRows.outcome': '验收结果',
       'acc.receiptRows.evidence': '证据 id', 'acc.receiptRows.deliverables': '交付数', 'acc.receiptRows.cleanup': '清理状态',
       'acc.receiptRows.released': '子代理已全部释放', 'acc.receiptRows.pending': '取消已请求，资源清理未完成',
-      'acc.receiptRows.none': '无', 'acc.footnote': '只读 · 每 3 秒读取当前会话 · 不提供签收或控制',
+      'acc.receiptRows.none': '无', 'acc.footnote': '只读 · 按事件更新当前会话 · 不提供签收或控制',
       'acc.footnoteLinks': '完整过程：Fleet · 整理导出：Share',
     })
     Object.assign(en, {
@@ -3071,6 +3151,7 @@ window.__ModuleLoader__.load({
       'acc.unknown.next': 'Return to chat to check the current request; use Summarize and export to archive.',
       'acc.unknown.foot': 'Only the program receipt can produce a conclusion, never a report or tool output.',
       'acc.direct.heading': 'Completed directly by the coordinator', 'acc.direct.sub': 'No managed plan was created for this request',
+      'acc.direct.working': 'The coordinator is working; observed execution is shown below.', 'acc.direct.wait': 'Wait for the current execution to finish. Send additional requirements in chat.',
       'acc.direct.line': 'The coordinator handled this from context; the recorded execution summary follows. Direct execution produces no managed acceptance receipt.',
       'acc.direct.next': 'The content was verified in chat. Expand collaboration activity below to review the process, or use Summarize and export to archive.',
       'acc.direct.foot': 'Direct execution produces no managed acceptance receipt and cannot replace checking the file contents.',
@@ -3084,7 +3165,7 @@ window.__ModuleLoader__.load({
       'acc.running.sub': 'Tasks {total} · running {running} · waiting {waiting} · awaiting acceptance {review}',
       'acc.running.line': 'The coordinator is waiting for worker reports; once they return it verifies and accepts each task.',
       'acc.running.next': 'Wait for the worker report; the coordinator will show its acceptance conclusion here. Send any extra requirements in chat.',
-      'acc.running.foot': 'This page is read-only and refreshes every 3 seconds; it never advances coordinator actions.',
+      'acc.running.foot': 'This page is read-only and updates on observed events; it never advances coordinator actions.',
       'acc.completed.heading': 'Completed', 'acc.completed.sub': '{accepted}/{total} accepted · {files} deliverables',
       'acc.completed.line': 'The coordinator verified and accepted every task; deliverables and acceptance evidence are below.',
       'acc.completed.next': 'Nothing to do. The result was delivered in chat; use Summarize and export to archive.',
@@ -3132,7 +3213,7 @@ window.__ModuleLoader__.load({
       'acc.receiptRows.id': 'Receipt ID', 'acc.receiptRows.at': 'Generated at', 'acc.receiptRows.outcome': 'Outcome',
       'acc.receiptRows.evidence': 'Evidence ids', 'acc.receiptRows.deliverables': 'Deliverables', 'acc.receiptRows.cleanup': 'Cleanup',
       'acc.receiptRows.released': 'All child agents released', 'acc.receiptRows.pending': 'Cancellation requested; cleanup incomplete',
-      'acc.receiptRows.none': 'None', 'acc.footnote': 'Read-only · reads this conversation every 3 seconds · no sign-off or control',
+      'acc.receiptRows.none': 'None', 'acc.footnote': 'Read-only · updates this conversation on events · no sign-off or control',
       'acc.footnoteLinks': 'Full process: Fleet · Export: Share',
     })
 
@@ -3392,7 +3473,7 @@ window.__ModuleLoader__.load({
 }
 `
 
-    function DashboardPage({ t, state, sessionId, plan, openView, enabledView, onFix, detailsOpen, onToggleDetails, notice, updatedAt, member, onMember, onOpenTask, selectedTask, feedRef, onFeedScroll, onLatest, showLatest, drawerButtonRef, history, onMore, artifactActions, onCopyConclusion, copyState }) {
+    function DashboardPage({ t, state, sessionId, plan, openView, enabledView, onFix, detailsOpen, onToggleDetails, notice, updatedAt, connection, member, onMember, onOpenTask, selectedTask, feedRef, onFeedScroll, onLatest, showLatest, drawerButtonRef, history, onMore, artifactActions, onCopyConclusion, copyState }) {
       const tasks = plan?.tasks ?? [], status = dashboardStatusKey(plan)
       const statusLabel = plan?.completion ? completionLabel(t, plan.completion) : status === 'accepted' && plan.protocolVersion >= 2
         ? t('chat.receiptPending') : t({ failed: 'view.boardFailed', accepted: 'view.boardDone', review: 'view.boardReview' }[status] || 'status.' + status)
@@ -3432,6 +3513,7 @@ window.__ModuleLoader__.load({
         request?.messageId ? fill(t('acc.requestMessage'), { id: shortId(request.messageId) }) : null,
         receipt?.id ? fill(t('acc.receiptMeta'), { id: shortId(receipt.id) }) : null,
         t('acc.readonly'),
+        connection ? t('sync.' + connection) : null,
         updatedAt ? fill(t('acc.lastRead'), { time: new Date(updatedAt).toLocaleTimeString() }) : null,
       ].filter(Boolean)
       const copyButton = loaded && ['completed', 'plan_completed', 'partial'].includes(view) ? h('button', { type: 'button',
@@ -3447,7 +3529,7 @@ window.__ModuleLoader__.load({
           .filter(item => item.count > 0).map(item => h('span', { key: item.kind }, t(item.kind === 'refused' ? 'dock.requestRefused' : 'dock.' + item.kind) + ' ' + item.count)),
         h('span', null, t('dock.accepted') + ' ' + accepted + '/' + tasks.length)) : null
       // Native <details>: no `open` prop when closed, so a user's fold state
-      // survives the 3-second read-only poll; Escape still closes the drawer.
+      // survives read-only progress refreshes; Escape still closes the drawer.
       const fold = (id, title, meta, open, body) => h('details', { key: id, className: 'ddf-acc-fold', 'data-acceptance-fold': id, open: open ? true : undefined },
         h('summary', null, h('span', { className: 'ddf-acc-fold-title' }, title),
           h('span', { className: 'ddf-acc-fold-meta' }, meta || ''), h('span', { className: 'ddf-acc-chev', 'aria-hidden': 'true' })),
@@ -3478,16 +3560,19 @@ window.__ModuleLoader__.load({
           h('p', null, previous.source?.text || t('view.unknownSource')), h('p', null, t('view.message') + '：', previous.source?.messageId || '—')) : null,
       ])
       const workerModel = tasks.map(task => task.modelRoute?.actual ?? task.modelRoute?.resolved ?? task.model).find(Boolean)?.model
+      const decisionState = planDecisionState(plan, session), decisionPending = decisionState?.decisionCurrent === false
       const decisionRows = [
-        [t('acc.direct.mode'), decision?.mode ? t('decision.' + decision.mode) + ' · ' + t(decision.mode === 'direct' ? 'acc.modeDirectDetail' : 'acc.modeDelegateDetail') : t('decision.unrecorded')],
-        [t('acc.direct.reason'), decision?.reason || t('acc.direct.noReason')],
+        [t('acc.direct.mode'), decisionPending ? t('decision.newMessage') : decision?.mode ? t('decision.' + decision.mode) + ' · ' + t(decision.mode === 'direct' ? 'acc.modeDirectDetail' : 'acc.modeDelegateDetail') : t('decision.unrecorded')],
+        [t('acc.direct.reason'), decisionReasonOf(t, decisionState)],
         [t('acc.execModel'), workerModel || t('cfg.unknown')],
         [t('acc.auditMode'), tasks.some(task => task.audit || task.reviewPolicy === 'independent') ? t('audit.title') : t('view.auditCoordinator')],
         [t('acc.attempts'), plan?.activationBudget ? plan.activationBudget.used + ' / ' + plan.activationBudget.limit : t('cfg.unknown')]
       ]
-      const decisionMeta = decision?.mode === 'direct' ? t('acc.decisionMeta.direct')
+      const decisionMeta = decisionPending ? t('decision.newMessage') : decision?.mode === 'direct' ? t('acc.decisionMeta.direct')
         : decision?.mode === 'delegate' ? fill(t('acc.decisionMeta.delegate'), { count: Math.max(1, running) }) : t('acc.decisionMeta.unknown')
       const decisionFold = fold('decision', t('acc.fold.decision'), decisionMeta, false, [
+        session?.latestMessage?.text && session.latestMessage.messageId !== request?.messageId ? h('p', { className: 'ddf-source' },
+          h('strong', null, t('request.latest') + '：'), session.latestMessage.text) : null,
         // The original request belongs with the coordinator decision, not at
         // the top of the task list where it duplicated the header/conclusion.
         hero,
@@ -3547,7 +3632,7 @@ window.__ModuleLoader__.load({
         h('main', { className: 'ddf-board ddf-focus-board', 'data-status': status, 'data-acceptance-view': view, ref: feedRef, onScroll: onFeedScroll },
           h('header', { className: 'ddf-board-header' },
             h('div', { className: 'ddf-focus-heading' },
-              h('div', { className: 'ddf-acc-eyebrow' }, t('acc.eyebrow'), h('span', { className: 'ddf-acc-readonly' }, t('acc.readonly'))),
+              h('div', { className: 'ddf-acc-eyebrow' }, t(session?.latestMessage?.messageId && session.latestMessage.messageId !== request?.messageId ? 'request.original' : 'acc.eyebrow'), h('span', { className: 'ddf-acc-readonly' }, t('acc.readonly'))),
               h('div', { className: 'ddf-focus-heading-line' },
                 h('h1', { className: 'ddf-board-title', title: heading }, heading),
                 h('span', { className: 'ddf-acc-badge', 'data-tone': badge.tone, role: 'status' }, h('i', { 'aria-hidden': 'true' }), badge.label),
@@ -3568,8 +3653,8 @@ window.__ModuleLoader__.load({
     }
 
 
-    function TaskView({ t, sessionId, openView, getViews, onFix }) {
-      const [result, setResult] = useState({ data: null, error: '', loading: true, updatedAt: null })
+    function TaskView({ t, sessionId, openView, getViews, onFix, progress }) {
+      const result = useChatProgress(progress, sessionId, true, undefined, true)
       const [detailsOpen, setDetailsOpen] = useState(false)
       const [focus, setFocus] = useState({ key: '', member: 'all', taskId: null })
       const [showLatest, setShowLatest] = useState(false)
@@ -3579,28 +3664,6 @@ window.__ModuleLoader__.load({
       const drawerButtonRef = useRef(null)
       const following = useRef({ key: '', member: 'all', active: false })
       const historyScroll = useRef(null)
-      const refreshRef = useRef(null)
-      useEffect(() => {
-        if (!sessionId) return
-        let alive = true, inFlight
-        const refresh = async (manual = false) => {
-          if (inFlight) return
-          const controller = new AbortController()
-          inFlight = controller
-          if (manual) setResult(previous => ({ ...previous, loading: true }))
-          const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(8000)])
-          try {
-            const data = await getState(signal, sessionId)
-            if (alive && !signal.aborted) setResult({ data, error: '', loading: false, updatedAt: Date.now() })
-          } catch (error) {
-            if (alive && !controller.signal.aborted) setResult(previous => ({ ...previous, loading: false, error: error.message || String(error) }))
-          } finally { if (inFlight === controller) inFlight = null }
-        }
-        refreshRef.current = refresh
-        void refresh(true)
-        const timer = window.setInterval(() => { void refresh() }, POLL_MS)
-        return () => { alive = false; refreshRef.current = null; window.clearInterval(timer); inFlight?.abort() }
-      }, [sessionId])
       const state = result.data?.sessionId === sessionId ? result.data : null
       const plan = currentPlanOf(state, sessionId)
       const focusKey = sessionId + ':' + (state?.sessions?.find(item => item.sessionId === sessionId)?.source?.messageId || plan?.source?.messageId || '') + ':' + (plan?.createdAt ?? '')
@@ -3639,10 +3702,10 @@ window.__ModuleLoader__.load({
             h('p', null, t(state ? 'view.staleHint' : 'view.loadHint'),
               state && result.updatedAt ? ' ' + fill(t('view.lastRead'), { time: new Date(result.updatedAt).toLocaleTimeString() }) : null),
             h('button', { type: 'button', className: 'ddf-board-action', disabled: result.loading,
-              onClick: () => { void refreshRef.current?.(true) } }, t(result.loading ? 'view.retrying' : 'view.retry')),
+              onClick: () => progress.refresh(sessionId) }, t(result.loading ? 'view.retrying' : 'view.retry')),
             h('details', null, h('summary', null, t('view.loadDetails')), h('pre', null, result.error)))
         : !sessionId || !state ? h('p', { className: 'ddf-board-inline-notice', role: 'status' }, t(!sessionId ? 'view.noSession' : 'view.loading')) : null
-      return h(DashboardPage, { t, state, sessionId, plan, openView, enabledView, onFix, notice, updatedAt: result.updatedAt,
+      return h(DashboardPage, { t, state, sessionId, plan, openView, enabledView, onFix, notice, updatedAt: result.updatedAt, connection: result.connection,
         // Read-only copy: the conclusion is the receipt-backed Markdown built
         // for the L1 card, never a separately assembled string.
         onCopyConclusion: async markdown => {
@@ -3935,6 +3998,7 @@ window.__ModuleLoader__.load({
           label: () => t('view.tab'), inject: () => ({ t }),
         }, slotProps => h(TaskView, {
           key: slotProps?.sessionId || '', t: slotProps?.t ?? t, sessionId: slotProps?.sessionId,
+          progress,
           openView: slotProps?.openView,
           onFix: openModelConfig,
           getViews: () => ctx.slots.entries?.('conversation.view').map(entry => ({ id: entry.options.id })) ?? [],

@@ -351,6 +351,15 @@ export function apply(ctx) {
 
   /** sessionId → the counters and the judgement a turn is governed by. */
   const states = new Map()
+  const stateSubscribers = new Map(), stateEventTimers = new Map()
+  // Events invalidate a snapshot; only the state route carries authoritative data.
+  const notifyState = id => {
+    if (!stateSubscribers.has(id) || stateEventTimers.has(id)) return
+    stateEventTimers.set(id, setTimeout(() => {
+      stateEventTimers.delete(id)
+      for (const response of stateSubscribers.get(id) ?? []) response.write('data: {}\n\n')
+    }, 25))
+  }
   let orchestration
   const stateOf = (sessionId) => {
     let state = states.get(sessionId)
@@ -385,6 +394,7 @@ export function apply(ctx) {
 
   orchestration = createOrchestrator({ ctx, file: file.replace(/\.json$/, '.runs.json'),
     getConfig: () => current, getSource: id => states.get(id)?.source ?? null, getRevision: id => states.get(id)?.revision ?? null,
+    onChange: notifyState,
     onRequestResolved: (id, context) => {
       const state = stateOf(id), previousId = state.source?.messageId
       state.source = context.source; state.revision = context.revision
@@ -392,6 +402,7 @@ export function apply(ctx) {
         state.execution.requestId = context.source?.messageId ?? null
         if (previousId !== context.source?.messageId) { state.execution.unresolvedChanges = []; state.execution.repairUsed = 0 }
       }
+      notifyState(id)
     },
     onDelegated: id => { stateOf(id).delegated++ } })
   const ready = Promise.all([configReady, orchestration.ready])
@@ -483,6 +494,7 @@ export function apply(ctx) {
     execution.toolCalls++
     execution.running = true; execution.lastActivityAt = now
     execution.activity = { kind: 'tool', tool: exec.name, target, at: now }
+    notifyState(exec.agent.id)
   }
 
   const missingDecisionCalls = new WeakSet()
@@ -569,6 +581,7 @@ export function apply(ctx) {
 
   const offResult = ctx.on('tools/result', (exec, result) => {
     orchestration.observe(exec, result)
+    notifyState(exec.agent?.id)
     const state = states.get(String(exec.agent?.id ?? ''))
     const call = state?.activeCalls.get(exec.callId)
     state?.activeCalls.delete(exec.callId)
@@ -601,6 +614,7 @@ export function apply(ctx) {
     execution.running = true
     execution.model = { provider: request.provider, model: request.model }
     execution.activity = { kind: 'waiting_model_response', at: Date.now() }
+    notifyState(role.agentId)
     const stream = next()
     if (!stream?.[Symbol.asyncIterator]) return stream
     return (async function* () {
@@ -609,6 +623,7 @@ export function apply(ctx) {
         execution.lastActivityAt = Date.now()
         if (!received && ['block-start', 'block-delta'].includes(chunk.type)) {
           received = true; execution.activity = { kind: 'model', at: execution.lastActivityAt }
+          notifyState(role.agentId)
         }
         yield chunk
       }
@@ -639,6 +654,7 @@ export function apply(ctx) {
     const id = String(session?.id ?? '')
     if (!id) return
     const type = event?.type
+    if (['agent/inbox/spliced', 'user/message', 'request/header', 'assistant/message', 'turn/start', 'turn/end'].includes(type)) notifyState(id)
 
     // Orchestrator records factual human messages; no lexical classification occurs here.
     if (type === 'agent/inbox/spliced') {
@@ -738,6 +754,29 @@ export function apply(ctx) {
     ...orchestrationOptions(current),
   })
 
+  /** Session-scoped invalidation stream; authoritative data stays in the state route. */
+  const eventsRoute = async (request, response) => {
+    if (request.method !== 'GET') { response.writeHead(405, { allow: 'GET' }); response.end(); return }
+    const id = new URL(request.url, 'http://localhost').searchParams.get('sessionId')
+    if (!id) { response.writeHead(400); response.end(); return }
+    await ready
+    if (response.destroyed) return
+    response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive' })
+    response.flushHeaders?.()
+    const clients = stateSubscribers.get(id) ?? new Set()
+    stateSubscribers.set(id, clients); clients.add(response)
+    const heartbeat = setInterval(() => response.write(': keepalive\n\n'), 15000)
+    heartbeat.unref?.()
+    response.once('close', () => {
+      clearInterval(heartbeat); clients.delete(response)
+      if (!clients.size) {
+        stateSubscribers.delete(id)
+        clearTimeout(stateEventTimers.get(id)); stateEventTimers.delete(id)
+      }
+    })
+    response.write(': connected\n\n')
+  }
+
   /** A read-only view of the counters, so the gate can be checked without logs. */
   const stateRoute = async (request, response) => {
     if (request.method !== 'GET') {
@@ -793,6 +832,10 @@ export function apply(ctx) {
         sessionId: id,
         sessionTitle: sessionTitleOf(id),
         source: orchestration.sourceOf(id),
+        latestMessage: (() => {
+          const message = orchestration.requestContext(id)?.messages?.findLast(item => !item.withdrawn)
+          return message ? { messageId: message.messageId, text: message.text, at: message.at } : null
+        })(),
         requestBindingVersion: 2,
         pendingMessages: orchestration.pendingMessages(id),
         messageResolution: orchestration.requestContext(id)?.messageResolution ?? null,
@@ -1069,6 +1112,7 @@ export function apply(ctx) {
       }
     }
     register(`${API_BASE}/state`, stateRoute)
+    register(`${API_BASE}/events`, eventsRoute)
     register(`${API_BASE}/config`, configRoute)
     register(`${API_BASE}/history`, archiveRoute('history'))
     register(`${API_BASE}/archive`, archiveRoute('archive'))
@@ -1261,6 +1305,10 @@ export function apply(ctx) {
       }
     }
     sectionDisposers.clear()
+    for (const timer of stateEventTimers.values()) clearTimeout(timer)
+    stateEventTimers.clear()
+    for (const clients of stateSubscribers.values()) for (const response of clients) response.end()
+    stateSubscribers.clear()
     states.clear()
     return orchestration.dispose()
   }, 'dsh-delegation-first: gate')

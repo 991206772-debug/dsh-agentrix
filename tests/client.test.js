@@ -1322,6 +1322,56 @@ test('unclassified messages are visible without claiming a scope change or gener
   } finally { dock.close(); view.close(); f.close() }
 })
 
+test('new input makes a prior readonly decision historical while the actual edit stays visible', async () => {
+  const row = { sessionId: 'session-current', source: { messageId: 'review', text: '先评审，不改代码' },
+    latestMessage: { messageId: 'implement', text: '选择 B，开始实施', at: 200 },
+    decision: { mode: 'direct', reason: '只读评审，不写代码。', at: 100 }, decisionCurrent: false,
+    pendingMessages: [{ messageId: 'implement', text: '选择 B，开始实施' }],
+    execution: { running: true, toolCalls: 57, activity: { kind: 'tool', tool: 'edit', target: 'theme.js' } } }
+  const body = { ok: true, sessionId: row.sessionId, plans: [], sessions: [row] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock(row.sessionId)
+  try {
+    await dock.flush()
+    assert.match(dock.text(), /修改文件.*theme.js/)
+    assert.match(dock.text(), /新消息.*待.*确认/)
+    assert.equal(dock.nodes('p').filter(node => node.props.className === 'ddf-decision-choice').length, 0,
+      'an outdated decision must not keep the green current-choice styling')
+    const history = dock.nodes('details').find(node => node.props['data-decision-history'])
+    assert.ok(history && history.props.open !== true, 'the old reason remains in collapsed history')
+    assert.match(dock.text(), /最新指令.*选择 B，开始实施/)
+    assert.match(dock.text(), /原始需求.*先评审，不改代码/)
+  } finally { dock.close(); f.close() }
+})
+
+test('the acceptance page keeps stale reasons in history and shows the latest continuation explanation', async () => {
+  const row = { sessionId: 'session-current', requestBindingVersion: 2,
+    source: { messageId: 'review', text: '先评审，不改代码' },
+    latestMessage: { messageId: 'implement', text: '选择 B，开始实施' },
+    decision: { mode: 'direct', reason: '只读评审，不写代码。', at: 100 }, decisionCurrent: false,
+    pendingMessages: [{ messageId: 'implement', text: '选择 B，开始实施' }],
+    execution: { running: true, toolCalls: 2, activity: { kind: 'tool', tool: 'edit', target: 'theme.js' } } }
+  const body = { ok: true, sessionId: row.sessionId, plans: [], sessions: [row] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const dock = f.mountDock(row.sessionId), view = f.mountView(row.sessionId)
+  const conclusion = () => view.nodes('section').find(node => node.props['data-acceptance-conclusion'])
+  try {
+    await dock.flush(); await view.flush()
+    assert.match(JSON.stringify(conclusion()), /新消息.*待.*确认/)
+    assert.doesNotMatch(JSON.stringify(conclusion()), /只读评审，不写代码/)
+    assert.doesNotMatch(JSON.stringify(conclusion()), /主控直接完成/)
+    assert.match(JSON.stringify(conclusion()), /最新指令.*选择 B，开始实施/)
+    assert.ok(view.nodes('details').some(node => node.props['data-decision-history']))
+    row.pendingMessages = []; row.decisionCurrent = true
+    row.messageResolution = { relation: 'continue', at: 200, reason: '开始修改配色并执行验证。' }
+    await dock.tick(); await view.tick()
+    assert.match(dock.text(), /沿用执行方式.*直接执行.*本次说明.*开始修改配色/)
+    assert.match(JSON.stringify(conclusion()), /开始修改配色并执行验证/)
+    assert.doesNotMatch(JSON.stringify(conclusion()), /只读评审，不写代码/)
+    assert.match(view.text(), /最新指令.*选择 B，开始实施/)
+  } finally { dock.close(); view.close(); f.close() }
+})
+
 test('direct work is visible in the input dock with actual activity, advisory mismatch and unresolved edits', async () => {
   const execution = { running: true, startedAt: Date.now(), toolCalls: 2, statement: null,
     activity: { kind: 'tool', tool: 'edit', target: 'article.md' },
@@ -1858,6 +1908,7 @@ async function sidebarFixture(initialCatalog = { status: 'ready', value: { group
     },
   }
   const window = {
+    EventSource: options.EventSource,
     navigator: options.clipboard ? { clipboard: { writeText: options.clipboard } } : {},
     __ModuleLoader__: { load: ({ factory }) => { moduleApi = factory(() => React); moduleApi.apply(ctx) } },
     setInterval(fn) { const id = ++sequence; timers.set(id, fn); return id },
@@ -2457,27 +2508,89 @@ test('healthy execution and waits show status cards while accepted legacy tasks 
   })
 })
 
-test('the dock, receipt and progress button share one request and timer until the last subscriber leaves', async () => {
+test('the dock, receipt, acceptance page and progress button share one request and timer until the last subscriber leaves', async () => {
   let calls = 0
   const f = await sidebarFixture(undefined, { fetchState: async () => {
     calls++
     return { ok: true, json: async () => ({ ok: true, sessionId: 'session-current', plans: [{ sessionId: 'session-current',
       status: 'blocked', tasks: [{ id: 'a', title: '核查', status: 'failed', error: 'HTTP 500' }] }], sessions: [] }) }
   } })
-  const baseline = f.timerCount(), action = f.mountAction('session-current'), notice = f.mountNotice('session-current'), dock = f.mountDock('session-current')
+  const baseline = f.timerCount(), action = f.mountAction('session-current'), notice = f.mountNotice('session-current'), dock = f.mountDock('session-current'), view = f.mountView('session-current')
   try {
-    await action.flush(); await notice.flush(); await dock.flush()
+    await action.flush(); await notice.flush(); await dock.flush(); await view.flush()
     assert.equal(calls, 1)
     assert.equal(f.timerCount(), baseline + 1)
     await action.tick(); await notice.flush()
     assert.equal(calls, 2)
     action.close()
     notice.close()
+    view.close()
     await dock.tick()
     assert.equal(calls, 3)
     dock.close()
     assert.equal(f.timerCount(), baseline)
-  } finally { action.close(); notice.close(); dock.close(); f.close() }
+  } finally { action.close(); notice.close(); view.close(); dock.close(); f.close() }
+})
+
+test('live updates coalesce bursts, catch events during a read and fall back after disconnection', async () => {
+  const connections = []
+  class Events {
+    constructor(url) { this.url = url; this.closed = 0; connections.push(this) }
+    close() { this.closed++ }
+  }
+  let calls = 0, pending, fail = false
+  const row = { sessionId: 'session-current', source: { messageId: 'old', text: '先评审' },
+    decision: { mode: 'direct', reason: '只读评审。', at: 100 }, decisionCurrent: true,
+    execution: { running: true, toolCalls: 1, activity: { kind: 'model' } } }
+  const f = await sidebarFixture(undefined, { EventSource: Events, fetchState: async () => {
+    calls++
+    if (fail) throw new Error('connection reset')
+    const response = { ok: true, json: async () => structuredClone({ ok: true, sessionId: row.sessionId, plans: [], sessions: [row] }) }
+    if (calls === 2) return new Promise(resolve => { const snapshot = structuredClone(row); pending = () => resolve({ ok: true,
+      json: async () => ({ ok: true, sessionId: row.sessionId, plans: [], sessions: [snapshot] }) }) })
+    return response
+  } })
+  const baseline = f.timerCount(), dock = f.mountDock(row.sessionId), view = f.mountView(row.sessionId), action = f.mountAction(row.sessionId)
+  try {
+    await dock.flush(); await view.flush(); await action.flush()
+    assert.equal(calls, 1)
+    assert.equal(connections.length, 1, 'all surfaces share a session event connection')
+    const events = connections[0]
+    assert.match(events.url, /api\/events\?sessionId=session-current/)
+    events.onopen()
+    await dock.flush()
+    assert.equal(calls, 2)
+    row.latestMessage = { messageId: 'new', text: '开始实施' }; row.decisionCurrent = false
+    row.pendingMessages = [row.latestMessage]; row.execution.activity = { kind: 'tool', tool: 'edit', target: 'theme.js' }
+    events.onmessage({}); events.onmessage({}); events.onmessage({})
+    pending()
+    await dock.flush(); await view.flush()
+    assert.equal(calls, 3, 'an event during an in-flight snapshot must cause one trailing read')
+    assert.match(dock.text(), /修改文件.*theme.js/)
+    assert.match(dock.text(), /新消息.*待.*确认/)
+    assert.match(view.text(), /新消息.*待.*确认/)
+    assert.match(dock.text(), /最后更新/)
+    events.onmessage({}); events.onmessage({}); events.onmessage({})
+    await dock.flush(); await view.flush()
+    assert.equal(calls, 4, 'bursts cause a single authoritative read')
+    events.onerror()
+    await dock.flush(); await view.flush()
+    assert.match(dock.text(), /实时连接中断.*轮询/)
+    assert.match(view.text(), /实时连接中断.*轮询/)
+    fail = true
+    await dock.tick(); await view.flush()
+    assert.match(dock.text(), /进度暂时无法更新.*最近记录/)
+    assert.match(view.text(), /最近记录|上次读取/)
+    fail = false; row.execution.toolCalls = 3; events.onopen()
+    await dock.flush(); await view.flush()
+    assert.match(dock.text(), /实时更新/)
+    assert.doesNotMatch(dock.text(), /实时连接中断|进度暂时无法更新/)
+    view.close(); action.close()
+    assert.equal(events.closed, 0)
+    dock.close()
+    assert.equal(events.closed, 1)
+    assert.equal(f.timerCount(), baseline)
+  } finally { dock.close(); view.close(); action.close(); f.close() }
 })
 
 test('only the latest turn tail shows and subscribes to the current delivery receipt', async () => {
