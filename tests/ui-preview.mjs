@@ -9,7 +9,8 @@ if (!assetDirectory) throw new Error('Provide a directory containing react.js an
 const invalid = process.argv.includes('--invalid')
 const loadError = process.argv.includes('--load-error')
 const nextRequest = process.argv.includes('--next-request')
-const staleDecision = process.argv.includes('--stale-decision')
+const denseDecision = process.argv.includes('--dense-decision')
+const staleDecision = process.argv.includes('--stale-decision') || denseDecision
 const directProgress = process.argv.includes('--direct-progress') || staleDecision
 const coordinationConflict = process.argv.includes('--coordination-conflict')
 const mixedRefusal = process.argv.includes('--mixed-refusal')
@@ -162,6 +163,16 @@ if (staleDecision) Object.assign(directSession, {
   execution: { running: true, startedAt: Date.now(), toolCalls: 57, model: { model: 'demo/coordinator' },
     activity: { kind: 'tool', tool: 'edit', target: 'src/theme.js' }, unresolvedChanges: [] },
 })
+const denseReason = '按方案 B 调整主题交互，完成后运行验证。多个文件共用一套动效参数，主控在原上下文中统一修改和核对。' +
+  '需要检查主题切换、弹层入场、指引高亮和状态反馈的手感，避免同一交互在不同页面表现不一致。'.repeat(3) + '交付时保留验证结果与操作说明。'
+if (denseDecision) Object.assign(directSession, {
+  messageResolution: { relation: 'continue', at: Date.now(), reason: denseReason },
+  pendingMessages: [
+    { messageId: 'pending-design', text: '先评审工作台的主题切换、页面动效和引导效果。\n结合使用场景给出调整建议。' },
+    { messageId: 'pending-options', text: '希望有独特的品牌色和插画风格。\n请保留主题切换入口，并说明默认效果。' },
+    { messageId: 'pending-implement', text: '选择方案 B，开始实施。完成后运行验证并核对实际效果。' },
+  ],
+})
 if (process.argv.includes('--long-progress')) {
   directSession.execution.activity = { kind: 'tool', tool: 'grep', target: 'src/api-client.js' }
   directSession.execution.toolCalls = 12
@@ -308,7 +319,7 @@ const server = http.createServer(async (request, response) => {
     }
     if (staleDecision && url.pathname === '/fixture/continue' && request.method === 'POST') {
       directSession.pendingMessages = []; directSession.decisionCurrent = true
-      directSession.messageResolution = { relation: 'continue', at: Date.now(), reason: '沿用主控直接执行，开始修改配色并执行验证。' }
+      directSession.messageResolution = { relation: 'continue', at: Date.now(), reason: denseDecision ? denseReason : '沿用主控直接执行，开始修改配色并执行验证。' }
       directSession.execution.toolCalls++
       for (const client of streams.get(directSession.sessionId) ?? []) client.write('data: {}\n\n')
       response.end('{}'); return

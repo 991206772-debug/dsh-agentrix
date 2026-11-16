@@ -1119,7 +1119,8 @@ test('coordinator overview groups observed activity, model and tool calls separa
   const dock = f.mountDock(row.sessionId)
   try {
     await dock.flush()
-    assert.deepEqual(dock.nodes('h3').map(node => node.children.join('')), ['当前执行', '执行判断', '本次需求'])
+    assert.deepEqual(dock.nodes('h3').map(node => node.children.join('')), ['当前执行'])
+    assert.ok(dock.nodes('details').some(node => /查看需求原文/.test(flatten(node.children.find(child => child?.type === 'summary')))))
     const metrics = dock.nodes('dd'), metric = name => metrics.find(node => node.props['data-metric'] === name)
     assert.match(JSON.stringify(metric('activity')), /检索内容.*grep/)
     assert.match(JSON.stringify(metric('model')), /current\/coordinator/)
@@ -1250,8 +1251,8 @@ test('progress stays available across polling and new work without a hide action
     await dock.flush()
     assert.ok(dock.text().includes(request), 'the expanded details must retain the entire request')
     assert.ok(dock.text().includes(reason), 'the decision reason must remain complete')
-    const paragraphs = dock.nodes('p'), reasonIndex = paragraphs.findIndex(node => JSON.stringify(node.children).includes(reason))
-    assert.ok(reasonIndex >= 0 && reasonIndex < paragraphs.findIndex(node => node.props.className === 'ddf-source'), 'current work and reasoning should precede the full request')
+    const content = flatten(dock.nodes('section').find(node => node.props.className?.includes('ddf-coordinator')))
+    assert.ok(content.indexOf(reason) >= 0 && content.indexOf(reason) < content.indexOf(request), 'current work and reasoning should precede the full request')
     assert.doesNotMatch(dock.text(), /隐藏提示/)
     const sizes = new Map()
     dock.nodes('div').find(node => node.props.className === 'ddf-chat-dock').props.ref.current = {
@@ -1370,6 +1371,62 @@ test('the acceptance page keeps stale reasons in history and shows the latest co
     assert.doesNotMatch(JSON.stringify(conclusion()), /只读评审，不写代码/)
     assert.match(view.text(), /最新指令.*选择 B，开始实施/)
   } finally { dock.close(); view.close(); f.close() }
+})
+
+test('decision details keep pending message originals and long explanations out of the default reading flow', async () => {
+  const reason = '按方案 B 调整主题交互，完成后运行验证。' + '多个文件共用同一套交互参数，需要保持一致。'.repeat(12)
+  const row = { sessionId: 'session-current', source: { messageId: 'original', text: '评审工作台交互。' },
+    decision: { mode: 'direct', reason: '上次只读评审，不改代码。', at: 100 }, decisionCurrent: false,
+    messageResolution: { relation: 'continue', reason, at: 200 },
+    pendingMessages: [{ messageId: 'one', text: '第一条原始补充，不应直接铺开。' },
+      { messageId: 'two', text: '第二条保留换行。\n后续原文也必须保留。' }, { messageId: 'three', text: '第三条原始补充。' }],
+    execution: { running: true, toolCalls: 57, activity: { kind: 'tool', tool: 'edit', target: 'theme.js' } } }
+  const original = JSON.stringify(row)
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone({
+    ok: true, sessionId: row.sessionId, plans: [], sessions: [row] }) }) })
+  const dock = f.mountDock(row.sessionId)
+  const visible = node => !node ? '' : typeof node !== 'object' ? String(node)
+    : typeof node.type === 'function' ? visible(node.type(node.props)) : node.type === 'style' ? ''
+    : (node.type === 'details' && !node.props.open ? node.children.filter(child => child?.type === 'summary') : node.children).flat(Infinity).map(visible).join(' ')
+  try {
+    await dock.flush()
+    const section = () => dock.nodes('div').find(node => node.props['data-section'] === 'decision')
+    const text = visible(section())
+    assert.match(text, /待关联消息.*3.*条/)
+    assert.match(text, /按方案 B 调整主题交互/)
+    assert.ok(text.length < 240, 'a short default reading flow must not grow with all pending messages and the full explanation')
+    assert.doesNotMatch(text, /第一条原始补充|后续原文|第三条原始补充|上次只读评审/)
+    const messages = dock.nodes('details').find(node => /待关联消息.*3.*条/.test(visible(node)))
+    assert.ok(messages && !messages.props.open)
+    for (const message of row.pendingMessages) assert.ok(flatten(messages).includes(message.text), 'every original message is retained separately')
+    const explanation = dock.nodes('details').find(node => /完整依据|展开全文/.test(visible(node)))
+    assert.ok(explanation && !explanation.props.open)
+    assert.ok(flatten(explanation).includes(reason))
+    await dock.tick()
+    assert.equal(JSON.stringify(row), original, 'displaying a short excerpt must not rewrite the original data')
+  } finally { dock.close(); f.close() }
+})
+
+test('progress keeps full request context in a closed disclosure below the current execution', async () => {
+  const request = '原始需求包含多段背景。\n' + '保留这些背景以便回看。'.repeat(60)
+  const latest = '开始实施方案 B。\n补充要求需要逐项核验。'
+  const row = { sessionId: 'session-current', source: { messageId: 'original', text: request },
+    latestMessage: { messageId: 'latest', text: latest },
+    decision: { mode: 'direct', reason: '按已确认方案修改并验证。' }, decisionCurrent: true,
+    execution: { running: true, toolCalls: 2, activity: { kind: 'tool', tool: 'edit', target: 'theme.js' } } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => ({
+    ok: true, sessionId: row.sessionId, plans: [], sessions: [row] }) }) })
+  const dock = f.mountDock(row.sessionId)
+  try {
+    await dock.flush()
+    const context = dock.nodes('details').find(node => /查看需求与最新指令/.test(flatten(node.children.find(child => child?.type === 'summary'))))
+    assert.ok(context && !context.props.open, 'long context is available on request instead of occupying the default panel')
+    assert.ok(flatten(context).includes(request))
+    assert.ok(flatten(context).includes(latest))
+    const sections = dock.nodes('div').filter(node => node.props['data-section'])
+    assert.deepEqual(sections.map(node => node.props['data-section']), ['current', 'decision'])
+    assert.match(dock.text(), /当前动作.*修改文件.*theme.js/)
+  } finally { dock.close(); f.close() }
 })
 
 test('direct work is visible in the input dock with actual activity, advisory mismatch and unresolved edits', async () => {

@@ -743,7 +743,8 @@ window.__ModuleLoader__.load({
       'decision.revised': '需求已补充，等待主控更新判断', 'decision.notStarted': '已决定委派，尚未启动子代理', 'decision.at': '判断时间',
       'decision.previous': '上次执行判断', 'decision.previousComplete': '上次委派已完成。', 'decision.previousEnded': '上次委派已结束。',
       'decision.newMessage': '收到新消息，待主控确认当前判断', 'decision.continued': '沿用执行方式', 'decision.explanation': '本次说明',
-      'request.latest': '最新指令', 'request.original': '原始需求',
+      'decision.fullReason': '完整依据', 'decision.foldReason': '收起全文', 'relation.messages': '待关联消息', 'relation.messageCount': '{count} 条',
+      'request.latest': '最新指令', 'request.original': '原始需求', 'request.context': '查看需求与最新指令', 'request.source': '查看需求原文',
       'decision.currentDirect': '当前由主控直接处理；当前阶段的执行判断尚未更新。',
       'decision.plan': '建计划时的判断', 'decision.concurrent': '主控直接处理当前工作，原委派任务继续保留，仍须监督和验收。',
       'view.modelNoPlanHint': '主控按上下文判断是否委派；程序展示已记录的决定和实际活动。没有托管计划时，不会显示子代理进度或验收回执。', 'relation.title': '消息与需求的关联', 'relation.pending': '待主控确认消息关联', 'relation.new': '新需求', 'relation.continue': '继续原需求',
@@ -781,7 +782,8 @@ window.__ModuleLoader__.load({
       'decision.revised': 'Request updated; waiting for a revised decision', 'decision.notStarted': 'Delegation chosen; no child agent has started', 'decision.at': 'Decision time',
       'decision.previous': 'Previous execution decision', 'decision.previousComplete': 'The previous delegation is complete.', 'decision.previousEnded': 'The previous delegation has ended.',
       'decision.newMessage': 'New message received; waiting for the coordinator to confirm the current decision', 'decision.continued': 'Continuing execution mode', 'decision.explanation': 'Latest explanation',
-      'request.latest': 'Latest instruction', 'request.original': 'Original request',
+      'decision.fullReason': 'Full explanation', 'decision.foldReason': 'Collapse explanation', 'relation.messages': 'Unclassified messages', 'relation.messageCount': '{count} messages',
+      'request.latest': 'Latest instruction', 'request.original': 'Original request', 'request.context': 'Request and latest instruction', 'request.source': 'Original request text',
       'decision.currentDirect': 'The coordinator is now handling work directly; the execution decision for this stage has not been updated.',
       'decision.plan': 'Decision when planning', 'decision.concurrent': 'The coordinator handles the current work directly. Existing delegated tasks remain in place and still require supervision and acceptance.',
       'view.modelNoPlanHint': 'The coordinator decides from context; the plugin shows its recorded choice and observed activity. Without a managed plan there is no child progress or acceptance receipt.', 'relation.title': 'Message relationship', 'relation.pending': 'Waiting for coordinator to classify the message', 'relation.new': 'New request', 'relation.continue': 'Continue the current request',
@@ -1249,7 +1251,30 @@ window.__ModuleLoader__.load({
         primary, tasks: stopped ? affected : primary ? [primary] : [], affected: affected.length }
     }
 
-    const CHAT_NOTICE_STYLES = `
+    const DECISION_STYLES = `
+.ddf-decision { min-width:0; font-size:13px; line-height:1.65; overflow-wrap:anywhere; }
+.ddf-decision>p { margin:0 0 8px; }
+.ddf-decision-choice { font-weight:600; }
+.ddf-decision-pending { color:var(--dsw-alias-state-warning-primary,#b7791f); }
+.ddf-decision-fold { margin-top:6px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
+.ddf-decision-fold>summary { cursor:pointer; padding:3px 0; }
+.ddf-decision-fold>summary:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7); outline-offset:3px; }
+.ddf-decision-fold[open]>summary { margin-bottom:8px; }
+.ddf-decision-fold p { margin:6px 0; white-space:pre-wrap; }
+.ddf-pending-messages ol { margin:8px 0 0; padding-left:22px; }
+.ddf-pending-messages li { padding:0 0 8px 4px; }
+.ddf-pending-messages li+li { border-top:1px solid var(--dsw-alias-border-l1,#e5e6eb); padding-top:8px; }
+.ddf-decision-reason { margin:6px 0 0; color:inherit; font-size:13px; }
+.ddf-decision-reason>summary { display:grid; grid-template-columns:56px minmax(0,1fr); column-gap:8px; list-style:none; }
+.ddf-decision-reason>summary::-webkit-details-marker { display:none; }
+.ddf-reason-label { color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
+.ddf-reason-preview { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.ddf-reason-toggle { grid-column:2; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
+.ddf-reason-expanded,.ddf-decision-reason[open] .ddf-reason-collapsed,.ddf-decision-reason[open] .ddf-reason-preview { display:none; }
+.ddf-decision-reason[open] .ddf-reason-expanded { display:inline; }
+`
+
+    const CHAT_NOTICE_STYLES = DECISION_STYLES + `
 .ddf-chat-notice { --ddf-status-running:var(--dsw-alias-state-business-primary,color-mix(in srgb,#2563eb 65%,var(--dsw-alias-label-primary,#1f2329))); --ddf-status-warning:var(--dsw-alias-state-warning-primary,var(--dsw-alias-state-warn-primary,color-mix(in srgb,#9a5900 65%,var(--dsw-alias-label-primary,#1f2329)))); --ddf-status-error:var(--dsw-alias-state-error-primary,var(--dsw-alias-state-danger-primary,color-mix(in srgb,#c43d48 65%,var(--dsw-alias-label-primary,#1f2329)))); --ddf-status-success:var(--dsw-alias-state-success-primary,color-mix(in srgb,#14804a 65%,var(--dsw-alias-label-primary,#1f2329))); }
 .ddf-chat-notice { display:block; position:static; box-sizing:border-box; min-width:0; max-width:100%; margin:12px 0; padding:10px 12px; border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-left:3px solid var(--dsw-alias-state-error-primary,#f54a45); border-radius:7px; background:var(--dsw-alias-bg-layer-1,#fff); color:var(--dsw-alias-label-primary,#1f2329); font:13px/1.6 system-ui,"Microsoft YaHei",sans-serif; overflow-wrap:anywhere; }
 .ddf-chat-notice[data-kind="stopped"] { border-left-color:var(--dsw-alias-border-l2,#c9cdd4); }
@@ -1313,7 +1338,8 @@ window.__ModuleLoader__.load({
 .ddf-dock-toggle { flex:none; width:4px; height:4px; margin:-3px 1px 0 2px; border-right:1px solid currentColor; border-bottom:1px solid currentColor; transform:rotate(45deg); color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-dock-disclosure[open] .ddf-dock-toggle { margin-top:2px; transform:rotate(225deg); }
 .ddf-dock-details { box-sizing:border-box; position:absolute; z-index:1; bottom:calc(100% + 6px); left:50%; transform:translateX(-50%); width:100%; max-height:min(65vh,560px,var(--ddf-dock-available-height,560px)); overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:var(--dsw-alias-label-secondary,#8f959e) var(--dsw-alias-bg-layer-1,#fff); border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:12px; background:var(--dsw-alias-bg-layer-1,#fff); box-shadow:0 8px 28px color-mix(in srgb,var(--dsw-alias-label-primary,#1f2329) 12%,transparent); }
-.ddf-dock-panel-head { position:sticky; top:0; z-index:1; padding:14px 20px; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); background:var(--dsw-alias-bg-layer-1,#fff); font-size:16px; }
+.ddf-dock-panel-head { position:sticky; top:0; z-index:1; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:4px 12px; padding:12px 20px; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); background:var(--dsw-alias-bg-layer-1,#fff); font-size:15px; }
+.ddf-dock-panel-head [data-progress-sync] { color:var(--dsw-alias-label-secondary,#646a73); font-size:11px; font-weight:400; }
 .ddf-dock-disclosure>summary:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7); outline-offset:2px; }
 .ddf-chat-dock .ddf-chat-notice { margin:0; }
 .ddf-dock-details .ddf-chat-notice { padding:12px 18px 16px; border:0; border-radius:0; font-size:14px; }
@@ -1330,39 +1356,44 @@ window.__ModuleLoader__.load({
 .ddf-chat-notice-action:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7); outline-offset:2px; }
 .ddf-chat-notice-action:disabled { color:var(--dsw-alias-label-secondary,#646a73); cursor:default; }
 .ddf-dock-details .ddf-coordinator { padding:0 20px; }
-.ddf-execution-row { --ddf-section-tone:var(--ddf-dock-tone); display:grid; grid-template-columns:108px minmax(0,1fr); gap:20px; padding:18px 0; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-execution-row { --ddf-section-tone:var(--ddf-dock-tone); display:grid; grid-template-columns:minmax(0,1fr); gap:8px; padding:12px 0; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-execution-row:last-child { border-bottom:0; }
-.ddf-execution-row[data-section="decision"] { --ddf-section-tone:var(--dsw-alias-state-success-primary,#369b83); }
-.ddf-execution-row[data-section="request"] { --ddf-section-tone:var(--dsw-alias-label-secondary,#8f959e); }
 .ddf-execution-row[data-section="issues"] { --ddf-section-tone:var(--dsw-alias-state-warning-primary,#b7791f); }
 .ddf-execution-label h3 { display:flex; align-items:center; gap:9px; margin:0; font-size:14px; font-weight:600; line-height:1.6; }
 .ddf-execution-label h3::before { content:""; flex:none; width:6px; height:6px; border-radius:50%; background:var(--ddf-section-tone); box-shadow:0 0 0 4px color-mix(in srgb,var(--ddf-section-tone) 14%,transparent); }
-.ddf-coordinator .ddf-execution-status { margin:7px 0 0 15px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
+.ddf-execution-label { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; }
+.ddf-coordinator .ddf-execution-status { margin:0; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
 .ddf-execution-content { min-width:0; }
 .ddf-execution-metrics { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1.15fr) minmax(0,.7fr); margin:0; }
 .ddf-execution-metrics>div { min-width:0; padding:0 16px; border-left:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
 .ddf-execution-metrics>div:first-child { padding-left:0; border-left:0; }
 .ddf-execution-metrics>div:last-child { padding-right:0; }
 .ddf-execution-metrics dt { color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
-.ddf-execution-metrics dd { margin:9px 0 0; font-size:16px; font-weight:600; line-height:1.5; overflow-wrap:anywhere; }
-.ddf-execution-metrics .ddf-execution-number { color:var(--ddf-dock-tone); font-size:30px; font-variant-numeric:tabular-nums; line-height:1.2; }
+.ddf-execution-metrics dd { margin:3px 0 0; font-size:15px; font-weight:600; line-height:1.5; overflow-wrap:anywhere; }
+.ddf-execution-metrics .ddf-execution-number { color:var(--ddf-dock-tone); font-size:24px; font-variant-numeric:tabular-nums; line-height:1.2; }
 .ddf-execution-number small { margin-left:4px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; font-weight:400; }
-.ddf-execution-target { display:block; margin-top:5px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; font-weight:400; }
+.ddf-execution-target { margin-left:8px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; font-weight:400; }
 .ddf-coordinator .ddf-execution-recent { margin:12px 0 0; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
 .ddf-coordinator .ddf-decision { margin:0; padding:0; border:0; }
 .ddf-coordinator .ddf-decision p { margin:0 0 8px; }
 .ddf-coordinator .ddf-decision p:last-child { margin-bottom:0; }
+.ddf-coordinator .ddf-decision>.ddf-association { display:inline-block; margin-right:18px; vertical-align:top; }
+.ddf-coordinator .ddf-decision>.ddf-decision-fold { display:inline-block; margin-right:18px; vertical-align:top; }
+.ddf-coordinator .ddf-decision>.ddf-association:has(details[open]),.ddf-coordinator .ddf-decision>.ddf-decision-fold[open] { display:block; }
 .ddf-coordinator .ddf-decision-choice { color:var(--dsw-alias-state-success-primary,#369b83); }
 .ddf-coordinator .ddf-chat-live-meta { font-size:12px; }
-.ddf-coordinator .ddf-source { margin:0; }
+.ddf-coordinator .ddf-request-context { padding:0; }
+.ddf-request-context dl { margin:0; }
+.ddf-request-context dt { margin-top:10px; font-weight:500; }
+.ddf-request-context dd { margin:4px 0 12px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; }
 @container ddf-progress (max-width:560px) {
- .ddf-execution-row { grid-template-columns:minmax(0,1fr); gap:12px; padding:16px 0; }
+ .ddf-execution-row { gap:8px; }
  .ddf-execution-label { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; }
  .ddf-coordinator .ddf-execution-status { margin:0; }
  .ddf-execution-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
  .ddf-execution-metrics>div { padding:0 10px; }
  .ddf-execution-metrics dd { font-size:14px; }
- .ddf-execution-metrics .ddf-execution-number { font-size:26px; }
+ .ddf-execution-metrics .ddf-execution-number { font-size:22px; }
 }
 `
 
@@ -2057,13 +2088,27 @@ window.__ModuleLoader__.load({
                 : h('small', null, item.prefix), h('strong', null, item.value), item.unit ? h('small', null, item.unit) : null]))),
             h('span', { className: 'ddf-dock-toggle', 'aria-hidden': 'true' })),
           h('div', { className: 'ddf-dock-details', role: 'region', 'aria-label': t('dock.details') },
-            h('div', { className: 'ddf-dock-panel-head' }, h('strong', null, t('dock.details'))), h(ProgressFreshness, { t, result }), content)))
+            h('div', { className: 'ddf-dock-panel-head' }, h('strong', null, t('dock.details')), h(ProgressFreshness, { t, result })), content)))
     }
 
     function AssociationDetails({ t, resolution, pending = [] }) {
       return h('div', { className: 'ddf-association' },
-        pending.length ? h('p', null, t('relation.pending') + '：' + pending.map(message => message.text).join('；'))
+        pending.length ? h('details', { className: 'ddf-decision-fold ddf-pending-messages' },
+          h('summary', null, t('relation.messages') + ' · ' + fill(t('relation.messageCount'), { count: pending.length })),
+          h('p', { className: 'ddf-chat-live-meta' }, t('relation.pending')),
+          h('ol', null, ...pending.map(message => h('li', { key: message.messageId }, h('p', null, message.text)))))
           : resolution ? h('p', { className: 'ddf-chat-live-meta' }, t('relation.title') + '：' + t('relation.' + resolution.relation)) : null)
+    }
+
+    function DecisionReason({ t, reason, label = 'decision.reason' }) {
+      const text = String(reason ?? ''), compact = text.replace(/\s+/g, ' ').trim()
+      if (compact.length <= 88 && !/[\r\n]/.test(text)) return h('p', null, t(label) + '：' + text)
+      return h('details', { className: 'ddf-decision-fold ddf-decision-reason' },
+        h('summary', null, h('span', { className: 'ddf-reason-label' }, t(label)),
+          h('span', { className: 'ddf-reason-preview' }, compact.slice(0, 88) + (compact.length > 88 ? '…' : '')),
+          h('span', { className: 'ddf-reason-toggle' }, h('span', { className: 'ddf-reason-collapsed' }, t('decision.fullReason')),
+            h('span', { className: 'ddf-reason-expanded' }, t('decision.foldReason')))),
+        h('p', null, text))
     }
 
     function ProgressFreshness({ t, result }) {
@@ -2072,22 +2117,26 @@ window.__ModuleLoader__.load({
         result.updatedAt ? ' · ' + fill(t('sync.updated'), { time: new Date(result.updatedAt).toLocaleTimeString() }) : '')
     }
 
-    function DecisionDetails({ t, decision, current = true, preparing = false, historical = false, label, resolution, pending = [] }) {
-      if (!decision) return h('div', { className: 'ddf-decision' }, h(AssociationDetails, { t, resolution, pending }), h('p', { className: 'ddf-chat-live-meta' }, t(preparing ? 'decision.pending' : 'decision.unrecorded')))
+    function DecisionDetails({ t, decision, current = true, preparing = false, historical = false, label, resolution, pending = [], children }) {
+      if (!decision) return h('div', { className: 'ddf-decision' }, h('p', { className: 'ddf-chat-live-meta' }, t(preparing ? 'decision.pending' : 'decision.unrecorded')), h(AssociationDetails, { t, resolution, pending }), children)
       const continued = ['continue', 'question'].includes(resolution?.relation) && resolution.reason && resolution.at > (decision.at ?? 0)
       const previous = !current || historical || continued
       const record = h('div', null,
-        h('p', { className: previous ? 'ddf-chat-live-meta' : 'ddf-decision-choice' }, t(label || (previous ? 'decision.previous' : 'decision.title')) + '：' + t('decision.' + decision.mode)),
+        h('p', { className: 'ddf-chat-live-meta' }, t(label || 'decision.previous') + '：' + t('decision.' + decision.mode)),
         h('p', null, t('decision.reason') + '：' + decision.reason),
         h('p', { className: 'ddf-chat-live-meta' }, decision.model?.model || '—',
           decision.at ? ' · ' + t('decision.at') + '：' + new Date(decision.at).toLocaleTimeString() : ''))
       return h('div', { className: 'ddf-decision' },
-        h(AssociationDetails, { t, resolution, pending }),
-        !current ? h('p', null, t(pending.length ? 'decision.newMessage' : 'decision.revised')) : null,
+        !current ? h('p', { className: 'ddf-decision-pending' }, t(pending.length ? 'decision.newMessage' : 'decision.revised')) : null,
         continued ? h('div', null,
           current && !historical ? h('p', { className: 'ddf-decision-choice' }, t('decision.continued') + '：' + t('decision.' + decision.mode)) : null,
-          h('p', null, t('decision.explanation') + '：' + resolution.reason)) : null,
-        previous ? h('details', { 'data-decision-history': 'previous' }, h('summary', null, t(label || 'decision.previous')), record) : record)
+          h(DecisionReason, { t, reason: resolution.reason, label: 'decision.explanation' })) : null,
+        previous ? null : h('div', null,
+          h('p', { className: 'ddf-decision-choice' }, t(label || 'decision.title') + '：' + t('decision.' + decision.mode)),
+          h(DecisionReason, { t, reason: decision.reason })),
+        h(AssociationDetails, { t, resolution: pending.length ? null : resolution, pending }),
+        previous ? h('details', { className: 'ddf-decision-fold', 'data-decision-history': 'previous' }, h('summary', null, t(label || 'decision.previous')), record) : null,
+        children)
     }
 
     function CoordinatorProgress({ t, state, previousPlan, error }) {
@@ -2100,6 +2149,12 @@ window.__ModuleLoader__.load({
       const direct = (state.turnStats?.direct ?? state.direct ?? 0) > 0
       const previousDecision = previousPlan && state.decision?.mode === 'delegate' && (!Number.isFinite(state.decision.at)
         || !Number.isFinite(previousPlan.completion?.at) || state.decision.at <= previousPlan.completion.at)
+      const context = state.source?.text || state.latestMessage?.text ? h('details', { className: 'ddf-decision-fold ddf-request-context' },
+        h('summary', null, t(state.latestMessage?.text && state.latestMessage.messageId !== state.source?.messageId ? 'request.context' : 'request.source')),
+        h('dl', null,
+          state.latestMessage?.text && state.latestMessage.messageId !== state.source?.messageId ? h('div', null,
+            h('dt', null, t('request.latest')), h('dd', null, state.latestMessage.text)) : null,
+          state.source?.text ? h('div', null, h('dt', null, t('request.original')), h('dd', null, state.source.text)) : null)) : null
       return h('section', { className: 'ddf-chat-notice ddf-chat-live ddf-coordinator', 'data-kind': failures.length ? execution.running ? 'supervision' : 'service' : 'progress', role: failures.length && !execution.running ? 'alert' : 'status' },
         h('style', null, CHAT_NOTICE_STYLES),
         error ? h('p', null, t('direct.stale')) : null,
@@ -2117,22 +2172,15 @@ window.__ModuleLoader__.load({
             execution.lastResult ? h('p', { className: 'ddf-execution-recent' }, t('live.recent') + '：' + liveToolLabel(t, execution.lastResult.tool),
               execution.lastResult.target ? ' · ' + execution.lastResult.target : '', execution.lastResult.failed ? ' · ' + t('live.toolFailed') : '') : null)),
         h('div', { className: 'ddf-execution-row', 'data-section': 'decision' },
-          h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.decision'))),
           h('div', { className: 'ddf-execution-content' },
-            h(DecisionDetails, { t, decision: state.decision, current: state.decisionCurrent !== false, preparing: execution.running, historical: previousDecision, resolution: state.messageResolution, pending: state.pendingMessages }),
+            h(DecisionDetails, { t, decision: state.decision, current: state.decisionCurrent !== false, preparing: execution.running, historical: previousDecision, resolution: state.messageResolution, pending: state.pendingMessages }, context),
             previousDecision ? h('p', { className: 'ddf-chat-live-meta' }, t(previousPlan.completion?.outcome === 'completed' ? 'decision.previousComplete' : 'decision.previousEnded'),
               direct ? t('decision.currentDirect') : '')
               : state.decision?.mode === 'delegate' && state.decisionCurrent !== false ? h('p', { className: 'ddf-chat-live-meta' }, t('decision.notStarted'))
               : state.route?.route && state.route.route !== 'direct' ? h('p', { className: 'ddf-chat-live-meta' }, t('direct.advice')) : null)),
         failures.length ? h('div', { className: 'ddf-execution-row', 'data-section': 'issues' },
           h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.issues'))),
-          h('div', { className: 'ddf-execution-content' }, ...failures.map(item => h('p', { key: item.callId }, (item.target || item.tool) + '：' + item.reason)))) : null,
-        state.latestMessage?.text && state.latestMessage.messageId !== state.source?.messageId ? h('div', { className: 'ddf-execution-row', 'data-section': 'latest-message' },
-          h('div', { className: 'ddf-execution-label' }, h('h3', null, t('request.latest'))),
-          h('div', { className: 'ddf-execution-content' }, h('p', { className: 'ddf-source' }, state.latestMessage.text))) : null,
-        state.source?.text ? h('div', { className: 'ddf-execution-row', 'data-section': 'request' },
-          h('div', { className: 'ddf-execution-label' }, h('h3', null, t(state.latestMessage?.messageId && state.latestMessage.messageId !== state.source.messageId ? 'request.original' : 'view.request'))),
-          h('div', { className: 'ddf-execution-content' }, h('p', { className: 'ddf-source' }, state.source.text))) : null)
+          h('div', { className: 'ddf-execution-content' }, ...failures.map(item => h('p', { key: item.callId }, (item.target || item.tool) + '：' + item.reason)))) : null)
     }
 
     function CoordinationIssueNotice({ t, plan }) {
@@ -3628,7 +3676,7 @@ window.__ModuleLoader__.load({
             h('p', { className: 'ddf-focus-record-note' }, t('view.boardReturned') + ' ' + returned + '/' + tasks.length,
               plan?.activationBudget ? ' · ' + t('view.boardAttempts') + ' ' + plan.activationBudget.used + '/' + plan.activationBudget.limit : '')))) : null
       return h('div', { className: 'ddf-board-root', 'data-ddf-acceptance': '', 'data-conversation-composer-overlay': '' },
-        h('style', null, DASHBOARD_STYLES + FOCUS_BOARD_STYLES + ARTIFACT_STYLES + ACCEPTANCE_STYLES),
+        h('style', null, DASHBOARD_STYLES + FOCUS_BOARD_STYLES + ARTIFACT_STYLES + ACCEPTANCE_STYLES + DECISION_STYLES),
         h('main', { className: 'ddf-board ddf-focus-board', 'data-status': status, 'data-acceptance-view': view, ref: feedRef, onScroll: onFeedScroll },
           h('header', { className: 'ddf-board-header' },
             h('div', { className: 'ddf-focus-heading' },
