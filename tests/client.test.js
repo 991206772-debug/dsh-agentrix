@@ -1119,8 +1119,8 @@ test('coordinator overview groups observed activity, model and tool calls separa
   const dock = f.mountDock(row.sessionId)
   try {
     await dock.flush()
-    assert.deepEqual(dock.nodes('h3').map(node => node.children.join('')), ['当前执行'])
-    assert.ok(dock.nodes('details').some(node => /查看需求原文/.test(flatten(node.children.find(child => child?.type === 'summary')))))
+    assert.deepEqual(dock.nodes('h3').map(node => node.children.join('')), ['当前执行', '执行判断'])
+    assert.ok(dock.nodes('section').some(node => node.props.role === 'tabpanel' && flatten(node).includes(row.source.text)))
     const metrics = dock.nodes('dd'), metric = name => metrics.find(node => node.props['data-metric'] === name)
     assert.match(JSON.stringify(metric('activity')), /检索内容.*grep/)
     assert.match(JSON.stringify(metric('model')), /current\/coordinator/)
@@ -1251,8 +1251,8 @@ test('progress stays available across polling and new work without a hide action
     await dock.flush()
     assert.ok(dock.text().includes(request), 'the expanded details must retain the entire request')
     assert.ok(dock.text().includes(reason), 'the decision reason must remain complete')
-    const content = flatten(dock.nodes('section').find(node => node.props.className?.includes('ddf-coordinator')))
-    assert.ok(content.indexOf(reason) >= 0 && content.indexOf(reason) < content.indexOf(request), 'current work and reasoning should precede the full request')
+    const overview = dock.nodes('section').find(node => node.props.role === 'tabpanel' && !node.props.hidden)
+    assert.ok(overview && !flatten(overview).includes(request), 'full requests belong in their own tab')
     assert.doesNotMatch(dock.text(), /隐藏提示/)
     const sizes = new Map()
     dock.nodes('div').find(node => node.props.className === 'ddf-chat-dock').props.ref.current = {
@@ -1313,7 +1313,7 @@ test('unclassified messages are visible without claiming a scope change or gener
   const dock = f.mountDock('session-current'), view = f.mountView('session-current')
   try {
     await dock.flush(); await view.flush()
-    assert.match(dock.text(), /待主控确认消息关联.*另外开一个新任务/)
+    assert.match(dock.text(), /待关联消息.*另外开一个新任务/)
     assert.doesNotMatch(dock.text(), /需求已补充/)
     assert.doesNotMatch(view.text(), /置信度|评分 0|预计.*步/)
     row.pendingMessages = []; row.messageResolution = { relation: 'question' }; row.decisionCurrent = true
@@ -1338,8 +1338,8 @@ test('new input makes a prior readonly decision historical while the actual edit
     assert.match(dock.text(), /新消息.*待.*确认/)
     assert.equal(dock.nodes('p').filter(node => node.props.className === 'ddf-decision-choice').length, 0,
       'an outdated decision must not keep the green current-choice styling')
-    const history = dock.nodes('details').find(node => node.props['data-decision-history'])
-    assert.ok(history && history.props.open !== true, 'the old reason remains in collapsed history')
+    const history = dock.nodes('section').find(node => node.props.role === 'tabpanel' && flatten(node).includes('只读评审，不写代码。'))
+    assert.ok(history?.props.hidden, 'the old reason remains in the separate judgment tab')
     assert.match(dock.text(), /最新指令.*选择 B，开始实施/)
     assert.match(dock.text(), /原始需求.*先评审，不改代码/)
   } finally { dock.close(); f.close() }
@@ -1366,14 +1366,52 @@ test('the acceptance page keeps stale reasons in history and shows the latest co
     row.pendingMessages = []; row.decisionCurrent = true
     row.messageResolution = { relation: 'continue', at: 200, reason: '开始修改配色并执行验证。' }
     await dock.tick(); await view.tick()
-    assert.match(dock.text(), /沿用执行方式.*直接执行.*本次说明.*开始修改配色/)
+    assert.match(dock.text(), /执行方式.*直接执行.*本次说明.*开始修改配色/)
     assert.match(JSON.stringify(conclusion()), /开始修改配色并执行验证/)
     assert.doesNotMatch(JSON.stringify(conclusion()), /只读评审，不写代码/)
     assert.match(view.text(), /最新指令.*选择 B，开始实施/)
   } finally { dock.close(); view.close(); f.close() }
 })
 
-test('decision details keep pending message originals and long explanations out of the default reading flow', async () => {
+test('progress tabs separate the overview, message list and decision records and retain the selected tab on refresh', async () => {
+  const row = { sessionId: 'session-current', source: { messageId: 'original', text: '先评审工作台。' },
+    latestMessage: { messageId: 'latest', text: '按方案 B 实施。' },
+    pendingMessages: [{ messageId: 'one', text: '第一条补充。\n保留第二行。' }, { messageId: 'latest', text: '按方案 B 实施。' }],
+    decision: { mode: 'direct', reason: '原判断为只读评审。', at: 100 }, decisionCurrent: false,
+    messageResolution: { relation: 'continue', at: 200, reason: '现在开始修改并验证。' },
+    execution: { running: true, toolCalls: 8, model: { model: 'fixture/main' }, activity: { kind: 'tool', tool: 'edit', target: 'theme.js' } } }
+  let reads = 0
+  const f = await sidebarFixture(undefined, { fetchState: async url => { reads++; const selected = url.includes('session-other') ? 'session-other' : row.sessionId
+    return { ok: true, json: async () => structuredClone({ ok: true, sessionId: selected, plans: [], sessions: [{ ...row, sessionId: selected }] }) } } })
+  const dock = f.mountDock(row.sessionId)
+  const panel = () => dock.nodes('section').find(node => node.props.role === 'tabpanel' && !node.props.hidden)
+  const tab = name => dock.nodes('button').find(node => node.props.role === 'tab' && flatten(node).startsWith(name))
+  try {
+    await dock.flush()
+    assert.equal(dock.nodes('button').filter(node => node.props.role === 'tab').length, 3)
+    assert.equal(tab('概览')?.props['aria-selected'], true)
+    assert.match(flatten(panel()), /修改文件.*theme.js.*fixture\/main/)
+    assert.doesNotMatch(flatten(panel()), /第一条补充|原判断为只读评审/)
+    const initialReads = reads
+    tab('消息记录').props.onClick(); await dock.flush()
+    assert.equal(reads, initialReads, 'switching tabs reuses the same authoritative snapshot')
+    assert.match(flatten(panel()), /第一条补充.*保留第二行/s)
+    const items = dock.nodes('li').filter(node => node.props['data-message-id'] === 'latest')
+    assert.equal(items.length, 1, 'the latest message must not be repeated when it is also pending')
+    row.pendingMessages.push({ messageId: 'new', text: '新增补充。' }); row.execution.toolCalls++
+    await dock.tick()
+    assert.equal(tab('消息记录').props['aria-selected'], true)
+    assert.match(flatten(panel()), /新增补充/)
+    assert.match(flatten(tab('消息记录')), /3/)
+    tab('判断记录').props.onClick(); await dock.flush()
+    assert.match(flatten(panel()), /现在开始修改并验证.*原判断为只读评审/s)
+    assert.equal(dock.nodes('details').filter(node => node.props['data-decision-history']).length, 0, 'decision records are rows in their own tab')
+    dock.update({ sessionId: 'session-other' }); await dock.flush()
+    assert.equal(tab('概览')?.props['aria-selected'], true, 'switching conversations starts from the overview')
+  } finally { dock.close(); f.close() }
+})
+
+test('pending message originals and long explanations remain complete in separate tabs', async () => {
   const reason = '按方案 B 调整主题交互，完成后运行验证。' + '多个文件共用同一套交互参数，需要保持一致。'.repeat(12)
   const row = { sessionId: 'session-current', source: { messageId: 'original', text: '评审工作台交互。' },
     decision: { mode: 'direct', reason: '上次只读评审，不改代码。', at: 100 }, decisionCurrent: false,
@@ -1385,29 +1423,24 @@ test('decision details keep pending message originals and long explanations out 
   const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone({
     ok: true, sessionId: row.sessionId, plans: [], sessions: [row] }) }) })
   const dock = f.mountDock(row.sessionId)
-  const visible = node => !node ? '' : typeof node !== 'object' ? String(node)
-    : typeof node.type === 'function' ? visible(node.type(node.props)) : node.type === 'style' ? ''
-    : (node.type === 'details' && !node.props.open ? node.children.filter(child => child?.type === 'summary') : node.children).flat(Infinity).map(visible).join(' ')
   try {
     await dock.flush()
-    const section = () => dock.nodes('div').find(node => node.props['data-section'] === 'decision')
-    const text = visible(section())
-    assert.match(text, /待关联消息.*3.*条/)
-    assert.match(text, /按方案 B 调整主题交互/)
+    const text = flatten(dock.nodes('section').find(node => node.props.role === 'tabpanel' && !node.props.hidden))
+    assert.match(text, /待关联消息.*3/)
     assert.ok(text.length < 240, 'a short default reading flow must not grow with all pending messages and the full explanation')
     assert.doesNotMatch(text, /第一条原始补充|后续原文|第三条原始补充|上次只读评审/)
-    const messages = dock.nodes('details').find(node => /待关联消息.*3.*条/.test(visible(node)))
-    assert.ok(messages && !messages.props.open)
+    const messages = dock.nodes('section').find(node => node.props.className?.endsWith('panel-messages'))
+    assert.ok(messages?.props.hidden)
     for (const message of row.pendingMessages) assert.ok(flatten(messages).includes(message.text), 'every original message is retained separately')
-    const explanation = dock.nodes('details').find(node => /完整依据|展开全文/.test(visible(node)))
-    assert.ok(explanation && !explanation.props.open)
+    const explanation = dock.nodes('section').find(node => node.props.className?.endsWith('panel-decisions'))
+    assert.ok(explanation?.props.hidden)
     assert.ok(flatten(explanation).includes(reason))
     await dock.tick()
     assert.equal(JSON.stringify(row), original, 'displaying a short excerpt must not rewrite the original data')
   } finally { dock.close(); f.close() }
 })
 
-test('progress keeps full request context in a closed disclosure below the current execution', async () => {
+test('progress keeps long request context in the message list instead of the overview', async () => {
   const request = '原始需求包含多段背景。\n' + '保留这些背景以便回看。'.repeat(60)
   const latest = '开始实施方案 B。\n补充要求需要逐项核验。'
   const row = { sessionId: 'session-current', source: { messageId: 'original', text: request },
@@ -1419,12 +1452,12 @@ test('progress keeps full request context in a closed disclosure below the curre
   const dock = f.mountDock(row.sessionId)
   try {
     await dock.flush()
-    const context = dock.nodes('details').find(node => /查看需求与最新指令/.test(flatten(node.children.find(child => child?.type === 'summary'))))
-    assert.ok(context && !context.props.open, 'long context is available on request instead of occupying the default panel')
+    const context = dock.nodes('section').find(node => node.props.className?.endsWith('panel-messages'))
+    assert.ok(context?.props.hidden, 'long context is available in its own tab')
     assert.ok(flatten(context).includes(request))
     assert.ok(flatten(context).includes(latest))
-    const sections = dock.nodes('div').filter(node => node.props['data-section'])
-    assert.deepEqual(sections.map(node => node.props['data-section']), ['current', 'decision'])
+    const overview = dock.nodes('section').find(node => node.props.role === 'tabpanel' && !node.props.hidden)
+    assert.ok(!flatten(overview).includes(request))
     assert.match(dock.text(), /当前动作.*修改文件.*theme.js/)
   } finally { dock.close(); f.close() }
 })

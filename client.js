@@ -744,7 +744,10 @@ window.__ModuleLoader__.load({
       'decision.previous': '上次执行判断', 'decision.previousComplete': '上次委派已完成。', 'decision.previousEnded': '上次委派已结束。',
       'decision.newMessage': '收到新消息，待主控确认当前判断', 'decision.continued': '沿用执行方式', 'decision.explanation': '本次说明',
       'decision.fullReason': '完整依据', 'decision.foldReason': '收起全文', 'relation.messages': '待关联消息', 'relation.messageCount': '{count} 条',
-      'request.latest': '最新指令', 'request.original': '原始需求', 'request.context': '查看需求与最新指令', 'request.source': '查看需求原文',
+      'progress.overview': '概览', 'progress.messages': '消息记录', 'progress.decisions': '判断记录',
+      'progress.mode': '执行方式', 'progress.recordedAt': '记录时间', 'progress.unconfirmed': '待确认',
+      'progress.noMessages': '暂无已保留的消息记录', 'progress.supplement': '补充消息', 'progress.resolved': '已关联',
+      'request.latest': '最新指令', 'request.original': '原始需求',
       'decision.currentDirect': '当前由主控直接处理；当前阶段的执行判断尚未更新。',
       'decision.plan': '建计划时的判断', 'decision.concurrent': '主控直接处理当前工作，原委派任务继续保留，仍须监督和验收。',
       'view.modelNoPlanHint': '主控按上下文判断是否委派；程序展示已记录的决定和实际活动。没有托管计划时，不会显示子代理进度或验收回执。', 'relation.title': '消息与需求的关联', 'relation.pending': '待主控确认消息关联', 'relation.new': '新需求', 'relation.continue': '继续原需求',
@@ -783,7 +786,10 @@ window.__ModuleLoader__.load({
       'decision.previous': 'Previous execution decision', 'decision.previousComplete': 'The previous delegation is complete.', 'decision.previousEnded': 'The previous delegation has ended.',
       'decision.newMessage': 'New message received; waiting for the coordinator to confirm the current decision', 'decision.continued': 'Continuing execution mode', 'decision.explanation': 'Latest explanation',
       'decision.fullReason': 'Full explanation', 'decision.foldReason': 'Collapse explanation', 'relation.messages': 'Unclassified messages', 'relation.messageCount': '{count} messages',
-      'request.latest': 'Latest instruction', 'request.original': 'Original request', 'request.context': 'Request and latest instruction', 'request.source': 'Original request text',
+      'progress.overview': 'Overview', 'progress.messages': 'Messages', 'progress.decisions': 'Decisions',
+      'progress.mode': 'Execution mode', 'progress.recordedAt': 'Recorded at', 'progress.unconfirmed': 'Unconfirmed',
+      'progress.noMessages': 'No retained messages', 'progress.supplement': 'Additional message', 'progress.resolved': 'Classified',
+      'request.latest': 'Latest instruction', 'request.original': 'Original request',
       'decision.currentDirect': 'The coordinator is now handling work directly; the execution decision for this stage has not been updated.',
       'decision.plan': 'Decision when planning', 'decision.concurrent': 'The coordinator handles the current work directly. Existing delegated tasks remain in place and still require supervision and acceptance.',
       'view.modelNoPlanHint': 'The coordinator decides from context; the plugin shows its recorded choice and observed activity. Without a managed plan there is no child progress or acceptance receipt.', 'relation.title': 'Message relationship', 'relation.pending': 'Waiting for coordinator to classify the message', 'relation.new': 'New request', 'relation.continue': 'Continue the current request',
@@ -1311,7 +1317,7 @@ window.__ModuleLoader__.load({
 .ddf-chat-task-issue[data-kind="stopped"],.ddf-chat-task-issue[data-kind="supervision"] { border-left-color:var(--dsw-alias-border-l2,#c9cdd4); }
 .ddf-chat-task-decision { margin-top:10px; color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-chat-task-decision>summary { padding:5px 0; cursor:pointer; }
-.ddf-chat-dock { --ddf-dock-tone:var(--dsw-alias-state-business-primary,#4f6ef7); position:relative; isolation:isolate; container:ddf-progress / inline-size; width:100%; min-width:0; max-width:min(760px,calc(100% - 24px)); margin:0 auto 6px; padding:4px 0; color:var(--dsw-alias-label-primary,#1f2329); font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif; }
+.ddf-chat-dock { --ddf-dock-tone:var(--dsw-alias-state-business-primary,#4f6ef7); position:relative; isolation:isolate; container:ddf-progress / inline-size; width:100%; min-width:0; max-width:min(900px,calc(100% - 24px)); margin:0 auto 6px; padding:4px 0; color:var(--dsw-alias-label-primary,#1f2329); font:12px/1.5 system-ui,"Microsoft YaHei",sans-serif; }
 .ddf-chat-dock[data-tone="supervision"] { --ddf-dock-tone:var(--dsw-alias-state-warning-primary,#b7791f); }
 .ddf-chat-dock[data-tone="service"] { --ddf-dock-tone:var(--dsw-alias-state-error-primary,#f54a45); }
 .ddf-dock-disclosure { width:fit-content; max-width:100%; margin:0 auto; }
@@ -1337,9 +1343,37 @@ window.__ModuleLoader__.load({
 }
 .ddf-dock-toggle { flex:none; width:4px; height:4px; margin:-3px 1px 0 2px; border-right:1px solid currentColor; border-bottom:1px solid currentColor; transform:rotate(45deg); color:var(--dsw-alias-label-secondary,#646a73); }
 .ddf-dock-disclosure[open] .ddf-dock-toggle { margin-top:2px; transform:rotate(225deg); }
-.ddf-dock-details { box-sizing:border-box; position:absolute; z-index:1; bottom:calc(100% + 6px); left:50%; transform:translateX(-50%); width:100%; max-height:min(65vh,560px,var(--ddf-dock-available-height,560px)); overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:var(--dsw-alias-label-secondary,#8f959e) var(--dsw-alias-bg-layer-1,#fff); border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:12px; background:var(--dsw-alias-bg-layer-1,#fff); box-shadow:0 8px 28px color-mix(in srgb,var(--dsw-alias-label-primary,#1f2329) 12%,transparent); }
-.ddf-dock-panel-head { position:sticky; top:0; z-index:1; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:4px 12px; padding:12px 20px; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); background:var(--dsw-alias-bg-layer-1,#fff); font-size:15px; }
+.ddf-dock-details { box-sizing:border-box; position:absolute; z-index:1; bottom:calc(100% + 6px); left:50%; transform:translateX(-50%); width:100%; height:min(65vh,420px,var(--ddf-dock-available-height,420px)); overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:var(--dsw-alias-label-secondary,#8f959e) var(--dsw-alias-bg-layer-1,#fff); border:1px solid var(--dsw-alias-border-l1,#e5e6eb); border-radius:12px; background:var(--dsw-alias-bg-layer-1,#fff); box-shadow:0 8px 28px color-mix(in srgb,var(--dsw-alias-label-primary,#1f2329) 12%,transparent); }
+.ddf-dock-panel-head { position:sticky; top:0; z-index:1; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:0 12px; padding:0 20px; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); background:var(--dsw-alias-bg-layer-1,#fff); font-size:14px; }
 .ddf-dock-panel-head [data-progress-sync] { color:var(--dsw-alias-label-secondary,#646a73); font-size:11px; font-weight:400; }
+.ddf-progress-tabs { display:flex; align-self:stretch; gap:24px; }
+.ddf-progress-tabs button { display:flex; align-items:center; gap:6px; padding:15px 2px 12px; border:0; border-bottom:3px solid transparent; border-radius:0; background:transparent; color:var(--dsw-alias-label-secondary,#646a73); font:inherit; cursor:pointer; }
+.ddf-progress-tabs button[aria-selected="true"] { color:var(--dsw-alias-state-business-primary,#4f6ef7); border-bottom-color:currentColor; font-weight:600; }
+.ddf-progress-tabs button:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7); outline-offset:-3px; }
+.ddf-tab-count { padding:0 5px; border-radius:4px; background:var(--dsw-alias-bg-layer-2,#f5f6f7); font-size:11px; font-variant-numeric:tabular-nums; }
+.ddf-progress-panel { min-width:0; padding:0 20px; font-size:13px; line-height:1.7; overflow-wrap:anywhere; }
+.ddf-progress-panel[hidden] { display:none!important; }
+.ddf-progress-panel-overview { padding:0; }
+.ddf-progress-panel-overview .ddf-execution-row { grid-template-columns:108px minmax(0,1fr); gap:18px; padding:20px 0; }
+.ddf-progress-panel-overview .ddf-execution-label { display:block; }
+.ddf-progress-panel-overview .ddf-execution-status { margin-top:6px; font-size:11px; }
+.ddf-progress-panel-overview .ddf-execution-metrics dt,.ddf-progress-panel-overview .ddf-execution-metrics dd { text-align:center; }
+.ddf-progress-panel-overview .ddf-execution-target { display:block; margin:4px 0 0; }
+.ddf-progress-panel-overview [data-pending="true"] { color:var(--dsw-alias-state-warning-primary,#b7791f); }
+.ddf-progress-excerpt { margin:12px 0 0; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.ddf-progress-records { list-style:none; padding:0; margin:0; }
+.ddf-progress-records>li { padding:16px 0; border-bottom:1px solid var(--dsw-alias-border-l1,#e5e6eb); }
+.ddf-progress-records>li:last-child { border-bottom:0; }
+.ddf-record-heading { display:flex; align-items:baseline; flex-wrap:wrap; gap:6px 12px; margin-bottom:8px; }
+.ddf-record-heading strong { font-size:13px; font-weight:600; }
+.ddf-progress-records>li[data-current="true"] .ddf-record-heading strong { color:var(--dsw-alias-state-business-primary,#4f6ef7); }
+.ddf-record-heading time { margin-left:auto; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; font-variant-numeric:tabular-nums; }
+.ddf-record-state { color:var(--dsw-alias-label-secondary,#646a73); font-size:11px; }
+.ddf-record-state[data-pending="true"],.ddf-progress-notice { color:var(--dsw-alias-state-warning-primary,#b7791f); }
+.ddf-progress-records p { margin:0; white-space:pre-wrap; }
+.ddf-record-meta { margin:8px 0 16px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
+.ddf-progress-records .ddf-record-meta { margin-top:8px; }
+.ddf-progress-notice,.ddf-progress-empty { margin:0; padding:14px 0; font-size:12px; }
 .ddf-dock-disclosure>summary:focus-visible { outline:2px solid var(--dsw-alias-brand-primary,#4f6ef7); outline-offset:2px; }
 .ddf-chat-dock .ddf-chat-notice { margin:0; }
 .ddf-dock-details .ddf-chat-notice { padding:12px 18px 16px; border:0; border-radius:0; font-size:14px; }
@@ -1374,18 +1408,7 @@ window.__ModuleLoader__.load({
 .ddf-execution-number small { margin-left:4px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; font-weight:400; }
 .ddf-execution-target { margin-left:8px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; font-weight:400; }
 .ddf-coordinator .ddf-execution-recent { margin:12px 0 0; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
-.ddf-coordinator .ddf-decision { margin:0; padding:0; border:0; }
-.ddf-coordinator .ddf-decision p { margin:0 0 8px; }
-.ddf-coordinator .ddf-decision p:last-child { margin-bottom:0; }
-.ddf-coordinator .ddf-decision>.ddf-association { display:inline-block; margin-right:18px; vertical-align:top; }
-.ddf-coordinator .ddf-decision>.ddf-decision-fold { display:inline-block; margin-right:18px; vertical-align:top; }
-.ddf-coordinator .ddf-decision>.ddf-association:has(details[open]),.ddf-coordinator .ddf-decision>.ddf-decision-fold[open] { display:block; }
-.ddf-coordinator .ddf-decision-choice { color:var(--dsw-alias-state-success-primary,#369b83); }
 .ddf-coordinator .ddf-chat-live-meta { font-size:12px; }
-.ddf-coordinator .ddf-request-context { padding:0; }
-.ddf-request-context dl { margin:0; }
-.ddf-request-context dt { margin-top:10px; font-weight:500; }
-.ddf-request-context dd { margin:4px 0 12px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; }
 @container ddf-progress (max-width:560px) {
  .ddf-execution-row { gap:8px; }
  .ddf-execution-label { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; }
@@ -1394,6 +1417,10 @@ window.__ModuleLoader__.load({
  .ddf-execution-metrics>div { padding:0 10px; }
  .ddf-execution-metrics dd { font-size:14px; }
  .ddf-execution-metrics .ddf-execution-number { font-size:22px; }
+ .ddf-progress-panel-overview .ddf-execution-row { grid-template-columns:minmax(0,1fr); gap:10px; padding:16px 0; }
+ .ddf-progress-panel-overview .ddf-execution-label { display:flex; }
+ .ddf-progress-panel-overview .ddf-execution-status { margin:0; }
+ .ddf-progress-tabs { gap:18px; }
 }
 `
 
@@ -1876,7 +1903,7 @@ window.__ModuleLoader__.load({
         state?.checkpoint?.summary ? h('p', null, t('supervision.stage') + '：' + state.checkpoint.summary) : null)
     }
 
-    function ChatLiveProgress({ t, plan, state, openView, error }) {
+    function ChatLiveProgress({ t, plan, state, openView, error, overview = false }) {
       const tasks = plan?.tasks ?? [], accepted = tasks.filter(task => task.status === 'accepted').length
       if (!tasks.length || plan.completion || accepted === tasks.length && plan.protocolVersion < 2) return null
       const decisionState = planDecisionState(plan, state)
@@ -1934,10 +1961,10 @@ window.__ModuleLoader__.load({
                 ? fill(t('accordion.verified'), { passed: checks.filter(check => check.result?.passed).length, total: checks.length }) : t('accordion.noChecks')),
               h(ChatPlanProblem, { t, plan, problem, compact: true, ownerId: task.id })))
         })),
-        h('details', { className: 'ddf-chat-task-decision' }, h('summary', null, t('dock.decision')),
+        !overview ? h('details', { className: 'ddf-chat-task-decision' }, h('summary', null, t('dock.decision')),
           h(DecisionDetails, { t, decision: decisionState.decision, current: decisionState.decisionCurrent !== false, resolution: decisionState.messageResolution, pending: decisionState.pendingMessages }),
           concurrent ? h('p', { className: 'ddf-chat-live-meta' }, t('decision.concurrent')) : null,
-          concurrent ? h(DecisionDetails, { t, decision: plan.decision, label: 'decision.plan', current: true }) : null),
+          concurrent ? h(DecisionDetails, { t, decision: plan.decision, label: 'decision.plan', current: true }) : null) : null,
         typeof openView === 'function' ? h('button', { type: 'button', className: 'ddf-chat-notice-action',
           onClick: () => openView(VIEW_ID) }, t('view.details')) : null)
     }
@@ -1999,6 +2026,7 @@ window.__ModuleLoader__.load({
       // The host mounts the input dock while a turn is still running. Its running
       // transition also refreshes a terminal snapshot when the next turn starts.
       const result = useChatProgress(progress, sessionId, true, session?.running)
+      const [selection, setSelection] = useState({ key: '', tab: 'overview' })
       const dockRef = useRef(null)
       const fitDetails = () => {
         const dock = dockRef.current
@@ -2021,6 +2049,15 @@ window.__ModuleLoader__.load({
       }, [sessionId])
       const savedPlan = currentPlanOf(result.data, sessionId)
       const state = result.data?.sessions?.find(item => item.sessionId === sessionId)
+      const tabKey = sessionId + ':' + (state?.source?.messageId || savedPlan?.source?.messageId || '')
+      const activeTab = selection.key === tabKey ? selection.tab : 'overview'
+      const tabs = ['overview', 'messages', 'decisions']
+      const selectTab = tab => {
+        setSelection({ key: tabKey, tab })
+        const panel = dockRef.current?.querySelector?.('.ddf-dock-details')
+        if (panel) panel.scrollTop = 0
+      }
+      const tabId = tab => 'ddf-progress-' + encodeURIComponent(sessionId) + '-' + tab
       const availability = state?.delegationAvailability
       const missing = availability?.status === 'unavailable' ? h('section', { className: 'ddf-chat-notice', 'data-kind': 'service', role: 'alert' },
         h('style', null, CHAT_NOTICE_STYLES), h('strong', null, t('direct.unavailable')),
@@ -2062,7 +2099,7 @@ window.__ModuleLoader__.load({
         }
         if (tasks.length) indicators.push({ kind: 'accepted', text: t('dock.accepted') + ' ' + done + '/' + tasks.length,
           prefix: t('dock.accepted'), value: done + '/' + tasks.length })
-        content = h(ChatPlanNotice, { t, plan, state, error: result.error })
+        content = h(ChatPlanNotice, { t, plan, state, error: result.error, overview: true })
         tone = serviceProblem(plan) || ['failed', 'blocked'].includes(status) ? 'service' : chatProblem(plan) || plan.coordinationIssue && !plan.coordinationIssue.resolvedAt ? 'supervision' : 'progress'
       } else {
         summary = failures.length ? t(execution.running ? 'dock.repairing' : 'direct.incomplete') : t('dock.coordinator')
@@ -2088,7 +2125,67 @@ window.__ModuleLoader__.load({
                 : h('small', null, item.prefix), h('strong', null, item.value), item.unit ? h('small', null, item.unit) : null]))),
             h('span', { className: 'ddf-dock-toggle', 'aria-hidden': 'true' })),
           h('div', { className: 'ddf-dock-details', role: 'region', 'aria-label': t('dock.details') },
-            h('div', { className: 'ddf-dock-panel-head' }, h('strong', null, t('dock.details')), h(ProgressFreshness, { t, result })), content)))
+            h('div', { className: 'ddf-dock-panel-head' },
+              h('div', { role: 'tablist', 'aria-label': t('dock.details'), className: 'ddf-progress-tabs' }, ...tabs.map((tab, index) => h('button', {
+                key: tab, id: tabId(tab), type: 'button', role: 'tab', 'aria-selected': activeTab === tab,
+                'aria-controls': tabId(tab) + '-panel', tabIndex: activeTab === tab ? 0 : -1, onClick: () => selectTab(tab),
+                onKeyDown: event => {
+                  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+                    : event.key === 'ArrowRight' ? (index + 1) % tabs.length : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length : null
+                  if (next === null) return
+                  event.preventDefault(); selectTab(tabs[next]); event.currentTarget.parentElement.querySelectorAll('[role="tab"]')[next]?.focus()
+                },
+              }, t('progress.' + tab), tab === 'messages' && state?.pendingMessages?.length ? h('span', { className: 'ddf-tab-count',
+                title: t('relation.messages') }, state.pendingMessages.length) : null))),
+              h(ProgressFreshness, { t, result })),
+            ...tabs.map(tab => h('section', { key: tab, id: tabId(tab) + '-panel', role: 'tabpanel',
+              'aria-labelledby': tabId(tab), hidden: activeTab !== tab, className: 'ddf-progress-panel ddf-progress-panel-' + tab },
+              tab === 'overview' ? content : tab === 'messages' ? h(ProgressMessages, { t, state, plan: savedPlan })
+                : h(ProgressDecisionRecords, { t, state, plan, previousPlan: terminal ? savedPlan : null }))))))
+    }
+
+    function ProgressMessages({ t, state, plan }) {
+      const pending = state?.pendingMessages ?? [], records = new Map()
+      const add = (message, label) => {
+        if (!message?.text) return
+        const key = message.messageId || label, previous = records.get(key)
+        records.set(key, { ...previous, ...message, key, label, pending: pending.some(item => item.messageId === message.messageId) })
+      }
+      add(state?.source ?? plan?.source, 'request.original')
+      for (const message of pending) add(message, 'progress.supplement')
+      add(state?.latestMessage, state?.latestMessage?.messageId === state?.source?.messageId ? 'request.original' : 'request.latest')
+      return records.size ? h('ol', { className: 'ddf-progress-records' }, ...[...records.values()].reverse().map(message => h('li', {
+        key: message.key, 'data-message-id': message.messageId,
+      }, h('div', { className: 'ddf-record-heading' }, h('strong', null, t(message.label)),
+        h('span', { className: 'ddf-record-state', 'data-pending': message.pending }, t(message.pending ? 'relation.messages' : 'progress.resolved')),
+        Number.isFinite(message.at) ? h('time', { dateTime: new Date(message.at).toISOString() }, new Date(message.at).toLocaleTimeString()) : null),
+      h('p', null, message.text)))) : h('p', { className: 'ddf-progress-empty' }, t('progress.noMessages'))
+    }
+
+    function ProgressDecisionRecords({ t, state, plan, previousPlan }) {
+      const context = planDecisionState(plan, state), decision = context?.decision, resolution = context?.messageResolution
+      const current = context?.decisionCurrent !== false
+      const historical = previousPlan && decision?.mode === 'delegate' && (!Number.isFinite(decision.at)
+        || !Number.isFinite(previousPlan.completion?.at) || decision.at <= previousPlan.completion.at)
+      const continued = ['continue', 'question'].includes(resolution?.relation) && resolution.reason && resolution.at > (decision?.at ?? 0)
+      const concurrent = plan && context !== plan && decision?.mode === 'direct' && plan.decision?.mode === 'delegate'
+      const record = (key, label, reason, at, model, active, mode = decision?.mode) => h('li', { key, 'data-current': active },
+        h('div', { className: 'ddf-record-heading' }, h('strong', null, t(label) + (mode ? '：' + t('decision.' + mode) : '')),
+          Number.isFinite(at) ? h('time', { dateTime: new Date(at).toISOString() }, new Date(at).toLocaleTimeString()) : null),
+        h('p', null, (label === 'decision.explanation' ? '' : t('decision.reason') + '：') + reason),
+        model?.model ? h('p', { className: 'ddf-record-meta' }, model.model) : null)
+      return h('div', { 'data-section': 'decision' },
+        !current ? h('p', { className: 'ddf-progress-notice' }, t(context?.pendingMessages?.length ? 'decision.newMessage' : 'decision.revised')) : null,
+        h('ol', { className: 'ddf-progress-records' },
+          continued ? record('latest', 'decision.explanation', resolution.reason, resolution.at, resolution.model, current && !historical) : null,
+          decision ? record('decision', !current || historical || continued ? 'decision.previous' : 'decision.title', decision.reason, decision.at, decision.model, current && !historical && !continued)
+            : h('li', null, t(state?.execution?.running ? 'decision.pending' : 'decision.unrecorded')),
+          concurrent ? record('plan', 'decision.plan', plan.decision.reason, plan.decision.at, plan.decision.model, false, plan.decision.mode) : null),
+        concurrent ? h('p', { className: 'ddf-record-meta' }, t('decision.concurrent')) : null,
+        resolution ? h('p', { className: 'ddf-record-meta' }, t('relation.title') + '：' + t('relation.' + resolution.relation)) : null,
+        historical ? h('p', { className: 'ddf-record-meta' }, t(previousPlan.completion?.outcome === 'completed' ? 'decision.previousComplete' : 'decision.previousEnded'),
+          (state?.turnStats?.direct ?? state?.direct ?? 0) > 0 ? t('decision.currentDirect') : '')
+          : !plan && decision?.mode === 'delegate' && current ? h('p', { className: 'ddf-record-meta' }, t('decision.notStarted')) : null)
     }
 
     function AssociationDetails({ t, resolution, pending = [] }) {
@@ -2117,8 +2214,8 @@ window.__ModuleLoader__.load({
         result.updatedAt ? ' · ' + fill(t('sync.updated'), { time: new Date(result.updatedAt).toLocaleTimeString() }) : '')
     }
 
-    function DecisionDetails({ t, decision, current = true, preparing = false, historical = false, label, resolution, pending = [], children }) {
-      if (!decision) return h('div', { className: 'ddf-decision' }, h('p', { className: 'ddf-chat-live-meta' }, t(preparing ? 'decision.pending' : 'decision.unrecorded')), h(AssociationDetails, { t, resolution, pending }), children)
+    function DecisionDetails({ t, decision, current = true, preparing = false, historical = false, label, resolution, pending = [] }) {
+      if (!decision) return h('div', { className: 'ddf-decision' }, h('p', { className: 'ddf-chat-live-meta' }, t(preparing ? 'decision.pending' : 'decision.unrecorded')), h(AssociationDetails, { t, resolution, pending }))
       const continued = ['continue', 'question'].includes(resolution?.relation) && resolution.reason && resolution.at > (decision.at ?? 0)
       const previous = !current || historical || continued
       const record = h('div', null,
@@ -2135,8 +2232,7 @@ window.__ModuleLoader__.load({
           h('p', { className: 'ddf-decision-choice' }, t(label || 'decision.title') + '：' + t('decision.' + decision.mode)),
           h(DecisionReason, { t, reason: decision.reason })),
         h(AssociationDetails, { t, resolution: pending.length ? null : resolution, pending }),
-        previous ? h('details', { className: 'ddf-decision-fold', 'data-decision-history': 'previous' }, h('summary', null, t(label || 'decision.previous')), record) : null,
-        children)
+        previous ? h('details', { className: 'ddf-decision-fold', 'data-decision-history': 'previous' }, h('summary', null, t(label || 'decision.previous')), record) : null)
     }
 
     function CoordinatorProgress({ t, state, previousPlan, error }) {
@@ -2147,14 +2243,7 @@ window.__ModuleLoader__.load({
         : activity?.kind ? t('supervision.activity.' + activity.kind) : t('live.unknown')
       const calls = Number.isFinite(execution.toolCalls) ? execution.toolCalls : null
       const direct = (state.turnStats?.direct ?? state.direct ?? 0) > 0
-      const previousDecision = previousPlan && state.decision?.mode === 'delegate' && (!Number.isFinite(state.decision.at)
-        || !Number.isFinite(previousPlan.completion?.at) || state.decision.at <= previousPlan.completion.at)
-      const context = state.source?.text || state.latestMessage?.text ? h('details', { className: 'ddf-decision-fold ddf-request-context' },
-        h('summary', null, t(state.latestMessage?.text && state.latestMessage.messageId !== state.source?.messageId ? 'request.context' : 'request.source')),
-        h('dl', null,
-          state.latestMessage?.text && state.latestMessage.messageId !== state.source?.messageId ? h('div', null,
-            h('dt', null, t('request.latest')), h('dd', null, state.latestMessage.text)) : null,
-          state.source?.text ? h('div', null, h('dt', null, t('request.original')), h('dd', null, state.source.text)) : null)) : null
+      const decision = state.decision, pending = state.pendingMessages ?? [], confirmed = state.decisionCurrent !== false && Boolean(decision)
       return h('section', { className: 'ddf-chat-notice ddf-chat-live ddf-coordinator', 'data-kind': failures.length ? execution.running ? 'supervision' : 'service' : 'progress', role: failures.length && !execution.running ? 'alert' : 'status' },
         h('style', null, CHAT_NOTICE_STYLES),
         error ? h('p', null, t('direct.stale')) : null,
@@ -2171,13 +2260,15 @@ window.__ModuleLoader__.load({
                 title: calls === null ? undefined : fill(t('direct.calls'), { count: calls }) }, calls ?? '—', calls === null ? null : h('small', null, t('dock.callsUnit'))))),
             execution.lastResult ? h('p', { className: 'ddf-execution-recent' }, t('live.recent') + '：' + liveToolLabel(t, execution.lastResult.tool),
               execution.lastResult.target ? ' · ' + execution.lastResult.target : '', execution.lastResult.failed ? ' · ' + t('live.toolFailed') : '') : null)),
-        h('div', { className: 'ddf-execution-row', 'data-section': 'decision' },
+        h('div', { className: 'ddf-execution-row', 'data-section': 'decision-summary' },
+          h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.decision'))),
           h('div', { className: 'ddf-execution-content' },
-            h(DecisionDetails, { t, decision: state.decision, current: state.decisionCurrent !== false, preparing: execution.running, historical: previousDecision, resolution: state.messageResolution, pending: state.pendingMessages }, context),
-            previousDecision ? h('p', { className: 'ddf-chat-live-meta' }, t(previousPlan.completion?.outcome === 'completed' ? 'decision.previousComplete' : 'decision.previousEnded'),
-              direct ? t('decision.currentDirect') : '')
-              : state.decision?.mode === 'delegate' && state.decisionCurrent !== false ? h('p', { className: 'ddf-chat-live-meta' }, t('decision.notStarted'))
-              : state.route?.route && state.route.route !== 'direct' ? h('p', { className: 'ddf-chat-live-meta' }, t('direct.advice')) : null)),
+            h('dl', { className: 'ddf-execution-metrics' },
+              h('div', null, h('dt', null, t('progress.mode')), h('dd', { 'data-pending': !confirmed }, t(confirmed ? 'decision.' + decision.mode : 'progress.unconfirmed'))),
+              h('div', null, h('dt', null, t('relation.messages')), h('dd', null, pending.length)),
+              h('div', null, h('dt', null, t('progress.recordedAt')), h('dd', null, decision?.at ? new Date(decision.at).toLocaleTimeString() : t('dock.unknownModel')))),
+            confirmed ? h('p', { className: 'ddf-progress-excerpt' }, decisionReasonOf(t, state).replace(/\s+/g, ' ').slice(0, 88)) : null,
+            state.route?.route && state.route.route !== 'direct' ? h('p', { className: 'ddf-chat-live-meta' }, t('direct.advice')) : null)),
         failures.length ? h('div', { className: 'ddf-execution-row', 'data-section': 'issues' },
           h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.issues'))),
           h('div', { className: 'ddf-execution-content' }, ...failures.map(item => h('p', { key: item.callId }, (item.target || item.tool) + '：' + item.reason)))) : null)
@@ -2197,15 +2288,15 @@ window.__ModuleLoader__.load({
         nextAction ? h('p', { className: 'ddf-coordination-next' }, h('strong', null, t('view.next') + '：'), nextAction) : null)
     }
 
-    function ChatPlanNotice({ t, plan, state, openView, error }) {
+    function ChatPlanNotice({ t, plan, state, openView, error, overview }) {
       return h('div', null,
         h(CoordinationIssueNotice, { t, plan }),
         !plan?.completion && plan?.cancellation?.cleanup && plan.cancellation.cleanup.status !== 'completed' ? h(CompletionReceipt, { t, plan }) : null,
-        h(ChatPlanBody, { t, plan, state, openView, error }))
+        h(ChatPlanBody, { t, plan, state, openView, error, overview }))
     }
 
-    function ChatPlanBody({ t, plan, state, openView, error }) {
-      const progress = h(ChatLiveProgress, { t, plan, state, openView, error })
+    function ChatPlanBody({ t, plan, state, openView, error, overview }) {
+      const progress = h(ChatLiveProgress, { t, plan, state, openView, error, overview })
       if (plan?.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled) return h('div', null, progress, h(ServiceIssueNotice, { t, issue: plan.coordinatorIssue }))
       return plan?.tasks?.length ? progress : h(ChatPlanProblem, { t, plan, problem: chatProblem(plan), openView, error })
     }

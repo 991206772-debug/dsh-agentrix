@@ -171,6 +171,11 @@ if (denseDecision) Object.assign(directSession, {
     { messageId: 'pending-design', text: '先评审工作台的主题切换、页面动效和引导效果。\n结合使用场景给出调整建议。' },
     { messageId: 'pending-options', text: '希望有独特的品牌色和插画风格。\n请保留主题切换入口，并说明默认效果。' },
     { messageId: 'pending-implement', text: '选择方案 B，开始实施。完成后运行验证并核对实际效果。' },
+    { messageId: 'pending-default', text: '默认开启主题效果，同时保留手动切换入口。' },
+    { messageId: 'pending-layout', text: '列表保持紧凑，正文行距要便于阅读。' },
+    { messageId: 'pending-keyboard', text: '检查键盘操作和焦点反馈。' },
+    { messageId: 'pending-loading', text: '加载状态应有明确反馈，避免重复点击。' },
+    { messageId: 'pending-checks', text: '完成后核对深色主题下的文本与分隔线。' },
   ],
 })
 if (process.argv.includes('--long-progress')) {
