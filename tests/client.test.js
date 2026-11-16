@@ -1313,13 +1313,13 @@ test('unclassified messages are visible without claiming a scope change or gener
   const dock = f.mountDock('session-current'), view = f.mountView('session-current')
   try {
     await dock.flush(); await view.flush()
-    assert.match(dock.text(), /待关联消息.*另外开一个新任务/)
+    assert.match(dock.text(), /已收到，待主控登记.*另外开一个新任务/)
     assert.doesNotMatch(dock.text(), /需求已补充/)
     assert.doesNotMatch(view.text(), /置信度|评分 0|预计.*步/)
     row.pendingMessages = []; row.messageResolution = { relation: 'question' }; row.decisionCurrent = true
     await dock.tick(); await view.tick()
     assert.match(dock.text(), /询问进度或普通提问.*沿用原需求/)
-    assert.doesNotMatch(dock.text(), /待主控确认消息关联|需求已补充/)
+    assert.doesNotMatch(dock.text(), /主控尚未登记消息与当前任务的关系|需求已补充/)
   } finally { dock.close(); view.close(); f.close() }
 })
 
@@ -1452,7 +1452,7 @@ test('pending message originals and long explanations remain complete in separat
   try {
     await dock.flush()
     const text = flatten(dock.nodes('section').find(node => node.props.role === 'tabpanel' && !node.props.hidden))
-    assert.match(text, /待关联消息.*3/)
+    assert.match(text, /已收到，待主控登记.*3/)
     assert.ok(text.length < 240, 'a short default reading flow must not grow with all pending messages and the full explanation')
     assert.doesNotMatch(text, /第一条原始补充|后续原文|第三条原始补充|上次只读评审/)
     const messages = dock.nodes('section').find(node => node.props.className?.endsWith('panel-messages'))
