@@ -743,6 +743,7 @@ window.__ModuleLoader__.load({
       'decision.revised': '需求已补充，等待主控更新判断', 'decision.notStarted': '已决定委派，尚未启动子代理', 'decision.at': '判断时间',
       'decision.previous': '上次执行判断', 'decision.previousComplete': '上次委派已完成。', 'decision.previousEnded': '上次委派已结束。',
       'decision.newMessage': '收到新消息，待主控确认当前判断', 'decision.continued': '沿用执行方式', 'decision.explanation': '本次说明',
+      'decision.latestSaved': '最近保存的说明',
       'decision.fullReason': '完整依据', 'decision.foldReason': '收起全文', 'relation.messages': '待关联消息', 'relation.messageCount': '{count} 条',
       'progress.overview': '概览', 'progress.messages': '消息记录', 'progress.decisions': '判断记录',
       'progress.mode': '执行方式', 'progress.recordedAt': '记录时间', 'progress.unconfirmed': '待确认',
@@ -785,6 +786,7 @@ window.__ModuleLoader__.load({
       'decision.revised': 'Request updated; waiting for a revised decision', 'decision.notStarted': 'Delegation chosen; no child agent has started', 'decision.at': 'Decision time',
       'decision.previous': 'Previous execution decision', 'decision.previousComplete': 'The previous delegation is complete.', 'decision.previousEnded': 'The previous delegation has ended.',
       'decision.newMessage': 'New message received; waiting for the coordinator to confirm the current decision', 'decision.continued': 'Continuing execution mode', 'decision.explanation': 'Latest explanation',
+      'decision.latestSaved': 'Latest saved explanation',
       'decision.fullReason': 'Full explanation', 'decision.foldReason': 'Collapse explanation', 'relation.messages': 'Unclassified messages', 'relation.messageCount': '{count} messages',
       'progress.overview': 'Overview', 'progress.messages': 'Messages', 'progress.decisions': 'Decisions',
       'progress.mode': 'Execution mode', 'progress.recordedAt': 'Recorded at', 'progress.unconfirmed': 'Unconfirmed',
@@ -1261,6 +1263,8 @@ window.__ModuleLoader__.load({
 .ddf-decision { min-width:0; font-size:13px; line-height:1.65; overflow-wrap:anywhere; }
 .ddf-decision>p { margin:0 0 8px; }
 .ddf-decision-choice { font-weight:600; }
+.ddf-execution-mode[data-mode="direct"] { color:var(--dsw-alias-state-business-primary,#4f6ef7); }
+.ddf-execution-mode[data-mode="delegate"] { color:var(--dsw-alias-state-success-primary,#369b83); }
 .ddf-decision-pending { color:var(--dsw-alias-state-warning-primary,#b7791f); }
 .ddf-decision-fold { margin-top:6px; color:var(--dsw-alias-label-secondary,#646a73); font-size:12px; }
 .ddf-decision-fold>summary { cursor:pointer; padding:3px 0; }
@@ -2170,14 +2174,14 @@ window.__ModuleLoader__.load({
       const continued = ['continue', 'question'].includes(resolution?.relation) && resolution.reason && resolution.at > (decision?.at ?? 0)
       const concurrent = plan && context !== plan && decision?.mode === 'direct' && plan.decision?.mode === 'delegate'
       const record = (key, label, reason, at, model, active, mode = decision?.mode) => h('li', { key, 'data-current': active },
-        h('div', { className: 'ddf-record-heading' }, h('strong', null, t(label) + (mode ? '：' + t('decision.' + mode) : '')),
+        h('div', { className: 'ddf-record-heading' }, h('strong', null, t(label) + (mode ? '：' : ''), mode ? h(ExecutionMode, { t, mode }) : null),
           Number.isFinite(at) ? h('time', { dateTime: new Date(at).toISOString() }, new Date(at).toLocaleTimeString()) : null),
-        h('p', null, (label === 'decision.explanation' ? '' : t('decision.reason') + '：') + reason),
+        h('p', null, (['decision.explanation', 'decision.latestSaved'].includes(label) ? '' : t('decision.reason') + '：') + reason),
         model?.model ? h('p', { className: 'ddf-record-meta' }, model.model) : null)
       return h('div', { 'data-section': 'decision' },
         !current ? h('p', { className: 'ddf-progress-notice' }, t(context?.pendingMessages?.length ? 'decision.newMessage' : 'decision.revised')) : null,
         h('ol', { className: 'ddf-progress-records' },
-          continued ? record('latest', 'decision.explanation', resolution.reason, resolution.at, resolution.model, current && !historical) : null,
+          continued ? record('latest', current && !historical ? 'decision.explanation' : 'decision.latestSaved', resolution.reason, resolution.at, resolution.model, current && !historical) : null,
           decision ? record('decision', !current || historical || continued ? 'decision.previous' : 'decision.title', decision.reason, decision.at, decision.model, current && !historical && !continued)
             : h('li', null, t(state?.execution?.running ? 'decision.pending' : 'decision.unrecorded')),
           concurrent ? record('plan', 'decision.plan', plan.decision.reason, plan.decision.at, plan.decision.model, false, plan.decision.mode) : null),
@@ -2208,6 +2212,10 @@ window.__ModuleLoader__.load({
         h('p', null, text))
     }
 
+    function ExecutionMode({ t, mode }) {
+      return h('span', { className: 'ddf-execution-mode', 'data-mode': mode }, t('decision.' + mode))
+    }
+
     function ProgressFreshness({ t, result }) {
       return h('div', { className: 'ddf-chat-live-meta', 'data-progress-sync': result.error ? 'stale' : result.connection, role: 'status' },
         t(result.error ? 'direct.stale' : 'sync.' + result.connection),
@@ -2219,17 +2227,17 @@ window.__ModuleLoader__.load({
       const continued = ['continue', 'question'].includes(resolution?.relation) && resolution.reason && resolution.at > (decision.at ?? 0)
       const previous = !current || historical || continued
       const record = h('div', null,
-        h('p', { className: 'ddf-chat-live-meta' }, t(label || 'decision.previous') + '：' + t('decision.' + decision.mode)),
+        h('p', { className: 'ddf-chat-live-meta' }, t(label || 'decision.previous') + '：', h(ExecutionMode, { t, mode: decision.mode })),
         h('p', null, t('decision.reason') + '：' + decision.reason),
         h('p', { className: 'ddf-chat-live-meta' }, decision.model?.model || '—',
           decision.at ? ' · ' + t('decision.at') + '：' + new Date(decision.at).toLocaleTimeString() : ''))
       return h('div', { className: 'ddf-decision' },
         !current ? h('p', { className: 'ddf-decision-pending' }, t(pending.length ? 'decision.newMessage' : 'decision.revised')) : null,
         continued ? h('div', null,
-          current && !historical ? h('p', { className: 'ddf-decision-choice' }, t('decision.continued') + '：' + t('decision.' + decision.mode)) : null,
-          h(DecisionReason, { t, reason: resolution.reason, label: 'decision.explanation' })) : null,
+          current && !historical ? h('p', { className: 'ddf-decision-choice' }, t('decision.continued') + '：', h(ExecutionMode, { t, mode: decision.mode })) : null,
+          h(DecisionReason, { t, reason: resolution.reason, label: current && !historical ? 'decision.explanation' : 'decision.latestSaved' })) : null,
         previous ? null : h('div', null,
-          h('p', { className: 'ddf-decision-choice' }, t(label || 'decision.title') + '：' + t('decision.' + decision.mode)),
+          h('p', { className: 'ddf-decision-choice' }, t(label || 'decision.title') + '：', h(ExecutionMode, { t, mode: decision.mode })),
           h(DecisionReason, { t, reason: decision.reason })),
         h(AssociationDetails, { t, resolution: pending.length ? null : resolution, pending }),
         previous ? h('details', { className: 'ddf-decision-fold', 'data-decision-history': 'previous' }, h('summary', null, t(label || 'decision.previous')), record) : null)
@@ -2264,7 +2272,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'ddf-execution-label' }, h('h3', null, t('dock.decision'))),
           h('div', { className: 'ddf-execution-content' },
             h('dl', { className: 'ddf-execution-metrics' },
-              h('div', null, h('dt', null, t('progress.mode')), h('dd', { 'data-pending': !confirmed }, t(confirmed ? 'decision.' + decision.mode : 'progress.unconfirmed'))),
+              h('div', null, h('dt', null, t('progress.mode')), h('dd', { 'data-pending': !confirmed }, confirmed ? h(ExecutionMode, { t, mode: decision.mode }) : t('progress.unconfirmed'))),
               h('div', null, h('dt', null, t('relation.messages')), h('dd', null, pending.length)),
               h('div', null, h('dt', null, t('progress.recordedAt')), h('dd', null, decision?.at ? new Date(decision.at).toLocaleTimeString() : t('dock.unknownModel')))),
             confirmed ? h('p', { className: 'ddf-progress-excerpt' }, decisionReasonOf(t, state).replace(/\s+/g, ' ').slice(0, 88)) : null,

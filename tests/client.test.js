@@ -1411,6 +1411,32 @@ test('progress tabs separate the overview, message list and decision records and
   } finally { dock.close(); f.close() }
 })
 
+test('execution modes have distinct visual labels and unresolved new input never makes an old explanation current', async () => {
+  const row = { sessionId: 'session-current', source: { messageId: 'review', text: '评审工作台' },
+    decision: { mode: 'direct', reason: '读取材料后直接评审。', at: 100 }, decisionCurrent: false,
+    messageResolution: { relation: 'continue', reason: '原阶段开始实施。', at: 200 },
+    pendingMessages: [{ messageId: 'later', text: '现在处理另一项补充' }],
+    execution: { running: true, toolCalls: 37, activity: { kind: 'tool', tool: 'edit' } } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone({
+    ok: true, sessionId: row.sessionId, plans: [], sessions: [row] }) }) })
+  const dock = f.mountDock(row.sessionId)
+  try {
+    await dock.flush()
+    const labels = mode => dock.nodes('span').filter(node => node.props.className === 'ddf-execution-mode' && node.props['data-mode'] === mode)
+    assert.ok(labels('direct').some(node => flatten(node) === '直接执行'))
+    const records = () => dock.nodes('section').find(node => node.props.className?.endsWith('panel-decisions'))
+    assert.match(flatten(records()), /最近保存的说明.*原阶段开始实施/)
+    assert.doesNotMatch(flatten(records()), /本次说明/)
+    row.pendingMessages = []; row.decisionCurrent = true
+    row.decision = { mode: 'delegate', reason: '独立文件交给执行者修改。', at: 300 }
+    row.messageResolution = { relation: 'update', at: 300 }
+    await dock.tick()
+    assert.ok(labels('delegate').some(node => flatten(node) === '委派'))
+    assert.equal(labels('direct').length, 0)
+    assert.doesNotMatch(flatten(records()), /最近保存的说明/)
+  } finally { dock.close(); f.close() }
+})
+
 test('pending message originals and long explanations remain complete in separate tabs', async () => {
   const reason = '按方案 B 调整主题交互，完成后运行验证。' + '多个文件共用同一套交互参数，需要保持一致。'.repeat(12)
   const row = { sessionId: 'session-current', source: { messageId: 'original', text: '评审工作台交互。' },
@@ -2898,7 +2924,7 @@ test('the board exposes the confirmed plan before tasks and keeps rule-based adv
     assert.ok(decisionIndex < sections.findIndex(node => node?.props?.['data-task-list'] === ''), 'judgment must precede task cards')
     const main = view.nodes('div').find(node => node.props?.className === 'ddf-board-decision-main')
     assert.match(JSON.stringify(main), /主控已确认.*复杂.*独立审查/)
-    assert.match(JSON.stringify(main), /主控决定.*委派.*规范和实现可以分工处理/)
+    assert.match(flatten(main), /主控决定.*委派.*规范和实现可以分工处理/)
     assert.doesNotMatch(JSON.stringify(main), /评分 3|系统建议/)
     assert.match(view.text(), /规则判断.*中等.*评分 3.*并行委派多个子 Agent/)
     assert.match(view.text(), /当前实际安排.*按任务依赖先后执行/)
