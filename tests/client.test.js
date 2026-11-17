@@ -1335,7 +1335,7 @@ test('new input makes a prior readonly decision historical while the actual edit
   try {
     await dock.flush()
     assert.match(dock.text(), /修改文件.*theme.js/)
-    assert.match(dock.text(), /新消息.*待.*确认/)
+    assert.match(dock.text(), /当前判断：待主控登记/)
     assert.equal(dock.nodes('p').filter(node => node.props.className === 'ddf-decision-choice').length, 0,
       'an outdated decision must not keep the green current-choice styling')
     const history = dock.nodes('section').find(node => node.props.role === 'tabpanel' && flatten(node).includes('只读评审，不写代码。'))
@@ -1425,12 +1425,18 @@ test('execution modes have distinct visual labels and unresolved new input never
     const labels = mode => dock.nodes('span').filter(node => node.props.className === 'ddf-execution-mode' && node.props['data-mode'] === mode)
     assert.ok(labels('direct').some(node => flatten(node) === '直接执行'))
     const records = () => dock.nodes('section').find(node => node.props.className?.endsWith('panel-decisions'))
+    const pending = () => dock.nodes('section').find(node => node.props['data-pending-decision'])
+    assert.ok(pending(), 'the current unregistered message is shown before historical decisions')
+    assert.match(flatten(pending()), /现在处理另一项补充/)
+    assert.doesNotMatch(flatten(pending()), /读取材料后直接评审|原阶段开始实施/)
+    assert.match(flatten(records()), /现在处理另一项补充.*历史判断.*原阶段开始实施/)
     assert.match(flatten(records()), /最近保存的说明.*原阶段开始实施/)
     assert.doesNotMatch(flatten(records()), /本次说明/)
     row.pendingMessages = []; row.decisionCurrent = true
     row.decision = { mode: 'delegate', reason: '独立文件交给执行者修改。', at: 300 }
     row.messageResolution = { relation: 'update', at: 300 }
     await dock.tick()
+    assert.equal(pending(), undefined, 'a recorded current decision replaces the pending explanation')
     assert.ok(labels('delegate').some(node => flatten(node) === '委派'))
     assert.equal(labels('direct').length, 0)
     assert.doesNotMatch(flatten(records()), /最近保存的说明/)
@@ -2683,7 +2689,7 @@ test('live updates coalesce bursts, catch events during a read and fall back aft
     await dock.flush(); await view.flush()
     assert.equal(calls, 3, 'an event during an in-flight snapshot must cause one trailing read')
     assert.match(dock.text(), /修改文件.*theme.js/)
-    assert.match(dock.text(), /新消息.*待.*确认/)
+    assert.match(dock.text(), /当前判断：待主控登记/)
     assert.match(view.text(), /新消息.*待.*确认/)
     assert.match(dock.text(), /最后更新/)
     events.onmessage({}); events.onmessage({}); events.onmessage({})

@@ -564,17 +564,22 @@ export function apply(ctx) {
 
   const offDecisionRecovery = ctx.on('tools/post-execute', async (exec, result, next) => {
     const decision = await next()
-    if (!missingDecisionCalls.delete(exec) || !result.isError || decision.kind !== 'accept' || !current.enabled || exec.signal?.aborted) return decision
+    const denied = missingDecisionCalls.delete(exec) && result.isError
+    const reminder = current.mode === 'auto' && result.isError === false && !exec.name.startsWith('delegation_') && roleOf(exec)?.worker === false
+    if ((!denied && !reminder) || decision.kind !== 'accept' || !current.enabled || exec.signal?.aborted) return decision
     try {
       await ready
+      if (reminder && !orchestration.pendingMessages(exec.agent.id).length) return decision
       if (!current.enabled || exec.signal?.aborted || !await orchestration.recoverDecision(exec.agent.id) || exec.signal?.aborted) return decision
     } catch (error) {
+      if (!denied) return decision
       return { ...decision, content: [...(decision.content ?? result.content), { type: 'text',
         text: '自动纠正记录未能保存，本次操作仍未执行：' + (error instanceof Error ? error.message : String(error)) }] }
     }
     return { ...decision, additionalContexts: [...(decision.additionalContexts ?? []), {
       id: randomUUID(), role: 'user', source: { kind: 'delegation-decision-recovery' }, content: [{ type: 'text', text:
-        `[DSH Agentrix] 刚才的 ${exec.name} 未执行。下一步先补需求关联和执行判断，不能把策略拦截当作路径错误继续扩大搜索范围。\n` +
+        (denied ? `[DSH Agentrix] 刚才的 ${exec.name} 未执行。下一步先补需求关联和执行判断，不能把策略拦截当作路径错误继续扩大搜索范围。\n`
+          : `[DSH Agentrix] 刚才的 ${exec.name} 已成功执行，原工具结果有效。当前仍有未登记消息，请在下一步原有流程中先登记消息关系和真实执行判断；不要重复已成功的操作，不另开分类代理。\n`) +
         orchestration.decisionGuidance(exec.agent.id) }],
     }] }
   }, { global: true })
@@ -1222,7 +1227,7 @@ export function apply(ctx) {
             const messages = orchestration.pendingMessages(agentId)
             const pending = messages.length && !summary ? '待关联用户消息（仅事实，尚未归属需求）：' + messages.map(message => message.messageId + '：' + message.text.slice(0, 180)).join('；') + '。新委派用 delegation_plan({relation,decisionReason,start:true,...}) 同时关联并派发；直接执行或多条消息分别关联才用 delegation_decide，不能按字数猜测。' : ''
             const choice = orchestration.decisionCurrent(agentId) ? '主控当前阶段已记录执行方式：' + decision.mode + '。已确认的原委派计划继续监督验收，不因当前阶段 direct 而取消或接管；范围未变无需重复记录。'
-              : current.mode === 'auto' ? '当前判断尚未记录；auto 普通操作可直接执行，主控用 delegation_decide 补充真实理由。委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run。'
+              : current.mode === 'auto' ? '当前消息关系或判断尚未登记；auto 普通操作仍可直接执行，请在原有步骤中先用 delegation_decide 登记消息用途和真实理由，不要沿用不再适用的旧说明。纯文字问答不为登记额外续跑。委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run。'
                 : '本需求尚未记录判断或范围已补充；新委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run；直接执行先记录 direct。'
             const checks = orchestration.checkGuidance(agentId)
             return [DISCIPLINE, pending, choice, checks, missing, unresolved, summary].filter(Boolean).join('\n\n')

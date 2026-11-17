@@ -744,6 +744,7 @@ window.__ModuleLoader__.load({
       'decision.previous': '上次执行判断', 'decision.previousComplete': '上次委派已完成。', 'decision.previousEnded': '上次委派已结束。',
       'decision.newMessage': '收到新消息，待主控确认当前判断', 'decision.continued': '沿用执行方式', 'decision.explanation': '本次说明',
       'decision.latestSaved': '最近保存的说明',
+      'decision.pendingRegistration': '当前判断：待主控登记', 'decision.history': '历史判断',
       'decision.fullReason': '完整依据', 'decision.foldReason': '收起全文', 'relation.messages': '已收到，待主控登记', 'relation.messageCount': '{count} 条',
       'progress.overview': '概览', 'progress.messages': '消息记录', 'progress.decisions': '判断记录',
       'progress.mode': '执行方式', 'progress.recordedAt': '记录时间', 'progress.unconfirmed': '待确认',
@@ -787,6 +788,7 @@ window.__ModuleLoader__.load({
       'decision.previous': 'Previous execution decision', 'decision.previousComplete': 'The previous delegation is complete.', 'decision.previousEnded': 'The previous delegation has ended.',
       'decision.newMessage': 'New message received; waiting for the coordinator to confirm the current decision', 'decision.continued': 'Continuing execution mode', 'decision.explanation': 'Latest explanation',
       'decision.latestSaved': 'Latest saved explanation',
+      'decision.pendingRegistration': 'Current decision: awaiting coordinator record', 'decision.history': 'Historical decisions',
       'decision.fullReason': 'Full explanation', 'decision.foldReason': 'Collapse explanation', 'relation.messages': 'Received; waiting for the coordinator to classify', 'relation.messageCount': '{count} messages',
       'progress.overview': 'Overview', 'progress.messages': 'Messages', 'progress.decisions': 'Decisions',
       'progress.mode': 'Execution mode', 'progress.recordedAt': 'Recorded at', 'progress.unconfirmed': 'Unconfirmed',
@@ -2169,6 +2171,7 @@ window.__ModuleLoader__.load({
     function ProgressDecisionRecords({ t, state, plan, previousPlan }) {
       const context = planDecisionState(plan, state), decision = context?.decision, resolution = context?.messageResolution
       const current = context?.decisionCurrent !== false
+      const latest = context?.pendingMessages?.at(-1) ?? state?.latestMessage
       const historical = previousPlan && decision?.mode === 'delegate' && (!Number.isFinite(decision.at)
         || !Number.isFinite(previousPlan.completion?.at) || decision.at <= previousPlan.completion.at)
       const continued = ['continue', 'question'].includes(resolution?.relation) && resolution.reason && resolution.at > (decision?.at ?? 0)
@@ -2179,14 +2182,20 @@ window.__ModuleLoader__.load({
         h('p', null, (['decision.explanation', 'decision.latestSaved'].includes(label) ? '' : t('decision.reason') + '：') + reason),
         model?.model ? h('p', { className: 'ddf-record-meta' }, model.model) : null)
       return h('div', { 'data-section': 'decision' },
-        !current ? h('p', { className: 'ddf-progress-notice' }, t(context?.pendingMessages?.length ? 'decision.newMessage' : 'decision.revised')) : null,
+        !current ? h('section', { 'data-pending-decision': true },
+          h('p', { className: 'ddf-progress-notice' }, t(context?.pendingMessages?.length ? 'decision.pendingRegistration' : 'decision.revised')),
+          latest?.text ? h('ol', { className: 'ddf-progress-records' }, h('li', null,
+            h('div', { className: 'ddf-record-heading' }, h('strong', null, t('request.latest')),
+              Number.isFinite(latest.at) ? h('time', { dateTime: new Date(latest.at).toISOString() }, new Date(latest.at).toLocaleTimeString()) : null),
+            h('p', null, latest.text))) : null) : null,
+        !current && (decision || continued) ? h('p', { className: 'ddf-record-meta' }, t('decision.history')) : null,
         h('ol', { className: 'ddf-progress-records' },
           continued ? record('latest', current && !historical ? 'decision.explanation' : 'decision.latestSaved', resolution.reason, resolution.at, resolution.model, current && !historical) : null,
           decision ? record('decision', !current || historical || continued ? 'decision.previous' : 'decision.title', decision.reason, decision.at, decision.model, current && !historical && !continued)
             : h('li', null, t(state?.execution?.running ? 'decision.pending' : 'decision.unrecorded')),
           concurrent ? record('plan', 'decision.plan', plan.decision.reason, plan.decision.at, plan.decision.model, false, plan.decision.mode) : null),
         concurrent ? h('p', { className: 'ddf-record-meta' }, t('decision.concurrent')) : null,
-        resolution ? h('p', { className: 'ddf-record-meta' }, t('relation.title') + '：' + t('relation.' + resolution.relation)) : null,
+        current && resolution ? h('p', { className: 'ddf-record-meta' }, t('relation.title') + '：' + t('relation.' + resolution.relation)) : null,
         historical ? h('p', { className: 'ddf-record-meta' }, t(previousPlan.completion?.outcome === 'completed' ? 'decision.previousComplete' : 'decision.previousEnded'),
           (state?.turnStats?.direct ?? state?.direct ?? 0) > 0 ? t('decision.currentDirect') : '')
           : !plan && decision?.mode === 'delegate' && current ? h('p', { className: 'ddf-record-meta' }, t('decision.notStarted')) : null)

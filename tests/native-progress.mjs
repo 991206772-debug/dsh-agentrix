@@ -72,10 +72,12 @@ const events = id => new Promise((resolve, reject) => {
   request.on('error', reject)
 })
 let sequence = 0
+const toolContexts = []
 const call = async (name, args = {}) => {
   const id = 'progress-' + ++sequence
   const batch = await runtime.execute({ calls: [{ id, name, arguments: JSON.stringify(args) }], agent, signal: new AbortController().signal })
   const result = batch.results.find(item => item.callId === id).result
+  toolContexts.push(...batch.additionalContexts ?? [])
   assert.equal(result.isError, false, JSON.stringify(result))
   return result
 }
@@ -104,7 +106,13 @@ try {
   assert.equal(row.source.messageId, 'review')
   assert.equal(row.decisionCurrent, false)
   finishTool(); await tool
+  assert.equal(toolContexts.length, 1, 'the successful native tool carries one registration reminder')
+  assert.equal(toolContexts[0].source.kind, 'delegation-decision-recovery')
+  assert.match(toolContexts[0].content[0].text, /implement/)
+  assert.equal((await state()).pendingMessages.length, 1, 'a reminder does not classify the message for the model')
   await call('delegation_decide', { relation: 'continue', reason: '开始修改并验证原方案。' })
+  assert.equal((await state()).pendingMessages.length, 0)
+  assert.equal((await state()).decisionCurrent, true)
   assert.equal((await state()).messageResolution.reason, '开始修改并验证原方案。')
   const beforeModel = live.changes
   const stream = (async () => { for await (const chunk of llm.stream({ sessionId: agent.id, provider: 'fixture', model: 'coordinator',
@@ -123,7 +131,7 @@ try {
   ctx.emit('session/event', { id: agent.id }, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
   await until(() => connections.at(-1).changes > 0, 'updates after reconnection')
   assert.equal((await state()).execution.running, false)
-  console.log('PASS: installed HTTP server with gzip, session-scoped SSE, actual ToolRuntime start/result and LlmRuntime request/content, latest input provenance, reconnect, zero additional model requests')
+  console.log('PASS: installed HTTP server with gzip, session-scoped SSE, actual ToolRuntime start/result, one-time auto registration context, latest input provenance, recorded current judgment, reconnect, zero additional model requests')
 } finally {
   finishTool?.(); finishModel?.()
   await ctx.fiber.dispose()

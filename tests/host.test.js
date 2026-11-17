@@ -67,9 +67,9 @@ export async function host(mode) {
       calls.set(id, exec)
       return guard(exec)
     },
-    async post(id, message) {
+    async post(id, message, isError = true) {
       const hooks = [...(listeners.get('tools/post-execute') ?? [])]
-      const result = { isError: true, error: { message }, content: [{ type: 'text', text: 'Error: ' + message }] }
+      const result = { isError, ...(isError ? { error: { message } } : {}), content: [{ type: 'text', text: (isError ? 'Error: ' : '') + message }] }
       const run = index => index < hooks.length ? hooks[index](calls.get(id), result, () => run(index + 1)) : { kind: 'accept' }
       return run(0)
     },
@@ -417,6 +417,51 @@ test('auto permits native direct work without a recorded decision and never inve
     assert.equal(state.execution.toolCalls, 4)
     assert.equal(h.injections.length, 0)
     assert.match(h.call('subagent'), /delegation_plan/, 'native dispatch cannot bypass configured child models')
+  } finally { await h.close() }
+})
+
+test('auto returns a one-time registration reminder with the original tool result and retains real pending messages', async () => {
+  let h = await host(); await h.state(); h.turn('先评审页面', 'review')
+  try {
+    await h.decide('只读评审页面，由主控直接核对。')
+    const original = (await h.state()).decision
+    for (let i = 1; i <= 27; i++) h.turn('补充要求 ' + i, 'supplement-' + i)
+    assert.equal(h.call('edit', 'edit-without-registration'), undefined)
+    const result = await h.post('edit-without-registration', 'Updated fixture.js', false)
+    assert.equal(result.kind, 'accept')
+    assert.equal(result.additionalContexts?.length, 1)
+    assert.match(result.additionalContexts[0].content[0].text, /supplement-1[\s\S]*supplement-27/)
+    assert.match(result.additionalContexts[0].content[0].text, /delegation_decide/)
+    assert.doesNotMatch(result.additionalContexts[0].content[0].text, /刚才的 edit 未执行/)
+    assert.deepEqual((await h.state()).decision, original, 'a reminder must not invent a new choice or reason')
+    assert.equal((await h.state()).pendingMessages.length, 27, 'only the coordinator may classify messages')
+    assert.equal(h.injections.length, 0, 'use the existing tool step without waking another model turn')
+    assert.equal(h.call('pwsh', 'verify-without-registration'), undefined)
+    assert.equal((await h.post('verify-without-registration', 'Verified fixture.js', false)).additionalContexts, undefined)
+    await h.close(); h = await host(); await h.state('root')
+    assert.equal(h.call('read', 'read-after-reload'), undefined)
+    assert.equal((await h.post('read-after-reload', 'fixture content', false)).additionalContexts, undefined, 'reload preserves the reminder limit')
+    h.turn('再补一项要求', 'supplement-28')
+    assert.equal(h.call('read', 'read-new-supplement'), undefined)
+    assert.equal((await h.post('read-new-supplement', 'fixture content', false)).additionalContexts?.length, 1)
+  } finally { await h.close() }
+})
+
+test('auto registration reminders leave plain answers, worker calls, cancellation and off mode alone', async () => {
+  delete process.env.DSH_DELEGATION_FIRST
+  const h = await host(); await h.state(); h.turn('普通提问', 'question')
+  try {
+    await h.stopping()
+    assert.equal(h.injections.length, 0)
+    h.call('read', 'worker-read', { id: 'worker' })
+    assert.equal((await h.post('worker-read', 'fixture content', false)).additionalContexts, undefined)
+    const abort = new AbortController(); abort.abort()
+    h.call('read', 'cancelled-read', h.agent, {}, abort.signal)
+    assert.equal((await h.post('cancelled-read', 'fixture content', false)).additionalContexts, undefined)
+    assert.equal((await h.request('POST', { mode: 'off' })).status, 200)
+    h.call('read', 'off-read')
+    assert.equal((await h.post('off-read', 'fixture content', false)).additionalContexts, undefined)
+    assert.equal((await h.state()).pendingMessages.length, 1)
   } finally { await h.close() }
 })
 
