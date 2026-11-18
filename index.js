@@ -35,15 +35,22 @@ const MAX_BODY_BYTES = 64 * 1024
  * `delegation-first` skill and is loaded only when the task calls for it.
  */
 const DISCIPLINE = [
-  "## Agentrix",
-  "auto比较委派收益与准备、汇报、验收开销；小改/共享上下文优先direct，有独立执行量、隔离或并行价值才delegate；普通也可委派。",
-  "先读；auto未托管可直接做，delegation_decide记真实理由；委派用delegation_plan({start:true,...})。要求分必需/建议，合批。",
   "委派后主控规划验收、worker执行。complexity看未决难点；显式填reviewPolicy/reviewReason按风险审查。审查用分发者模型，delegation_models查模型。",
   "delegation_verify后delegation_review按criterionId/ref验收。标准限用户要求及必要验证；重要问题返工，minor记录，复查不扩围。",
-  "relation:new/continue/update/question。补充先答复；变更用inputIds/additionalCriteria steer原代理，答复acknowledge。报进度，修改失败须修复并核对原产物。",
+  "delegation_decide的relation:new/continue/update/question。补充先答复；变更用inputIds/additionalCriteria steer原代理，答复acknowledge。修改失败须修复并核对原产物。",
   "有进展不停、不换代理；按nextAction等通知。交report，长调查/阻塞记checkpoint。",
-  "stop仅取消且须原因。验收delivery填summary/inlineFiles，正文限outputs；交付后结束。",
+  "stop须取消理由；delivery填summary/inlineFiles，正文限outputs；交付后结束。",
 ].join('\n')
+
+function discipline(config) {
+  return ['## Agentrix', ...(config.mode === 'strict' ? [
+    '严格模式：工具任务一律委派，主控仅沟通、管理和验收；读文件/搜索/网页/命令由worker执行。',
+    '纯文字直接答复；用delegation_plan({start:true,...})派发。管理检查用delegation_inspect，验收用delegation_verify，记录用delegation_note。',
+  ] : [
+    'auto比较委派收益与准备、汇报、验收开销；小改/共享上下文优先direct，有独立执行量、隔离或并行价值才delegate；普通也可委派。',
+    '先读；auto未托管可直接做，delegation_decide记真实理由；委派用delegation_plan({start:true,...})。要求分必需/建议，合批。',
+  ]), DISCIPLINE].join('\n')
+}
 
 /** Automatic routing is advisory; explicit modes retain their operation gates. */
 function policyFor(config) {
@@ -74,8 +81,7 @@ const CHANGE_TOOLS = ['write', 'edit', 'apply_patch', 'multi_edit', 'notebook_ed
  * `DSH_DELEGATION_FIRST`:
  *   unset / `auto` → judge the turn and follow the judgement (the default)
  *   `off`          → the gate is inert
- *   `strict`       → no hands-on execution at all in a turn that has not
- *                    delegated (the pre-difficulty behaviour)
+ *   `strict`       → delegate all tool work; coordinate and verify only
  *   `<n>`          → a fixed per-turn budget of n, no delegation required first
  *
  * A JSON `Config` would be the harness-idiomatic home for these, but the profile
@@ -1225,14 +1231,15 @@ export function apply(ctx) {
             const unresolved = failures.length ? '尚未成功修改：' + failures.map(item => `${item.target || item.tool}（${item.reason}）`).join('；') : ''
             const decision = orchestration.decisionFor(agentId)
             const messages = orchestration.pendingMessages(agentId)
-            const pending = messages.length && !summary ? '待关联用户消息（仅事实，尚未归属需求）：' + messages.map(message => message.messageId + '：' + message.text.slice(0, 180)).join('；') + '。新委派用 delegation_plan({relation,decisionReason,start:true,...}) 同时关联并派发；直接执行或多条消息分别关联才用 delegation_decide，不能按字数猜测。' : ''
+            const pending = messages.length && !summary ? '待关联用户消息（仅事实，尚未归属需求）：' + messages.map(message => message.messageId + '：' + message.text.slice(0, 180)).join('；') + '。新委派用 delegation_plan({relation,decisionReason,start:true,...}) 同时关联并派发；' + (current.mode === 'strict' ? '多条消息分别关联用 delegation_decide，工具任务必须 delegate，纯文字直接答复。' : '直接执行或多条消息分别关联才用 delegation_decide，不能按字数猜测。') : ''
             const choice = orchestration.decisionCurrent(agentId) ? '主控当前阶段已记录执行方式：' + decision.mode + '。已确认的原委派计划继续监督验收，不因当前阶段 direct 而取消或接管；范围未变无需重复记录。'
               : current.mode === 'auto' ? '当前消息关系或判断尚未登记；auto 普通操作仍可直接执行，请在原有步骤中先用 delegation_decide 登记消息用途和真实理由，不要沿用不再适用的旧说明。纯文字问答不为登记额外续跑。委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run。'
-                : '本需求尚未记录判断或范围已补充；新委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run；直接执行先记录 direct。'
+                : current.mode === 'strict' ? '严格模式下工具任务必须委派，旧 direct 记录仅供历史参考。新委派用 delegation_plan({relation,decisionReason,start:true,...})；纯文字直接答复，不为登记额外续跑。'
+                  : '本需求尚未记录判断或范围已补充；新委派用 delegation_plan({relation,decisionReason,start:true,...})，无需单独 decide/run；直接执行先记录 direct。'
             const checks = orchestration.checkGuidance(agentId)
-            return [DISCIPLINE, pending, choice, checks, missing, unresolved, summary].filter(Boolean).join('\n\n')
+            return [discipline(current), pending, choice, checks, missing, unresolved, summary].filter(Boolean).join('\n\n')
           } catch {
-            return DISCIPLINE
+            return discipline(current)
           }
         },
       })

@@ -1,6 +1,6 @@
 # 结构化任务卡
 
-确定委派值得后，主控通过 `delegation_plan({goal,directory,relation,messageId,decisionReason,start:true,tasks})` 一次记录委派、建立计划并派发。执行方式由直接完成改为委派时，先向用户用一句话说明变化和具体理由，再派发，并使用 `relation:update`。`decisionReason` 说明相对直接完成的具体收益与准备、汇报、验收开销，不能只复述角色分工（非空，最多 500 字），与消息关联一起保存；relation 为 new/continue/update/question，多条待处理消息必须填写真实 messageId；没有待关联消息且已经调用 `delegation_decide` 记录 delegate 时，才可省略 decisionReason。省略 start 或填 false 仍仅保存，不启动代理。一个计划最多 16 个任务，每任务最多 4 个主控验证步骤。同类小改合为一个任务，保留逐项标准和检查；有独立判断、验证或并行价值才拆分，不按文件数拆卡。
+主控决定委派后（strict 下工具任务必须委派），通过 `delegation_plan({goal,directory,relation,messageId,decisionReason,start:true,tasks})` 一次记录委派、建立计划并派发。执行方式由直接完成改为委派时，先向用户用一句话说明变化和具体理由，再派发，并使用 `relation:update`。`decisionReason` 在 auto 模式说明相对直接完成的具体收益与准备、汇报、验收开销，strict 模式说明当前工具任务及分工，不能只复述角色分工（非空，最多 500 字），与消息关联一起保存；relation 为 new/continue/update/question，多条待处理消息必须填写真实 messageId；没有待关联消息且已经调用 `delegation_decide` 记录 delegate 时，才可省略 decisionReason。省略 start 或填 false 仍仅保存，不启动代理。一个计划最多 16 个任务，每任务最多 4 个主控验证步骤。同类小改合为一个任务，保留逐项标准和检查；有独立判断、验证或并行价值才拆分，不按文件数拆卡。
 
 顶层可选 `directory` 指定已存在、可读取的工程目录；相对值基于父会话目录解析，省略则沿用父会话目录。子工程应显式指定，例如 `directory:"./project"`，不能只在 instructions 中写工程位置。writes 会按计划目录保存为绝对路径；outputs 保留所填路径，交付时按同一计划目录解析；子代理也在该目录运行。继续已有计划不能改换目录。
 

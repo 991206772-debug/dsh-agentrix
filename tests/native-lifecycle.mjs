@@ -46,7 +46,8 @@ const decisionRecovery = process.argv.includes('--decision-recovery') || decisio
 const longVerification = process.argv.includes('--long-verification')
 const coordinationConflict = process.argv.includes('--coordination-conflict')
 const ergonomics = process.argv.includes('--ergonomics')
-const roleTools = process.argv.includes('--role-tools') || ergonomics
+const strictMode = process.argv.includes('--strict')
+const roleTools = process.argv.includes('--role-tools') || ergonomics || strictMode
 const dependentStages = process.argv.includes('--dependent-stages') || ergonomics
 const activeNewRequest = process.argv.includes('--active-new-request')
 const earlyEvidence = process.argv.includes('--early-evidence')
@@ -99,6 +100,11 @@ class ScriptedAdapter extends LlmAdapter {
       if (role === 'coordinator') {
         for (const name of ['delegation_report', 'delegation_checkpoint']) assert.ok(!names.includes(name), 'coordinator must not see worker-only tool ' + name)
         assert.ok(names.includes('delegation_plan'))
+        if (strictMode) {
+          assert.ok(names.every(name => name.startsWith('delegation_') && name !== 'delegation_execute'), 'strict advertises only coordinator management and acceptance tools: ' + names.join(','))
+          for (const name of ['read', 'grep', 'glob', 'pwsh', 'web_fetch', 'delegation_execute']) assert.ok(!names.includes(name), 'strict coordinator must not see business tool ' + name)
+          assert.equal((await state()).sessions.find(session => session.sessionId === parent.id)?.delegationAvailability.status, 'available')
+        }
         if (ergonomics) {
           const availability = (await state()).sessions.find(session => session.sessionId === parent.id)?.delegationAvailability
           assert.equal(availability?.status, 'available', 'phase-hidden tools must not report unavailable during actual native requests')
@@ -108,6 +114,7 @@ class ScriptedAdapter extends LlmAdapter {
       } else {
         for (const name of ['delegation_decide', 'delegation_plan', 'delegation_run', 'delegation_status', 'delegation_verify', 'delegation_review', 'delegation_cancel']) assert.ok(!names.includes(name), 'managed child must not see coordinator-only tool ' + name)
         assert.ok(names.includes('delegation_report'))
+        if (strictMode) assert.ok(names.includes('read'), 'strict does not restrict child execution tools')
         if (ergonomics) {
           const properties = request.tools.find(tool => tool.name === 'delegation_report').parameters.properties
           for (const field of ['specVerdict', 'qualityVerdict', 'issues', 'resolutions']) assert.equal(Boolean(properties[field]), role === 'reviewer', 'report fields follow the actual child role')
@@ -447,7 +454,7 @@ try {
   let configStatus
   await routes.get('/dsh-delegation-first/api/config')({ method: 'POST', async *[Symbol.asyncIterator]() {
     // Missing-decision recovery applies only to modes with an explicit operation gate.
-    yield Buffer.from(JSON.stringify({ ...(decisionRecovery ? { mode: 'fixed', threshold: 20 } : {}),
+    yield Buffer.from(JSON.stringify({ ...(strictMode ? { mode: 'strict' } : decisionRecovery ? { mode: 'fixed', threshold: 20 } : {}),
       models: { worker: { provider: 'scripted', model: 'low-worker' }, reviewer: { provider: 'scripted', model: 'high-reviewer' } } }))
   } }, { writeHead(status) { configStatus = status }, end() {} })
   assert.equal(configStatus, 200)

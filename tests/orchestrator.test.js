@@ -4345,22 +4345,24 @@ test('coordinator declared writes reject junction aliases of protected files', a
   await assert.rejects(f.execute('delegation_execute', { tool: 'pwsh', writes: ['app'], arguments: { command: 'create app', workdir: f.directory } }), /重叠/)
 })
 
-test('strict and fixed coordinator commands require classification only when new messages are pending', async () => {
+test('strict rejects coordinator commands after delegation and classification while fixed preserves independent work', async () => {
   for (const mode of ['strict', 'fixed']) {
     const f = await fixture({ mode }); f.parent.session.header.cwd = f.directory
     await f.plan([card('docs', { writes: ['docs/result.md'] })])
     let calls = 0
     f.ctx.tools.execute = async () => { calls++; return { isError: false, value: { exitCode: 0 }, content: [] } }
     const args = { tool: 'pwsh', writes: ['app'], arguments: { command: 'create app', workdir: f.directory } }
-    assert.equal((await f.execute('delegation_execute', args)).passed, true, 'the current delegate decision permits disjoint coordinator work')
+    if (mode === 'strict') await assert.rejects(f.execute('delegation_execute', args), /严格模式/)
+    else assert.equal((await f.execute('delegation_execute', args)).passed, true, 'fixed permits disjoint coordinator work')
     const message = { id: 'pending-local-' + mode, source: { kind: 'user' }, content: [{ type: 'text', text: '请把新增设计材料一并考虑。' }] }
     f.emit('session/event', f.parent, { type: 'user/message', data: message })
     assert.equal(f.engine.decisionCurrent(f.parent.id), false)
-    await assert.rejects(f.execute('delegation_execute', args), /关联|判断/)
-    assert.equal(calls, 1, 'unclassified messages must not reach the native shell in strict or fixed mode')
+    await assert.rejects(f.execute('delegation_execute', args), /严格模式|关联|判断/)
+    assert.equal(calls, mode === 'strict' ? 0 : 1, 'unclassified messages must not reach the native shell')
     await f.execute('delegation_decide', { relation: 'continue', messageId: message.id })
-    assert.equal((await f.execute('delegation_execute', args)).passed, true, 'classification restores the original delegate decision without switching to direct')
-    assert.equal(calls, 2)
+    if (mode === 'strict') await assert.rejects(f.execute('delegation_execute', args), /严格模式/)
+    else assert.equal((await f.execute('delegation_execute', args)).passed, true, 'fixed restores independent work after classification')
+    assert.equal(calls, mode === 'strict' ? 0 : 2)
   }
 })
 

@@ -91,6 +91,74 @@ export async function host(mode) {
 
 const complex = '1. 重构所有模块并且迁移数据\n2. 批量修复接口同时补充测试套件'
 
+test('strict delegates every business tool, keeps coordinator controls and never restricts native children', async () => {
+  const h = await host('strict'); await h.state(); h.turn('查清网页和文件中的问题')
+  try {
+    for (const name of ['read', 'grep', 'glob', 'web_fetch', 'web_search', 'mcp_business_query', 'edit', 'pwsh', 'delegation_execute']) {
+      assert.match(h.call(name), /严格模式[\s\S]*委派/, name)
+      assert.equal(h.call(name, 'child-' + name, { id: 'worker' }), undefined, name + ' stays usable by a native child')
+    }
+    for (const name of ['delegation_plan', 'delegation_status', 'delegation_control', 'delegation_inspect', 'delegation_note']) {
+      assert.equal(h.call(name), undefined, name)
+    }
+    assert.match(h.call('read', 'delegation-check-forged'), /严格模式/, 'a forged verification call ID is not a permit')
+    await assert.rejects(h.definitions.get('delegation_execute').execute({}, { agent: h.agent }), /严格模式/, 'the handler also rejects direct invocation')
+    h.ctx.tools.get = () => undefined
+    h.ctx.tools.schemas = () => []
+    assert.match(h.call('web_fetch'), /严格模式[\s\S]*委派/, 'missing delegation must not silently allow direct work')
+    assert.equal((await h.state()).turnStats.direct, 0)
+  } finally { await h.close() }
+})
+
+test('switching to strict invalidates old direct permission without rewriting history or forcing plain chat', async () => {
+  delete process.env.DSH_DELEGATION_FIRST
+  const h = await host(); await h.state(); h.turn('根据现有上下文解释方案')
+  try {
+    await h.decide()
+    const before = (await h.state()).decision
+    assert.equal((await h.request('POST', { mode: 'strict' })).status, 200)
+    const strict = await h.state()
+    assert.deepEqual(strict.decision, before)
+    assert.equal(strict.decisionCurrent, false)
+    await assert.rejects(h.decide('主控读取后直接完成。', 'update'), /严格模式[\s\S]*delegate/)
+    assert.deepEqual((await h.state()).decision, before)
+    await h.stopping()
+    assert.equal(h.injections.length, 0, 'plain chat does not create a worker or another model turn')
+    assert.equal((await h.request('POST', { mode: 'auto' })).status, 200)
+    assert.equal((await h.state()).decisionCurrent, true)
+    assert.equal(h.call('read'), undefined)
+  } finally { await h.close() }
+})
+
+test('strict tool visibility and prompt agree, and switching modes releases only its own restrictions', async () => {
+  delete process.env.DSH_DELEGATION_FIRST
+  const h = await host(); await h.state()
+  const sections = [], denied = new Set()
+  const tools = ['read', 'grep', 'glob', 'pwsh', 'web_fetch', 'mcp_business_query', 'subagent', ...h.definitions.keys()].map(name => ({ name }))
+  const service = h.ctx.get
+  h.ctx.get = name => name === 'agents' ? { list: () => [h.agent], get: id => id === h.agent.id ? h.agent : undefined } : service(name)
+  h.ctx.tools.view = () => ({ restrictableNames: tools.map(tool => tool.name) })
+  h.ctx.tools.schemas = () => tools.filter(tool => !denied.has(tool.name))
+  h.agent.ctx = { tools: { restrict({ deny }) { deny.forEach(name => denied.add(name)); return () => deny.forEach(name => denied.delete(name)) } },
+    systemPrompt: { section(value) { sections.push(value); return () => {} } } }
+  try {
+    h.emit('agent/created', { agent: h.agent })
+    assert.equal((await h.request('POST', { mode: 'strict' })).status, 200)
+    for (const name of ['read', 'grep', 'glob', 'pwsh', 'web_fetch', 'mcp_business_query', 'delegation_execute']) assert.ok(denied.has(name), name)
+    for (const name of ['delegation_plan', 'delegation_inspect', 'delegation_verify']) assert.ok(!denied.has(name), name)
+    const request = Object.freeze({ sessionId: 'root', tools: Object.freeze(h.ctx.tools.schemas(h.agent)) })
+    h.stream(request, () => request.tools)
+    const prompt = sections.map(section => section.text()).join('\n')
+    assert.match(prompt, /严格模式[\s\S]*工具任务[\s\S]*委派/)
+    assert.doesNotMatch(prompt, /先读；auto|直接执行先记录 direct/)
+    assert.equal((await h.request('POST', { mode: 'fixed', threshold: 2 })).status, 200)
+    for (const name of ['read', 'pwsh', 'web_fetch', 'delegation_execute']) assert.ok(!denied.has(name), name)
+    assert.equal(h.call('web_fetch'), undefined)
+    assert.equal((await h.request('POST', { mode: 'off' })).status, 200)
+    assert.equal(denied.size, 0)
+  } finally { await h.close() }
+})
+
 test('host state distinguishes configured authorization from provider validation and native discovery stays separate', async () => {
   delete process.env.DSH_DELEGATION_FIRST
   const h = await host(); await h.state()

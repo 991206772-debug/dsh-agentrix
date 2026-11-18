@@ -98,12 +98,16 @@ try {
   assert.equal(rejected.payload.issue.retryable, false)
   assert.match(rejected.payload.issue.details, /no adapter registered for provider "retired"/)
   for (const tool of runtime.schemas(parent)) assertSupportedJsonSchema(tool.parameters)
+  for (const name of ['read', 'pwsh', 'edit', 'delegation_execute']) assert.ok(!runtime.schemas(parent).some(tool => tool.name === name), 'strict hides coordinator business tool ' + name)
   let sequence = 0
   const call = async (name, args = {}, agent = parent) => {
     const callId = `native-${++sequence}`
-    const batch = await runtime.execute({ calls: [{ id: callId, name, arguments: JSON.stringify(args) }], agent,
-      signal: new AbortController().signal })
-    return batch.results.find(item => item.callId === callId).result
+    const signal = new AbortController().signal
+    const toolSet = await runtime.resolve({ agent, signal })
+    try {
+      const batch = await runtime.execute({ calls: [{ id: callId, name, arguments: JSON.stringify(args) }], agent, toolSet, signal })
+      return batch.results.find(item => item.callId === callId).result
+    } finally { toolSet.dispose() }
   }
   const checked = async (name, args, agent) => {
     const result = await call(name, args, agent)
@@ -130,6 +134,11 @@ try {
   await mkdir(quotedDirectory)
   const listed = await checked('delegation_inspect', { operation: 'list', directory: quotedDirectory })
   assert.equal(listed.passed, true, JSON.stringify(listed))
+  const releaseExternalRestriction = parent.ctx.tools.restrict({ deny: ['pwsh'] })
+  const restricted = await call('delegation_inspect', { operation: 'list', directory: quotedDirectory })
+  assert.ok(restricted.isError || restricted.value?.passed === false, 'verification never bypasses another plugin restriction')
+  releaseExternalRestriction()
+  assert.ok(!runtime.schemas(parent).some(tool => tool.name === 'pwsh'), 'strict mask stays active after failed verification')
   for (const kind of ['task_plan', 'findings', 'progress']) {
     const note = await checked('delegation_note', { kind, content: kind })
     assert.equal(await readFile(note.path, 'utf8'), kind)
@@ -163,6 +172,7 @@ try {
   assert.equal((await checked('delegation_wait')).nextAction.type, 'verify', 'late waits return current work without UNKNOWN_TOOL or polling')
   const evidence = await checked('delegation_verify', { taskId: 'a', checkIndex: 0 })
   assert.equal(evidence.passed, true)
+  assert.equal((await call('read')).isError, true, 'formal verification does not expose ordinary reads afterward')
   const review = await checked('delegation_review', { taskId: 'a', verdict: 'accept', findings: [{ criterion: 0, finding: '原生工具执行管线返回退出码 0', evidence: [evidence.callId] }] })
   assert.equal(review.status, 'accepted')
   const acceptedArchive = (await checked('delegation_status')).plan.archive.id
