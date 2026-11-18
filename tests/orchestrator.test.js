@@ -400,6 +400,28 @@ test('explicit coordinator review decouples execution complexity without bypassi
   assert.ok(saved.markdown.includes(reason))
 })
 
+test('worker and reviewer activations carry the current contract and the same legacy request without duplicate dispatch', async () => {
+  const f = await fixture()
+  await f.execute('delegation_plan', { directory: f.directory, goal: '核对隔离文件', decisionReason: '执行者核对，独立审查后由主控验收。',
+    tasks: [card('a', { complexity: 'complex' })] })
+  await f.execute('delegation_run')
+  const check = (spec, model) => {
+    assert.equal(spec.parent, f.parent, 'rc.3 reads the live parent from the top level')
+    assert.equal(spec.cwd, f.directory)
+    assert.equal(spec.maxDepth, 1)
+    assert.equal(spec.agentOptions.model, model)
+    assert.ok(spec.prompt[0].text.length > 0)
+    for (const field of ['parent', 'cwd', 'maxDepth', 'agentOptions', 'prompt']) {
+      assert.equal(spec.request[field], spec[field], 'legacy and current contracts must carry the same ' + field)
+    }
+  }
+  check(f.calls[0], 'cheap')
+  await f.complete(0, { stopReason: 'completed', output: [] })
+  check(f.calls[1], 'parent')
+  assert.equal(f.snapshot().tasks[0].audit.status, 'running')
+  assert.equal(f.calls.length, 2, 'one worker and one reviewer are admitted exactly once')
+})
+
 test('explicit independent review remains mandatory for routine execution and preserves the dispatcher model', async () => {
   const f = await fixture()
   await f.plan([card('a', { reviewPolicy: 'independent', reviewReason: '改动虽少但影响权限边界，须独立审查。' })])

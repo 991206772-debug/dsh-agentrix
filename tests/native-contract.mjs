@@ -36,13 +36,15 @@ let releaseAdapter = llm.registerAdapter(['test'], new MetadataOnlyAdapter())
 ctx.provide('subagents', {
   resolveMaxDepth: () => 1,
   async startActivation(spec) {
-    assert.equal(spec.request.parent, parent)
-    assert.equal(spec.request.agentOptions.provider, 'test')
-    assert.ok(['parent', 'changed-parent', 'routine', 'complex'].includes(spec.request.agentOptions.model))
+    assert.equal(spec.parent, parent)
+    assert.equal(spec.agentOptions.provider, 'test')
+    assert.ok(['parent', 'changed-parent', 'routine', 'complex'].includes(spec.agentOptions.model))
+    assert.equal(spec.request.parent, spec.parent, 'legacy hosts receive the same parent')
+    assert.equal(spec.request.agentOptions, spec.agentOptions)
     assert.equal(spec.provider, 'spawn')
     assert.ok(spec.childId)
     children.push(spec)
-    const child = { id: spec.childId, options: spec.request.agentOptions, session: { header: { origin: 'subagent', parentSession: parent.id } } }
+    const child = { id: spec.childId, options: spec.agentOptions, session: { header: { origin: 'subagent', parentSession: parent.id } } }
     child.ctx = createScope(ctx, child).ctx
     childAgents.set(spec.childId, child)
     const output = Promise.withResolvers()

@@ -1748,10 +1748,13 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       startSupervision(task, task.startedAt, timeoutMinutes * 60_000)
       expectedRoutes.set(task.childId, { plan, task, handle, config: clone(resolved) })
       await save()
+      const request = { parent, ...(plan.cwd ? { cwd: plan.cwd } : {}),
+        prompt: [{ type: 'text', text: reviewer ? auditPrompt(plan, owner) : workerPrompt(plan, task) }], agentOptions: clone(resolved),
+        maxDepth: subagents.resolveMaxDepth?.() ?? 1 }
       handle.receipt = await subagents.startActivation({
         provider: 'spawn', childId: task.childId, label: task.title, delivery: task.protocolVersion >= 2 ? 'caller' : 'parent', signal: handle.controller.signal,
-        request: { parent, ...(plan.cwd ? { cwd: plan.cwd } : {}), prompt: [{ type: 'text', text: reviewer ? auditPrompt(plan, owner) : workerPrompt(plan, task) }], agentOptions: clone(resolved),
-          maxDepth: subagents.resolveMaxDepth?.() ?? 1 },
+        // rc.3 reads top-level fields; earlier hosts read the same fields under request.
+        ...request, request,
       })
       // Cancellation during admission must dispose the newly accepted child as well.
       if (handle.controller.signal.aborted || closed) {
