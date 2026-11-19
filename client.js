@@ -269,6 +269,15 @@ window.__ModuleLoader__.load({
       return source?.messageId && source.messageId !== plan?.source?.messageId ? null : plan
     }
 
+    function receiptPrecedesLatestMessage(plan, session) {
+      if (!plan?.completion) return false
+      const latestAt = session?.latestMessage?.at
+      if (latestAt > plan.completion.at) return true
+      // An earlier build could regenerate a stopped receipt when a later turn was aborted.
+      return plan.completion.outcome === 'cancelled' && plan.tasks?.length > 0
+        && plan.tasks.every(task => task.status === 'cancelled' && latestAt > task.stop?.at)
+    }
+
     function planDecisionState(plan, session) {
       if (!plan) return session
       const requestId = plan.source?.messageId, decision = session?.decision
@@ -1211,10 +1220,13 @@ window.__ModuleLoader__.load({
 
       if (!latest || !sessionId) return null
       const data = result.data
-      const plan = currentPlanOf(data, sessionId)
       const session = data?.sessions?.find(item => item.sessionId === sessionId)
+      const savedPlan = currentPlanOf(data, sessionId)
+      const historicalReceipt = receiptPrecedesLatestMessage(savedPlan, session)
+      const plan = historicalReceipt ? null : savedPlan
+      const request = historicalReceipt ? session.latestMessage : session?.source
       const route = plan?.routing ?? session?.route
-      if (!route && !plan && !session?.source && !result.error) return null
+      if (!route && !plan && !request && !result.error) return null
       const tasks = plan?.tasks ?? []
       const done = tasks.filter(task => task.status === 'accepted').length
       const running = tasks.filter(task => ['starting', 'running'].includes(task.status) || ['starting', 'running'].includes(task.audit?.status)).length
@@ -1236,7 +1248,7 @@ window.__ModuleLoader__.load({
       const canOpen = typeof openView === 'function'
       const hint = canOpen ? t('view.details') : t('chat.navigationUnavailable')
       const label = `${summary} · ${hint}`
-      const title = [plan?.goal || session?.source?.text?.slice(0, 120) || plan?.source?.text?.slice(0, 120), summary, route ? fill(t('chat.routeDecision'), { route: routeLabel(t, route) }) : '',
+      const title = [plan?.goal || request?.text?.slice(0, 120) || plan?.source?.text?.slice(0, 120), summary, route ? fill(t('chat.routeDecision'), { route: routeLabel(t, route) }) : '',
         result.error ? t('chat.unavailable') : '', hint].filter(Boolean).join(' · ')
       return h('span', { className: 'ddf-chat-progress', 'data-status': status, role: 'status', title },
         h('style', null, CHAT_PROGRESS_STYLES),
@@ -2024,8 +2036,9 @@ window.__ModuleLoader__.load({
       if (delivery) return h(DeliveryMessage, { t, delivery, openFile })
       if (!latest || !sessionId) return null
       const plan = currentPlanOf(result.data, sessionId)
-      if (!plan) return null
-      if (!plan.completion) return h(ChatPlanNotice, { t, plan, state: result.data?.sessions?.find(item => item.sessionId === sessionId), openView, error: result.error })
+      const state = result.data?.sessions?.find(item => item.sessionId === sessionId)
+      if (!plan || receiptPrecedesLatestMessage(plan, state)) return null
+      if (!plan.completion) return h(ChatPlanNotice, { t, plan, state, openView, error: result.error })
       if (plan.coordinatorIssue && !plan.coordinatorIssue.resolvedAt && !plan.cancelled) return null
       return h(CompletionReceipt, { t, plan, state: result.data })
     }

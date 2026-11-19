@@ -1021,6 +1021,14 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const source = sourceOf(plan.sessionId)
     return !source?.messageId || source.messageId === plan.source?.messageId
   }
+  function receiptPrecedesLatestMessage(plan) {
+    if (!plan.completion) return false
+    const latestAt = decisions.get(plan.sessionId)?.messages?.findLast(message => !message.withdrawn)?.at
+    if (latestAt > plan.completion.at) return true
+    // An earlier build could regenerate a stopped receipt when a later turn was aborted.
+    return plan.completion.outcome === 'cancelled' && plan.tasks.length > 0
+      && plan.tasks.every(task => task.status === 'cancelled' && latestAt > task.stop?.at)
+  }
   function coordinatorEventMatchesPlan(plan, event) {
     return isCurrentPlan(plan) && (!pendingMessages(plan.sessionId).length || event.type === 'turn/end' && event.data?.reason?.kind === 'aborted')
   }
@@ -2008,7 +2016,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         backgroundSave()
       }
     }
-    if (!closed && parentPlan?.protocolVersion >= 2 && !parentPlan.cancelled && coordinatorEventMatchesPlan(parentPlan, event) && planStatus(parentPlan) !== 'accepted' && event?.type === 'turn/end' && ['aborted', 'error'].includes(event.data?.reason?.kind)) {
+    if (!closed && parentPlan?.protocolVersion >= 2 && !parentPlan.cancelled && event?.type === 'turn/end'
+      && ['aborted', 'error'].includes(event.data?.reason?.kind) && coordinatorEventMatchesPlan(parentPlan, event)
+      && planStatus(parentPlan) !== 'accepted' && !receiptPrecedesLatestMessage(parentPlan)) {
       const aborted = event.data.reason.kind === 'aborted'
       const issue = !aborted && modelServiceIssue(event.data.reason.error, 'coordinator', usageTarget(session.id))
       if (issue) parentPlan.coordinatorIssue = issue
@@ -3005,8 +3015,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     archiveWarningFor(sessionId) { return sessionId === null || archiveFailure?.sessionId === sessionId ? archiveFailure?.message ?? null : null },
     summary(sessionId) {
       const plan = plans.get(sessionId)
-      const source = sourceOf(sessionId)
-      if (!plan || source?.messageId && source.messageId !== plan.source?.messageId) return ''
+      if (!plan || !isCurrentPlan(plan) || receiptPrecedesLatestMessage(plan)) return ''
       const failures = targetsOf(plan).filter(task => task.error).map(task => `${task.id}${task.role === 'reviewer' ? '（独立审查）' : ''}：${brief(task.error, 600)}`)
       const paused = !plan.cancelled && !plan.autoDispatch && targetsOf(plan).some(task => ['failed', 'blocked'].includes(task.status))
         ? '自动派单已暂停；处理失败原因后，执行任务用 delegation_control retry，独立审查用 delegation_audit({taskId,message}) 明确重试。' : ''

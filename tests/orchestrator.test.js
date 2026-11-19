@@ -1631,6 +1631,29 @@ test('a completed plan remains archived but is not injected as the current plan 
   assert.equal(f.pending.length, 1)
 })
 
+test('a host-stopped receipt is not injected after a later unregistered message, including after reload', async () => {
+  const source = { messageId: 'model-sources', text: '接入本地网关和账号登录' }
+  const f = await fixture({ source })
+  await f.plan([card('gateway')])
+  await f.execute('delegation_control', { action: 'stop', taskId: 'gateway', reason: '停止排队的网关任务' })
+  await f.emit('session/event', f.parent, { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+  const { completion, archive } = f.snapshot()
+  assert.equal(completion.outcome, 'cancelled')
+  assert.match(completion.reason, /宿主中断/)
+  assert.ok(f.engine.summary(f.parent.id).includes(completion.id), 'the receipt is part of the turn that ended the plan')
+
+  await tick()
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-turn',
+    inserted: [{ id: 'startup-repair', source: { kind: 'user' }, content: [{ type: 'text', text: '启动报错了' }] }] } })
+  await f.reload()
+  assert.equal(f.engine.sourceOf(f.parent.id).messageId, source.messageId)
+  assert.equal(f.engine.pendingMessages(f.parent.id).at(-1).messageId, 'startup-repair')
+  assert.equal(f.engine.summary(f.parent.id), '')
+  await f.emit('session/event', f.parent, { type: 'turn/end', data: { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+  assert.equal(f.snapshot().completion.id, completion.id)
+  assert.equal((await f.engine.readArchive(archive.id)).plan.completion.id, completion.id)
+})
+
 test('completed unregistered history does not block a new delegated request or reappear after reload', async () => {
   const f = await fixture()
   for (let i = 0; i < 43; i++) {

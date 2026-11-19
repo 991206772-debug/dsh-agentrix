@@ -1910,6 +1910,27 @@ test('chat and acceptance read the same program receipt and never label cancella
   } finally { view.close(); f.close() }
 })
 
+test('a stopped receipt stays out of the latest reply even if its timestamp was refreshed after the stop', async () => {
+  const sessionId = 'session-current', source = { messageId: 'model-sources', text: '接入本地网关和账号登录' }
+  const plan = {
+    protocolVersion: 2, sessionId, source, goal: source.text, status: 'cancelled',
+    tasks: [{ id: 'gateway', title: '实现网关接入', status: 'cancelled', stop: { at: 200 }, criteria: [], checks: [], outputs: [] }],
+    completion: { id: 'old-receipt', at: 400, outcome: 'cancelled', accepted: 0, total: 1, evidence: [], deliverables: [],
+      remaining: [{ taskId: 'gateway', title: '实现网关接入', status: 'cancelled', reason: '宿主中断当前执行' }] },
+  }
+  const latestMessage = { messageId: 'startup-repair', text: '启动报错了', at: 300 }
+  const body = { ok: true, sessionId, plans: [plan], sessions: [{ sessionId, source, latestMessage, decisionCurrent: false, pendingMessages: [latestMessage] }] }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone(body) }) })
+  const notice = f.mountNotice(sessionId), action = f.mountAction(sessionId), view = f.mountView(sessionId)
+  try {
+    await notice.flush(); await action.flush(); await view.flush()
+    assert.equal(notice.text(), '')
+    assert.doesNotMatch(action.text(), /已停止|已验收 0\/1/)
+    assert.match(action.nodes('button')[0].props.title, /启动报错了/)
+    assert.match(view.text(), /old-receipt/)
+  } finally { notice.close(); action.close(); view.close(); f.close() }
+})
+
 test('a terminal timeout receipt explains why the flow cannot continue and does not say it is still waiting', async () => {
   const plan = { protocolVersion: 2, sessionId: 'session-current', goal: '修复 DSH 插件注册', status: 'blocked',
     tasks: [{ id: 'a', title: '修复 DSH 插件注册', status: 'failed', attempts: 1, error: '子任务超过 60 分钟，已请求停止', criteria: [], checks: [], outputs: [] }],
