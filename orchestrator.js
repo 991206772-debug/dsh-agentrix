@@ -346,7 +346,55 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   const service = name => ctx.get(name)
   const sourceOf = id => decisions.get(id)?.messages ? decisions.get(id).source : getSource(id) ?? decisions.get(id)?.source ?? null
   const revisionOf = id => decisions.get(id)?.messages ? decisions.get(id).revision : getRevision(id) ?? decisions.get(id)?.revision ?? null
-  const pendingMessages = id => (decisions.get(id)?.messages ?? []).filter(message => !message.resolution && !message.withdrawn && !message.cancellation)
+  const unregistered = message => !message.resolution && !message.withdrawn && !message.cancellation
+  const inputStart = entry => Math.max(0, (entry?.messages ?? []).findIndex(message => message.messageId === entry.requestMessageStartId))
+  const pendingMessages = id => (decisions.get(id)?.messages ?? []).slice(inputStart(decisions.get(id))).filter(unregistered)
+  const historicalMessages = id => (decisions.get(id)?.messages ?? []).slice(0, inputStart(decisions.get(id))).filter(unregistered)
+  function completedInput(entry, queues, seen) {
+    const waiting = new Set(Object.values(queues).flat())
+    let last = null
+    for (const message of entry.messages ?? []) {
+      if ((!seen || seen.has(message.messageId)) && !waiting.has(message.messageId)) last = message.messageId
+      else if (!message.withdrawn) break
+    }
+    return last
+  }
+  // Replay only native lifecycle metadata when an older saved decision has no
+  // input boundary. Never infer message ownership from text or timestamps.
+  function priorCompletedInput(entry, session, messageId) {
+    const queues = { 'next-turn': [], 'next-step': [] }, seen = new Set()
+    let last = null
+    for (const event of session?.snapshotEvents?.() ?? []) {
+      const data = event.data ?? {}, message = data.message ?? data
+      if (event.type === 'agent/inbox/spliced' && Array.isArray(queues[data.target])) {
+        if ((data.inserted ?? []).some(item => item.id === messageId)) break
+        const queue = queues[data.target]
+        queue.splice(data.start ?? queue.length, data.removedCount ?? 0, ...(data.inserted ?? []).map(item => item.id))
+        for (const item of data.inserted ?? []) if (item.source?.kind === 'user') seen.add(item.id)
+      } else if (event.type === 'user/message' && message.source?.kind === 'user') {
+        if (message.id === messageId) break
+        seen.add(message.id)
+      } else if (event.type === 'turn/end' && data.reason?.kind === 'completed') last = completedInput(entry, queues, seen) ?? last
+    }
+    return last
+  }
+  function requestInputStart(entry, session, messageId) {
+    const messages = entry.messages ?? [], sourceIndex = messages.findIndex(message => message.messageId === messageId)
+    let completedIndex = messages.findIndex(message => message.messageId === entry.completedInputMessageId)
+    if (completedIndex < 0 || completedIndex >= sourceIndex) {
+      const completedId = priorCompletedInput(entry, session, messageId)
+      completedIndex = messages.findIndex(message => message.messageId === completedId)
+    }
+    return messages[completedIndex >= 0 && completedIndex < sourceIndex ? completedIndex + 1 : 0]?.messageId
+  }
+  function restoreInputBoundary(sessionId, session) {
+    const entry = decisions.get(sessionId), source = entry?.messages?.find(message => message.messageId === entry.source?.messageId)
+    if (!entry || entry.requestMessageStartId || source?.resolution?.relation !== 'new') return
+    if (typeof session?.snapshotEvents !== 'function' && !entry.completedInputMessageId) return
+    const plan = pendingPlan(sessionId)
+    if (plan && plan.source?.messageId !== source.messageId) return
+    entry.requestMessageStartId = requestInputStart(entry, session, source.messageId)
+  }
   function receiveHuman(sessionId, message, target = 'next-turn') {
     if (!message?.id || message.source?.kind !== 'user') return
     const header = service('sessions')?.get(sessionId)?.header ?? service('agents')?.get(sessionId)?.session?.header ?? {}
@@ -524,6 +572,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     return { sessionId, source: clone(sourceOf(sessionId)), revision: clone(revisionOf(sessionId)),
       decision: decisionFor(sessionId), decisionCurrent: decisionCurrent(sessionId),
       messageResolution: clone(entry?.messageResolution ?? null), pendingMessages: clone(pendingMessages(sessionId)),
+      historicalMessageCount: historicalMessages(sessionId).length,
       requirements: clone(entry?.requirements ?? null),
       planMatchesRequest: Boolean(plan && isCurrentPlan(plan)) }
   }
@@ -606,6 +655,11 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
   }
   function observeInput(session, event) {
     if (!session?.id || getConfig().enabled === false) return
+    if (event.type === 'turn/end' && event.data?.reason?.kind === 'completed') {
+      const entry = decisions.get(session.id)
+      if (entry) { entry.completedInputMessageId = completedInput(entry, inboxes.get(session.id) ?? {}) ?? entry.completedInputMessageId; backgroundSave() }
+      return
+    }
     if (event.type === 'user/message') {
       receiveHuman(session.id, event.data?.message ?? event.data)
       return
@@ -1082,7 +1136,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     }
   }
   disposers.push(ctx.on('agent/created', async ({ agent }) => {
-    await ready; refreshCoordinationTools(agent)
+    await ready; restoreInputBoundary(agent.id, agent.session); refreshCoordinationTools(agent)
     const plan = plans.get(agent.id)
     if (plan) for (const task of targetsOf(plan)) if (task.resultNotification && task.resultNotification.status !== 'delivered') scheduleResultNotification(plan, task)
   }, { global: true }))
@@ -1175,7 +1229,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
       usageLedger.restore(stored.requestUsage)
       for (const entry of stored.decisions ?? []) {
         if (typeof entry.sessionId === 'string' && (entry.source?.messageId || Array.isArray(entry.messages)) &&
-          (!entry.decision || ['direct', 'delegate'].includes(entry.decision.mode) && typeof entry.decision.reason === 'string')) decisions.set(entry.sessionId, entry)
+          (!entry.decision || ['direct', 'delegate'].includes(entry.decision.mode) && typeof entry.decision.reason === 'string')) {
+          decisions.set(entry.sessionId, entry)
+        }
       }
       for (const plan of stored.plans) {
         const usage = usageLedger.request(plan.sessionId)
@@ -1209,6 +1265,8 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
         }
       }
       for (const plan of stored.plans) plans.set(plan.sessionId, plan)
+      for (const entry of decisions.values()) restoreInputBoundary(entry.sessionId,
+        service('sessions')?.get(entry.sessionId) ?? service('agents')?.get(entry.sessionId)?.session)
       if (plans.size) await save()
       for (const plan of plans.values()) for (const task of targetsOf(plan)) if (task.resultNotification && task.resultNotification.status !== 'delivered') scheduleResultNotification(plan, task)
     } catch (error) {
@@ -1301,6 +1359,9 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     const decision = changes ? { mode: args.mode, reason, requestId: source.messageId, revisionId: revision.messageId, at, model } : entry.decision ?? null
     const resolution = { messageId: message?.messageId ?? revision.messageId, requestId: source.messageId, relation, at, model, ...(reason ? { reason } : {}) }
     const next = { ...entry, source: clone(source), revision: clone(revision), decision, messageResolution: resolution }
+    if (relation === 'new' && message && (!pendingPlan(parent.id) || plan.source?.messageId === source.messageId)) {
+      next.requestMessageStartId = requestInputStart(entry, parent.session, source.messageId)
+    }
     if (relation === 'new' && entry.source?.messageId !== source.messageId) delete next.requirements
     if (message && next.argumentRecovery?.requestId === message.messageId) next.argumentRecovery = { ...next.argumentRecovery, requestId: source.messageId }
     if (message) {
@@ -2905,7 +2966,7 @@ export function createOrchestrator({ ctx, file, getConfig, getSource = () => nul
     isToolHiddenByPolicy(sessionId, name) {
       return ['delegation_verify', 'delegation_review'].includes(name) && Boolean(coordinationRestrictions.get(sessionId)?.names.includes(name))
     },
-    pendingMessages: id => clone(pendingMessages(id)),
+    pendingMessages: id => clone(pendingMessages(id)), historicalMessages: id => clone(historicalMessages(id)),
     requestContext: sessionId => clone(decisions.get(sessionId) ?? null), supervisionPolicy: SUPERVISION_POLICY,
     requestUsage(sessionId) { const entry = usageFor(sessionId); return entry ? clone(entry) : null },
     requestUsages(sessionId = null) { return usageLedger.snapshot().filter(entry => sessionId === null || entry.sessionId === sessionId) },

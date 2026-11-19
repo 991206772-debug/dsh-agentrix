@@ -749,6 +749,7 @@ window.__ModuleLoader__.load({
       'progress.overview': '概览', 'progress.messages': '消息记录', 'progress.decisions': '判断记录',
       'progress.mode': '执行方式', 'progress.recordedAt': '记录时间', 'progress.unconfirmed': '待确认',
       'progress.noMessages': '暂无已保留的消息记录', 'progress.supplement': '补充消息', 'progress.resolved': '已登记',
+      'progress.historicalMessages': '历史未登记消息 · 不影响当前派单', 'progress.historicalUnregistered': '历史未登记',
       'request.latest': '最新指令', 'request.original': '原始需求',
       'decision.currentDirect': '当前由主控直接处理；当前阶段的执行判断尚未更新。',
       'decision.plan': '建计划时的判断', 'decision.concurrent': '主控直接处理当前工作，原委派任务继续保留，仍须监督和验收。',
@@ -793,6 +794,7 @@ window.__ModuleLoader__.load({
       'progress.overview': 'Overview', 'progress.messages': 'Messages', 'progress.decisions': 'Decisions',
       'progress.mode': 'Execution mode', 'progress.recordedAt': 'Recorded at', 'progress.unconfirmed': 'Unconfirmed',
       'progress.noMessages': 'No retained messages', 'progress.supplement': 'Additional message', 'progress.resolved': 'Recorded',
+      'progress.historicalMessages': 'Unregistered history · does not block current dispatch', 'progress.historicalUnregistered': 'Unregistered history',
       'request.latest': 'Latest instruction', 'request.original': 'Original request',
       'decision.currentDirect': 'The coordinator is now handling work directly; the execution decision for this stage has not been updated.',
       'decision.plan': 'Decision when planning', 'decision.concurrent': 'The coordinator handles the current work directly. Existing delegated tasks remain in place and still require supervision and acceptance.',
@@ -2151,7 +2153,7 @@ window.__ModuleLoader__.load({
     }
 
     function ProgressMessages({ t, state, plan }) {
-      const pending = state?.pendingMessages ?? [], records = new Map()
+      const pending = state?.pendingMessages ?? [], historical = state?.historicalMessages ?? [], records = new Map()
       const add = (message, label) => {
         if (!message?.text) return
         const key = message.messageId || label, previous = records.get(key)
@@ -2160,12 +2162,15 @@ window.__ModuleLoader__.load({
       add(state?.source ?? plan?.source, 'request.original')
       for (const message of pending) add(message, 'progress.supplement')
       add(state?.latestMessage, state?.latestMessage?.messageId === state?.source?.messageId ? 'request.original' : 'request.latest')
-      return records.size ? h('ol', { className: 'ddf-progress-records' }, ...[...records.values()].reverse().map(message => h('li', {
+      const rows = messages => h('ol', { className: 'ddf-progress-records' }, ...messages.map(message => h('li', {
         key: message.key, 'data-message-id': message.messageId,
       }, h('div', { className: 'ddf-record-heading' }, h('strong', null, t(message.label)),
-        h('span', { className: 'ddf-record-state', 'data-pending': message.pending }, t(message.pending ? 'relation.messages' : 'progress.resolved')),
+        h('span', { className: 'ddf-record-state', 'data-pending': message.pending }, t(message.historical ? 'progress.historicalUnregistered' : message.pending ? 'relation.messages' : 'progress.resolved')),
         Number.isFinite(message.at) ? h('time', { dateTime: new Date(message.at).toISOString() }, new Date(message.at).toLocaleTimeString()) : null),
-      h('p', null, message.text)))) : h('p', { className: 'ddf-progress-empty' }, t('progress.noMessages'))
+      h('p', null, message.text))))
+      return h('div', null, records.size ? rows([...records.values()].reverse()) : h('p', { className: 'ddf-progress-empty' }, t('progress.noMessages')),
+        historical.length ? h('details', { 'data-historical-messages': true }, h('summary', null, t('progress.historicalMessages') + ' · ' + historical.length),
+          rows(historical.slice().reverse().map(message => ({ ...message, key: message.messageId, label: 'progress.historicalUnregistered', historical: true, pending: false })))) : null)
     }
 
     function ProgressDecisionRecords({ t, state, plan, previousPlan }) {

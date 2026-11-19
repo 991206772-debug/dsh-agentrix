@@ -47,6 +47,7 @@ const longVerification = process.argv.includes('--long-verification')
 const coordinationConflict = process.argv.includes('--coordination-conflict')
 const ergonomics = process.argv.includes('--ergonomics')
 const strictMode = process.argv.includes('--strict')
+const historicalInput = process.argv.includes('--historical-input')
 const roleTools = process.argv.includes('--role-tools') || ergonomics || strictMode
 const dependentStages = process.argv.includes('--dependent-stages') || ergonomics
 const activeNewRequest = process.argv.includes('--active-new-request')
@@ -54,6 +55,7 @@ const earlyEvidence = process.argv.includes('--early-evidence')
 const progressReview = process.argv.includes('--progress-review')
 const progressCorrection = '已有自检证据，核对剩余要求后及时提交报告，不重复校准同一指标。'
 let followingRequest = false
+let seedingHistory = false, currentRequestId
 let inboxPhase = 0
 const workerGate = Promise.withResolvers()
 const conflictExecutions = new Map(), releases = new Map()
@@ -93,6 +95,12 @@ class ScriptedAdapter extends LlmAdapter {
       reasoning: { efforts: [{ id: 'max', name: 'Max' }, { id: 'high', name: 'High' }, { id: 'low', name: 'Low' }], defaultEffort: nativeDefault ? 'max' : 'high' } } : info
   }
   async *stream(request) {
+    if (seedingHistory && request.sessionId === parent?.id) {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '已答复这条历史聊天。' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
     const role = request.sessionId === parent?.id ? 'coordinator' : request.model === 'low-worker' ? 'worker' : 'reviewer'
     if (dependentStages && role === 'coordinator') parentWaiting = false
     if (roleTools) {
@@ -159,7 +167,7 @@ class ScriptedAdapter extends LlmAdapter {
       }
       if (followingRequest) {
         const system = JSON.stringify(request.messages.filter(message => message.role === 'system'))
-        assert.ok(system.includes('## Agentrix') && system.includes('delegation_decide') && system.includes('stop仅取消且须原因'), 'the native coordinator discipline is present')
+        assert.ok(system.includes('## Agentrix') && system.includes('delegation_decide') && system.includes('stop须取消理由'), 'the native coordinator discipline is present')
         if (messageInbox) {
           let answer
           if (inboxPhase === 0) answer = tool('delegation_decide', { relation: 'new', mode: 'direct', reason: '第二项需求直接核对答复。' })
@@ -264,6 +272,7 @@ class ScriptedAdapter extends LlmAdapter {
         else block = { type: 'text', text: plan.completion ? '原任务已验收，新便签也已核对。' : '等待原任务的报告与独立审查通知。' }
       }
       else if (!task) block = tool('delegation_plan', { goal: '高模型规划、低模型执行、高模型审查与验收', decisionReason: '核对工作由执行模型完成，主控保留独立上下文做验证和验收。',
+        ...(historicalInput ? { relation: 'new', messageId: currentRequestId } : {}),
         ...(requirementContract ? { directory, requirements: [{ id: 'R1', text: '文件包含 verified', evidence: 'execution' }] } : {}),
         tasks: [{ id: 'a', title: '检查隔离产物', instructions: coordinationConflict ? '读取 input.txt 后生成 result.txt 并正式报告' : '只读取隔离文件并正式报告', scope: '隔离目录', outputs: [deliverablePath], writes: coordinationConflict || activeNewRequest ? [deliverablePath] : [], complexity: 'complex', ...(coordinatorReview ? { reviewPolicy: 'coordinator', reviewReason: '隔离只读核对，由主控验证验收即可。' } : {}), criteria: ['文件包含 verified'],
           ...(requirementContract ? { requirementIds: ['R1'] } : {}),
@@ -462,7 +471,20 @@ try {
     ...(event.type === 'request/header' ? { header: event.data.header } : {}) }), { global: true })
   handle = await ctx.agents.create({ sessionId: 'root', meta: { cwd: directory }, agentOptions: { provider: 'scripted', model: 'coordinator' } })
   parent = handle.agent
-  parent.followup(createUserMessage({ content: [{ type: 'text', text: '执行隔离任务并验证' }], source: { kind: 'user' } }))
+  if (historicalInput) {
+    seedingHistory = true
+    for (let i = 0; i < 43; i++) {
+      const ended = events.filter(event => event.id === 'root' && event.type === 'turn/end').length
+      parent.followup(createUserMessage({ content: [{ type: 'text', text: '历史问答 ' + i }], source: { kind: 'user' } }))
+      await until(() => events.filter(event => event.id === 'root' && event.type === 'turn/end').length > ended, 'historical chat completed ' + i)
+    }
+    seedingHistory = false
+    parentWaiting = false
+    assert.equal((await state()).sessions[0].pendingMessages.length, 43, 'history is not silently registered before a new request')
+  }
+  const request = createUserMessage({ content: [{ type: 'text', text: '执行隔离任务并验证' }], source: { kind: 'user' } })
+  currentRequestId = request.id
+  parent.followup(request)
   if (activeNewRequest) {
     await until(() => parentWaiting, 'original demand running')
     const original = (await state()).plans[0].source.messageId
@@ -530,7 +552,7 @@ try {
     }
     workerGate.resolve()
   }
-  await until(async () => activeNewRequest ? (await state()).plans[0]?.completion?.outcome === 'completed' : events.some(event => event.id === 'root' && event.type === 'turn/end'), 'coordinator completion')
+  await until(async () => activeNewRequest || historicalInput ? (await state()).plans[0]?.completion?.outcome === 'completed' : events.some(event => event.id === 'root' && event.type === 'turn/end'), 'coordinator completion')
   if (cancelSupplement) await until(async () => {
     const stopped = (await state()).plans[0]
     return stopped.completion?.outcome === 'blocked' && stopped.tasks[0].release?.status === 'released'
@@ -639,6 +661,15 @@ try {
     console.log('PASS: native coordinator QUOTA error preserves returned worker and review reports without automatic redispatch or fabricated acceptance')
   } else {
   assert.equal(plan.completion?.outcome, 'completed', JSON.stringify(plan))
+  if (historicalInput) {
+    const current = (await state()).sessions[0]
+    assert.equal(current.historicalMessages.length, 43)
+    assert.deepEqual(current.pendingMessages, [])
+    assert.equal(current.decisionCurrent, true)
+    assert.equal(plan.source.messageId, currentRequestId)
+    assert.equal(new Set(requests.filter(request => request.role === 'worker').map(request => request.sessionId)).size, 1)
+    console.log('PASS: 43 completed unregistered chats stay historical; the explicit new request dispatches once, receives its supplement and completes native acceptance')
+  }
   if (requirementContract) {
     assert.equal(plan.completion.scope, 'plan')
     assert.equal(plan.completion.coverage.status, 'verified')

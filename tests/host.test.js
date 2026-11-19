@@ -159,6 +159,31 @@ test('strict tool visibility and prompt agree, and switching modes releases only
   } finally { await h.close() }
 })
 
+test('strict state separates completed unregistered history from current pending input and never exposes direct work', async () => {
+  const h = await host('strict'); await h.state()
+  try {
+    for (let i = 0; i < 43; i++) {
+      h.turn('以前已回复的聊天 ' + i, 'history-' + i)
+      h.emit('session/event', { id: 'root' }, { type: 'agent/inbox/spliced', data: { target: 'next-turn', start: 0, removedCount: 1, inserted: [] } })
+      h.emit('session/event', { id: 'root' }, { type: 'turn/end', data: { turn: i + 1, reason: { kind: 'completed' } } })
+    }
+    h.turn('开始委派核对当前文件', 'current-input')
+    await h.definitions.get('delegation_decide').execute({ relation: 'new', messageId: 'current-input', mode: 'delegate', reason: '当前核对工作交执行者。' }, { agent: h.agent })
+    const state = await h.state()
+    assert.equal(state.decisionCurrent, true)
+    assert.deepEqual(state.pendingMessages, [])
+    assert.equal(state.historicalMessages.length, 43)
+    assert.ok(state.historicalMessages.every(message => !message.resolution))
+    const status = await h.definitions.get('delegation_status').execute({}, { agent: h.agent })
+    assert.equal(status.context.historicalMessageCount, 43)
+    assert.equal(status.nextAction.type, 'handle_request')
+    assert.match(h.call('edit'), /严格模式/)
+    h.turn('补充当前需求', 'extra-current')
+    assert.equal((await h.state()).decisionCurrent, false)
+    assert.deepEqual((await h.state()).pendingMessages.map(message => message.messageId), ['extra-current'])
+  } finally { await h.close() }
+})
+
 test('host state distinguishes configured authorization from provider validation and native discovery stays separate', async () => {
   delete process.env.DSH_DELEGATION_FIRST
   const h = await host(); await h.state()

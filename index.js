@@ -849,6 +849,7 @@ export function apply(ctx) {
         })(),
         requestBindingVersion: 2,
         pendingMessages: orchestration.pendingMessages(id),
+        historicalMessages: orchestration.historicalMessages(id),
         messageResolution: orchestration.requestContext(id)?.messageResolution ?? null,
         argumentRecovery: orchestration.requestContext(id)?.argumentRecovery ?? null,
         role: state.isCoordinator ? 'coordinator' : 'worker',

@@ -1631,6 +1631,104 @@ test('a completed plan remains archived but is not injected as the current plan 
   assert.equal(f.pending.length, 1)
 })
 
+test('completed unregistered history does not block a new delegated request or reappear after reload', async () => {
+  const f = await fixture()
+  for (let i = 0; i < 43; i++) {
+    f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'old-' + i, source: { kind: 'user' }, content: '以前已答复的聊天 ' + i } })
+    f.emit('session/event', f.parent, { type: 'turn/end', data: { turn: i + 1, reason: { kind: 'completed' } } })
+  }
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'new-work', source: { kind: 'user' }, content: '现在委派核对指定文件' } })
+  const result = await f.execute('delegation_plan', { goal: '核对当前文件', relation: 'new', messageId: 'new-work',
+    decisionReason: '独立核对工作由执行者完成，主控验证。', start: true, tasks: [card('check')] })
+  assert.equal(result.plan.tasks[0].status, 'running')
+  assert.equal(f.calls.length, 1)
+  assert.equal(result.context.decisionCurrent, true)
+  assert.deepEqual(result.context.pendingMessages, [])
+  assert.equal(result.context.historicalMessageCount, 43)
+  assert.equal(f.engine.requestContext(f.parent.id).messages.filter(message => !message.resolution).length, 43, 'history is retained without invented decisions')
+  await f.reload()
+  const restored = await f.execute('delegation_status')
+  assert.equal(restored.context.decisionCurrent, true)
+  assert.deepEqual(restored.context.pendingMessages, [])
+  assert.equal(restored.context.historicalMessageCount, 43)
+  await f.execute('delegation_run')
+  assert.equal(f.calls.length, 2, 'only the interrupted original task resumes')
+})
+
+test('a new request boundary preserves sibling input and later supplements instead of selecting the last message', async () => {
+  const f = await fixture()
+  const input = id => f.emit('session/event', f.parent, { type: 'user/message', data: { id, source: { kind: 'user' }, content: id } })
+  input('old-chat')
+  f.emit('session/event', f.parent, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  input('first-current'); input('second-current')
+  await f.execute('delegation_decide', { relation: 'new', messageId: 'second-current', mode: 'delegate', reason: '本轮核对工作交执行者。' })
+  assert.deepEqual(f.engine.pendingMessages(f.parent.id).map(message => message.messageId), ['first-current'])
+  assert.equal(f.engine.decisionCurrent(f.parent.id), false)
+  await f.execute('delegation_decide', { relation: 'continue', messageId: 'first-current' })
+  await f.execute('delegation_plan', { goal: '核对文件', tasks: [card('check')] })
+  input('extra-a'); input('extra-b')
+  await f.execute('delegation_decide', { relation: 'continue', messageId: 'extra-b' })
+  await assert.rejects(f.execute('delegation_run'), /关联/)
+  await f.reload()
+  assert.deepEqual(f.engine.pendingMessages(f.parent.id).map(message => message.messageId), ['extra-a'])
+  await f.execute('delegation_decide', { relation: 'continue', messageId: 'extra-a' })
+  await f.execute('delegation_run')
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.engine.historicalMessages(f.parent.id)[0].messageId, 'old-chat')
+})
+
+test('legacy saved decisions recover the input boundary from completed native turns without inventing resolutions', async () => {
+  const f = await fixture()
+  const emit = (type, data) => { f.parent.session.appended.push({ type, data }); f.emit('session/event', f.parent, { type, data }) }
+  for (let i = 0; i < 43; i++) {
+    emit('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [{ id: 'legacy-' + i, source: { kind: 'user' }, content: '历史聊天 ' + i }] })
+    emit('turn/start', { turn: i + 1 })
+    emit('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+    emit('turn/end', { turn: i + 1, reason: { kind: 'completed' } })
+  }
+  emit('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [{ id: 'legacy-current', source: { kind: 'user' }, content: '当前核对需求' }] })
+  emit('turn/start', { turn: 44 })
+  emit('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+  await f.execute('delegation_plan', { goal: '核对当前文件', relation: 'new', messageId: 'legacy-current',
+    decisionReason: '执行者核对，主控实际验收。', tasks: [card('legacy-check')] })
+  const get = f.ctx.get
+  f.ctx.get = name => name === 'agents' ? { get: () => undefined, list: () => [] } : get(name)
+  await f.reload(async file => {
+    const stored = JSON.parse(await readFile(file, 'utf8'))
+    for (const entry of stored.decisions) { delete entry.requestMessageStartId; delete entry.completedInputMessageId }
+    stored.plans[0].decision = null
+    await writeFile(file, JSON.stringify(stored))
+  })
+  f.ctx.get = get
+  await f.emit('agent/created', { agent: f.parent })
+  const result = await f.execute('delegation_status')
+  assert.equal(result.context.historicalMessageCount, 43)
+  assert.deepEqual(result.context.pendingMessages, [])
+  assert.equal(result.context.decisionCurrent, true)
+  await f.execute('delegation_decide', { relation: 'new', messageId: 'legacy-current', mode: 'delegate', reason: '确认原卡片的委派方式。' })
+  await f.execute('delegation_run')
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.engine.requestContext(f.parent.id).messages.filter(message => message.resolution).length, 1)
+})
+
+test('a completed turn cannot retire a queued message or an input from an unfinished managed request', async () => {
+  const f = await fixture()
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'answered', source: { kind: 'user' }, content: '已答复' } })
+  f.emit('session/event', f.parent, { type: 'agent/inbox/spliced', data: { target: 'next-turn', inserted: [{ id: 'queued', source: { kind: 'user' }, content: '还未送达的要求' }] } })
+  f.emit('session/event', f.parent, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'latest', source: { kind: 'user' }, content: '新的要求' } })
+  await f.execute('delegation_decide', { relation: 'new', messageId: 'latest', mode: 'delegate', reason: '当前需求由执行者核对。' })
+  assert.deepEqual(f.engine.pendingMessages(f.parent.id).map(message => message.messageId), ['queued'])
+  await f.execute('delegation_decide', { relation: 'continue', messageId: 'queued' })
+  await f.execute('delegation_plan', { goal: '核对文件', tasks: [card('check')] }); await f.execute('delegation_run')
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'unfinished-extra', source: { kind: 'user' }, content: '原任务增加要求' } })
+  f.emit('session/event', f.parent, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+  f.emit('session/event', f.parent, { type: 'user/message', data: { id: 'other-request', source: { kind: 'user' }, content: '另外的新任务' } })
+  await f.execute('delegation_decide', { relation: 'new', messageId: 'other-request', mode: 'delegate', reason: '新增独立需求。' })
+  assert.deepEqual(f.engine.pendingMessages(f.parent.id).map(message => message.messageId), ['unfinished-extra'])
+  assert.equal(f.calls.length, 1)
+})
+
 test('the coordinator can recover its own pending messages without creating a plan', async () => {
   const f = await fixture()
   for (const [id, text] of [['writing-request', '按评审写出完整文章'], ['writing-continue', '继续']]) {

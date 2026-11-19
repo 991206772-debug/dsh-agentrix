@@ -1411,6 +1411,29 @@ test('progress tabs separate the overview, message list and decision records and
   } finally { dock.close(); f.close() }
 })
 
+test('historical unregistered messages remain readable and collapsed without becoming current pending work', async () => {
+  const row = { sessionId: 'session-current', source: { messageId: 'current', text: '当前核对需求' },
+    latestMessage: { messageId: 'current', text: '当前核对需求' }, pendingMessages: [],
+    historicalMessages: [{ messageId: 'old', text: '以前已回复的聊天，尚未登记' }],
+    decision: { mode: 'direct', reason: '当前直接核对', at: 100 }, decisionCurrent: true,
+    execution: { running: true, toolCalls: 1, model: { model: 'fixture/main' }, activity: { kind: 'waiting_model_response' } } }
+  const f = await sidebarFixture(undefined, { fetchState: async () => ({ ok: true, json: async () => structuredClone({ ok: true,
+    sessionId: row.sessionId, plans: [], sessions: [row] }) }) })
+  const dock = f.mountDock(row.sessionId)
+  try {
+    await dock.flush()
+    const tab = dock.nodes('button').find(node => node.props.role === 'tab' && flatten(node).startsWith('消息记录'))
+    tab.props.onClick(); await dock.flush()
+    const history = dock.nodes('details').find(node => node.props['data-historical-messages'])
+    assert.ok(history)
+    assert.ok(!history.props.open, 'old records are collapsed by default')
+    assert.match(flatten(history), /历史未登记.*不影响当前派单.*以前已回复/s)
+    assert.doesNotMatch(flatten(history), /已收到，待主控登记|已登记/)
+    assert.equal(dock.nodes('li').filter(node => node.props['data-message-id'] === 'old').length, 1)
+    assert.doesNotMatch(flatten(tab), /1/, 'history does not count as pending input')
+  } finally { dock.close(); f.close() }
+})
+
 test('execution modes have distinct visual labels and unresolved new input never makes an old explanation current', async () => {
   const row = { sessionId: 'session-current', source: { messageId: 'review', text: '评审工作台' },
     decision: { mode: 'direct', reason: '读取材料后直接评审。', at: 100 }, decisionCurrent: false,
